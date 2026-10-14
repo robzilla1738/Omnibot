@@ -16,7 +16,6 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
-  Share2,
   Trash2,
   Users,
   X,
@@ -133,7 +132,6 @@ export function InspectorDrawer({
   const [workspaceInput, setWorkspaceInput] = useState(
     preferences.workspaceRoot
   );
-  const [shareCopied, setShareCopied] = useState(false);
 
   useEffect(() => {
     setTitleDraft(chat.title);
@@ -203,18 +201,6 @@ export function InspectorDrawer({
     setShowNewRoutineForm(false);
   };
 
-  const handleShareTranscript = async () => {
-    const md = chat.messages
-      .map(
-        (m) =>
-          `### ${m.role === "user" ? "You" : `@${m.authorName || "Bot"} (${m.cliDriver || "cli"})`}\n\n${m.text}`
-      )
-      .join("\n\n---\n\n");
-    await navigator.clipboard.writeText(md || chat.title);
-    setShareCopied(true);
-    setTimeout(() => setShareCopied(false), 1800);
-  };
-
   const installedHarnesses = harnesses.filter((h) => h.installed);
   const activeProjectName =
     projects.find((p) => p.path === preferences.workspaceRoot)?.name ||
@@ -235,23 +221,11 @@ export function InspectorDrawer({
           open ? "translate-x-0" : "translate-x-6"
         }`}
       >
-        {/* Top Share + Close Controls */}
+        {/* Top Close Control */}
         <div
           data-tauri-drag-region
           className="h-16 pt-2 px-4 flex items-center justify-end gap-2.5 shrink-0"
         >
-          <button
-            type="button"
-            onClick={handleShareTranscript}
-            title="Copy markdown transcript to clipboard"
-            className="w-10 h-10 rounded-full bg-[#1f1f1f] hover:bg-[#272727] border border-white/[0.06] flex items-center justify-center text-zinc-200 hover:text-white active:scale-95 transition-colors"
-          >
-            {shareCopied ? (
-              <Check className="w-[17px] h-[17px] text-emerald-400" />
-            ) : (
-              <Share2 className="w-[17px] h-[17px]" />
-            )}
-          </button>
           <button
             type="button"
             onClick={onClose}
