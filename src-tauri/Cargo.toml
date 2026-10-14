@@ -29,7 +29,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 futures-util = "0.3"
 dirs = "5"
 uuid = { version = "1", features = ["v4"] }
-shlex = "1"
+shlex = "2"
 chrono = "0.4"
 libc = "0.2"
 
