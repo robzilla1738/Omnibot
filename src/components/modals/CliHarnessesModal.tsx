@@ -2,6 +2,7 @@ import {
   Activity,
   ArrowUpRight,
   Check,
+  Plus,
   RefreshCw,
   Search,
   X,
@@ -316,14 +317,15 @@ export function CliHarnessesModal({
               </div>
               <div className="grid grid-cols-2 gap-x-8 gap-y-4">
                 {filteredHarnesses.map((h) => {
-                  const matchingBot = bots.find(
+                  const providerBots = bots.filter(
                     (b) => !b.isPrimary && b.cliDriver === h.kind
                   );
+                  const matchingBot = providerBots[0];
                   const testRes = testResults[h.kind];
                   return (
                     <div
                       key={h.id}
-                      className="flex items-center justify-between gap-3.5 py-1"
+                      className="flex items-center justify-between gap-3 py-1"
                     >
                       <div className="flex items-center gap-3.5 min-w-0 flex-1">
                         {matchingBot ? (
@@ -340,8 +342,13 @@ export function CliHarnessesModal({
                             <span className="text-[14px] font-semibold text-zinc-100 truncate">
                               {h.name}
                             </span>
+                            {providerBots.length > 1 && (
+                              <span className="px-1.5 py-0.5 rounded-full bg-white/[0.07] text-[10.5px] font-medium text-cyan-300 shrink-0">
+                                {providerBots.length} Bots
+                              </span>
+                            )}
                             {h.version && (
-                              <span className="text-[11px] font-mono text-zinc-400 truncate max-w-[110px]">
+                              <span className="text-[11px] font-mono text-zinc-400 truncate max-w-[90px]">
                                 {h.version.split(" ")[0]}
                               </span>
                             )}
@@ -355,7 +362,9 @@ export function CliHarnessesModal({
                                 ✓ {testRes.latencyMs}ms · {h.binaryPath}
                               </span>
                             ) : h.installed ? (
-                              h.binaryPath
+                              providerBots.length > 0
+                                ? providerBots.map((b) => `@${b.name}`).join(", ")
+                                : h.binaryPath
                             ) : (
                               `Not found · ${h.installHint}`
                             )}
@@ -376,10 +385,31 @@ export function CliHarnessesModal({
                           <button
                             type="button"
                             onClick={() => {
+                              const nextIdx = providerBots.length + 1;
+                              onCreateBotFromTemplate({
+                                name: `${h.name.split(" ")[0]} ${nextIdx}`,
+                                roleTitle: `${h.name} Specialist #${nextIdx}`,
+                                description: `Additional Bot instance running on ${h.name} (${h.binaryName})`,
+                                shape:
+                                  nextIdx % 2 === 0 ? "crystal" : "shield",
+                                color:
+                                  nextIdx % 2 === 0 ? "violet" : "cyan",
+                                cliDriver: h.kind,
+                                systemPrompt: `You are @${h.name.split(" ")[0]}${nextIdx}, an independent Bot powered by the local \`${h.binaryName}\` CLI. Collaborate with your fellow Bots and provide independent analysis and implementation.`,
+                              });
+                            }}
+                            title={`Spawn another Bot running on ${h.name}`}
+                            className="p-2 rounded-full bg-[#1f1f1f] hover:bg-[#272727] border border-white/[0.06] text-zinc-300 hover:text-white active:scale-95 transition-colors"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
                               onSelectBotDirectChat(matchingBot);
                               onClose();
                             }}
-                            className="px-3.5 py-1.5 rounded-full bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-400/30 text-xs font-medium text-emerald-300 active:scale-95 transition-colors flex items-center gap-1.5"
+                            className="px-3 py-1.5 rounded-full bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-400/30 text-xs font-medium text-emerald-300 active:scale-95 transition-colors flex items-center gap-1"
                           >
                             <Check className="w-3.5 h-3.5" />
                             <span>Chat</span>

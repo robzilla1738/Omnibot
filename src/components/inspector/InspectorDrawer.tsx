@@ -75,6 +75,9 @@ export interface InspectorDrawerProps {
   onClearChat: (chatId: string) => Promise<void>;
   onToggleBotInChat: (botId: string) => Promise<void>;
   onUpsertBot: (bot: BotProfile) => Promise<void>;
+  onDeleteBot?: (botId: string) => Promise<void>;
+  onUpsertProject?: (ws: WorkspaceEntry) => Promise<void>;
+  openStudioSignal?: number;
   onUpdatePreferences: (next: OmniPreferences) => Promise<void>;
   onUpsertRoutine: (routine: RoutineEntry) => Promise<void>;
   onRunRoutineNow: (routine: RoutineEntry) => Promise<void>;
@@ -102,6 +105,9 @@ export function InspectorDrawer({
   onClearChat,
   onToggleBotInChat,
   onUpsertBot,
+  onDeleteBot,
+  onUpsertProject,
+  openStudioSignal,
   onUpdatePreferences,
   onUpsertRoutine,
   onRunRoutineNow,
@@ -114,6 +120,19 @@ export function InspectorDrawer({
   const [titleDraft, setTitleDraft] = useState(chat.title);
   const [customizeAvatarOpen, setCustomizeAvatarOpen] = useState(false);
   const [swarmMembersOpen, setSwarmMembersOpen] = useState(false);
+  const [botNameDraft, setBotNameDraft] = useState(activeBot.name);
+  const [botRoleDraft, setBotRoleDraft] = useState(activeBot.roleTitle);
+
+  useEffect(() => {
+    setBotNameDraft(activeBot.name);
+    setBotRoleDraft(activeBot.roleTitle);
+  }, [activeBot.id, activeBot.name, activeBot.roleTitle]);
+
+  useEffect(() => {
+    if (openStudioSignal && openStudioSignal > 0) {
+      setCustomizeAvatarOpen(true);
+    }
+  }, [openStudioSignal]);
 
   const [showNewRoutineForm, setShowNewRoutineForm] = useState(false);
   const [newRoutineName, setNewRoutineName] = useState("");
@@ -360,6 +379,65 @@ export function InspectorDrawer({
                     </button>
                   </div>
 
+                  {/* Bot Name & Role Inputs */}
+                  <div className="space-y-2">
+                    <label className="block text-xs text-[#8e8d8a]">
+                      Bot Name &amp; Role
+                    </label>
+                    <input
+                      type="text"
+                      value={botNameDraft}
+                      onChange={(e) => setBotNameDraft(e.target.value)}
+                      onBlur={() => {
+                        if (
+                          botNameDraft.trim() &&
+                          botNameDraft.trim() !== activeBot.name
+                        ) {
+                          onUpsertBot({
+                            ...activeBot,
+                            name: botNameDraft.trim(),
+                          });
+                        }
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && botNameDraft.trim()) {
+                          onUpsertBot({
+                            ...activeBot,
+                            name: botNameDraft.trim(),
+                          });
+                        }
+                      }}
+                      placeholder="Bot name"
+                      className="w-full rounded-xl bg-[#1f1f1f] border border-white/[0.08] px-3 py-1.5 text-xs text-white focus:outline-none"
+                    />
+                    <input
+                      type="text"
+                      value={botRoleDraft}
+                      onChange={(e) => setBotRoleDraft(e.target.value)}
+                      onBlur={() => {
+                        if (
+                          botRoleDraft.trim() &&
+                          botRoleDraft.trim() !== activeBot.roleTitle
+                        ) {
+                          onUpsertBot({
+                            ...activeBot,
+                            roleTitle: botRoleDraft.trim(),
+                          });
+                        }
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && botRoleDraft.trim()) {
+                          onUpsertBot({
+                            ...activeBot,
+                            roleTitle: botRoleDraft.trim(),
+                          });
+                        }
+                      }}
+                      placeholder="Role subtitle"
+                      className="w-full rounded-xl bg-[#1f1f1f] border border-white/[0.08] px-3 py-1.5 text-xs text-zinc-300 focus:outline-none"
+                    />
+                  </div>
+
                   {/* CLI Driver Assignment */}
                   <div className="space-y-1.5">
                     <label className="block text-xs text-[#8e8d8a]">
@@ -459,6 +537,22 @@ export function InspectorDrawer({
                       })}
                     </div>
                   </div>
+
+                  {!activeBot.isPrimary && onDeleteBot && (
+                    <div className="pt-2 border-t border-white/[0.06] flex justify-end">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          setCustomizeAvatarOpen(false);
+                          await onDeleteBot(activeBot.id);
+                        }}
+                        className="px-3 py-1.5 rounded-xl bg-red-500/15 hover:bg-red-500/25 text-red-300 text-xs font-medium flex items-center gap-1.5"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Delete @{activeBot.name}</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -794,8 +888,8 @@ export function InspectorDrawer({
 
           {activeTab === "git" && (
             <div className="space-y-5">
-              {/* Project Switcher Card */}
-              <div className="liquid-glass-card rounded-2xl p-4 space-y-2.5">
+              {/* Project Switcher & Bot Assignment Card */}
+              <div className="liquid-glass-card rounded-2xl p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-medium text-[#8e8d8a]">
                     Active Project
@@ -805,7 +899,7 @@ export function InspectorDrawer({
                     onClick={() => onOpenOmniHub("projects")}
                     className="text-xs text-cyan-300 hover:text-white"
                   >
-                    Manage Projects
+                    Configure Projects
                   </button>
                 </div>
                 <div className="space-y-1">
@@ -840,6 +934,76 @@ export function InspectorDrawer({
                     );
                   })}
                 </div>
+
+                {/* Quick Bot Assignment for Active Project */}
+                {(() => {
+                  const activeProj = projects.find(
+                    (p) => p.path === preferences.workspaceRoot
+                  );
+                  if (!activeProj || !onUpsertProject) return null;
+                  const assignedIds = activeProj.assignedBotIds ?? [];
+                  return (
+                    <div className="pt-2 border-t border-white/[0.06] space-y-2">
+                      <div className="flex items-center justify-between text-[11.5px] text-[#8e8d8a]">
+                        <span>
+                          Bots on {activeProj.name}{" "}
+                          {assignedIds.length === 0
+                            ? "(All)"
+                            : `(${assignedIds.length})`}
+                        </span>
+                        {assignedIds.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onUpsertProject({
+                                ...activeProj,
+                                assignedBotIds: [],
+                              })
+                            }
+                            className="text-[11px] text-cyan-300 hover:text-white"
+                          >
+                            Enable all
+                          </button>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {bots.map((b) => {
+                          const enabled =
+                            assignedIds.length === 0 ||
+                            assignedIds.includes(b.id);
+                          return (
+                            <button
+                              key={b.id}
+                              type="button"
+                              onClick={() => {
+                                const nextIds =
+                                  assignedIds.length === 0
+                                    ? bots
+                                        .filter((x) => x.id !== b.id)
+                                        .map((x) => x.id)
+                                    : assignedIds.includes(b.id)
+                                      ? assignedIds.filter((id) => id !== b.id)
+                                      : [...assignedIds, b.id];
+                                onUpsertProject({
+                                  ...activeProj,
+                                  assignedBotIds: nextIds,
+                                });
+                              }}
+                              className={`px-2 py-1 rounded-full text-[11px] flex items-center gap-1.5 transition-colors ${
+                                enabled
+                                  ? "bg-white/[0.1] text-white border border-white/15"
+                                  : "bg-[#17171a] text-zinc-500 border border-white/[0.04]"
+                              }`}
+                            >
+                              <BotCharacterAvatar bot={b} size={15} />
+                              <span>{b.name}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* Git Branch & Commit Card */}

@@ -29,6 +29,10 @@ pub struct BotProfile {
     pub system_prompt: String,
     pub memories: Vec<String>,
     pub auto_created_for_cli: bool,
+    #[serde(default)]
+    pub custom_command: Option<String>,
+    #[serde(default)]
+    pub max_turn_budget_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +77,10 @@ pub struct ChatMessage {
     pub worktree_path: Option<String>,
     pub duration_ms: Option<u64>,
     pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
     pub status: String,
     pub created_at_ms: u64,
 }
@@ -93,6 +101,8 @@ pub struct ChatThread {
     pub messages: Vec<ChatMessage>,
     #[serde(default)]
     pub native_sessions: HashMap<String, String>,
+    #[serde(default)]
+    pub last_synced_msg_index: HashMap<String, usize>,
     pub updated_at_ms: u64,
 }
 
@@ -104,6 +114,12 @@ pub struct WorkspaceEntry {
     pub path: String,
     pub description: String,
     pub instructions: String,
+    #[serde(default)]
+    pub assigned_bot_ids: Vec<String>,
+    #[serde(default)]
+    pub lead_bot_id: Option<String>,
+    #[serde(default)]
+    pub use_worktrees_default: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +157,25 @@ pub struct ActiveBotRun {
     pub started_at_ms: u64,
 }
 
+fn default_max_context_messages() -> u32 {
+    6
+}
+fn default_max_message_chars() -> usize {
+    1400
+}
+fn default_max_turn_budget_usd() -> f64 {
+    1.50
+}
+fn default_max_parallel_bots() -> u32 {
+    3
+}
+fn default_turn_timeout_secs() -> u64 {
+    300
+}
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OmniPreferences {
@@ -149,6 +184,20 @@ pub struct OmniPreferences {
     pub approve_all_tools: bool,
     pub global_instructions: String,
     pub shared_memories: Vec<String>,
+    #[serde(default = "default_max_context_messages")]
+    pub max_context_messages: u32,
+    #[serde(default = "default_max_message_chars")]
+    pub max_message_chars: usize,
+    #[serde(default = "default_max_turn_budget_usd")]
+    pub max_turn_budget_usd: f64,
+    #[serde(default = "default_max_parallel_bots")]
+    pub max_parallel_bots: u32,
+    #[serde(default = "default_turn_timeout_secs")]
+    pub turn_timeout_secs: u64,
+    #[serde(default = "default_true")]
+    pub prevent_handoff_loops: bool,
+    #[serde(default)]
+    pub only_explicit_handoffs: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +208,8 @@ pub struct PersistedStore {
     pub chats: Vec<ChatThread>,
     pub workspaces: Vec<WorkspaceEntry>,
     pub routines: Vec<RoutineEntry>,
+    #[serde(default)]
+    pub dismissed_bot_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -401,6 +452,8 @@ fn load_or_initialize_store(harnesses: &[CliHarnessInfo]) -> PersistedStore {
             "Prefers clean, idiomatic code with zero tech debt".to_string(),
         ],
         auto_created_for_cli: false,
+        custom_command: None,
+        max_turn_budget_usd: None,
     };
 
     let primary_chat = ChatThread {
@@ -424,7 +477,7 @@ fn load_or_initialize_store(harnesses: &[CliHarnessInfo]) -> PersistedStore {
             cli_driver: Some(preferred_primary_driver),
             model: None,
             text: format!(
-                "Welcome to **Omni Bot**. I auto-detected **{} local coding CLIs** on your Mac ({}).\n\nEach CLI is set up as its own persistent Bot in your roster, and we can collaborate directly in **Swarm Rooms** or via `@Bot` handoffs:\n- Mention `@Claude`, `@Codex`, `@Grok`, `@OpenCode`, `@Cursor`, or `@Pi` in any chat to bring them into the thread.\n- Use `@all` or `/swarm` to dispatch parallel or sequential multi-bot workflows across your local codebase.\n- Click any Bot in the left rail for a dedicated 1:1 session, or open the **Inspector (`Cmd+I`)** to customize a Bot's character shape, color, CLI harness, or inspect live Git diffs.",
+                "Welcome to **Botfinity**. I auto-detected **{} local coding CLIs** on your Mac ({}).\n\nEach CLI is set up as its own persistent Bot in your roster, and we can collaborate directly in **Swarm Rooms** or via `@Bot` handoffs:\n- Mention `@Claude`, `@Codex`, `@Grok`, `@OpenCode`, `@Cursor`, or `@Pi` in any chat to bring them into the thread.\n- Use `@all` or `/swarm` to dispatch parallel or sequential multi-bot workflows across your local codebase.\n- Click any Bot in the left rail for a dedicated 1:1 session, or open the **Inspector (`Cmd+I`)** to customize a Bot's character shape, color, CLI harness, or inspect live Git diffs.",
                 harnesses.iter().filter(|h| h.installed).count(),
                 harnesses
                     .iter()
@@ -441,10 +494,13 @@ fn load_or_initialize_store(harnesses: &[CliHarnessInfo]) -> PersistedStore {
             worktree_path: None,
             duration_ms: Some(120),
             cost_usd: None,
+            input_tokens: None,
+            output_tokens: None,
             status: "complete".to_string(),
             created_at_ms: now_ms(),
         }],
         native_sessions: HashMap::new(),
+        last_synced_msg_index: HashMap::new(),
         updated_at_ms: now_ms(),
     };
 
@@ -454,6 +510,9 @@ fn load_or_initialize_store(harnesses: &[CliHarnessInfo]) -> PersistedStore {
         path: workspace_root.clone(),
         description: "Active local project repository".to_string(),
         instructions: "Keep code clean, concise, and idiomatic. Coordinate across bots before large refactors.".to_string(),
+        assigned_bot_ids: Vec::new(),
+        lead_bot_id: Some("bot-omni".to_string()),
+        use_worktrees_default: false,
     }];
 
     let routines = vec![
@@ -478,16 +537,33 @@ fn load_or_initialize_store(harnesses: &[CliHarnessInfo]) -> PersistedStore {
                 "Primary GitHub account: robzilla1738".to_string(),
                 "Local coding swarm running on macOS".to_string(),
             ],
+            max_context_messages: 6,
+            max_message_chars: 1400,
+            max_turn_budget_usd: 1.50,
+            max_parallel_bots: 3,
+            turn_timeout_secs: 300,
+            prevent_handoff_loops: true,
+            only_explicit_handoffs: false,
         },
         bots: vec![omni_bot],
         chats: vec![primary_chat],
         workspaces,
         routines,
+        dismissed_bot_ids: Vec::new(),
     }
 }
 
 fn sync_detected_cli_bots(store: &mut PersistedStore, harnesses: &[CliHarnessInfo]) {
     let mut added_bot_ids = Vec::new();
+
+    // Ensure guardrail defaults are within sane bounds
+    store.preferences.max_context_messages = store.preferences.max_context_messages.clamp(2, 24);
+    store.preferences.max_message_chars = store.preferences.max_message_chars.clamp(400, 6000);
+    if store.preferences.max_turn_budget_usd <= 0.0 {
+        store.preferences.max_turn_budget_usd = 1.50;
+    }
+    store.preferences.max_parallel_bots = store.preferences.max_parallel_bots.clamp(1, 6);
+    store.preferences.turn_timeout_secs = store.preferences.turn_timeout_secs.clamp(30, 1800);
 
     // Upgrade legacy default shapes and verbose role titles
     for bot in &mut store.bots {
@@ -510,6 +586,9 @@ fn sync_detected_cli_bots(store: &mut PersistedStore, harnesses: &[CliHarnessInf
 
     for h in harnesses.iter().filter(|h| h.installed) {
         let bot_id = format!("bot-{}", h.kind.as_str());
+        if store.dismissed_bot_ids.contains(&bot_id) {
+            continue;
+        }
         let already_exists = store.bots.iter().any(|b| b.id == bot_id);
         if !already_exists {
             let slug = h.kind.as_str().to_string();
@@ -532,11 +611,13 @@ fn sync_detected_cli_bots(store: &mut PersistedStore, harnesses: &[CliHarnessInf
                 reasoning_effort: "high".to_string(),
                 permission_mode: "auto".to_string(),
                 system_prompt: format!(
-                    "You are {name} ({role_title}), powered by the local `{}` CLI inside Omni Bot. Collaborate with the user and your fellow Bots (@Omni, @Claude, @Codex, @OpenCode, @Cursor, @Grok, @Pi). Be concise, accurate, and write clean code.",
+                    "You are {name} ({role_title}), powered by the local `{}` CLI inside Botfinity. Collaborate with the user and your fellow Bots (@Omni, @Claude, @Codex, @OpenCode, @Cursor, @Grok, @Pi). Be concise, accurate, and write clean code.",
                     h.binary_name
                 ),
                 memories: Vec::new(),
                 auto_created_for_cli: true,
+                custom_command: None,
+                max_turn_budget_usd: None,
             });
 
             // Ensure a dedicated 1:1 thread exists for this Bot
@@ -555,6 +636,7 @@ fn sync_detected_cli_bots(store: &mut PersistedStore, harnesses: &[CliHarnessInf
                     max_swarm_turns: 4,
                     messages: Vec::new(),
                     native_sessions: HashMap::new(),
+                    last_synced_msg_index: HashMap::new(),
                     updated_at_ms: now_ms(),
                 });
             }
@@ -613,10 +695,13 @@ fn sync_detected_cli_bots(store: &mut PersistedStore, harnesses: &[CliHarnessInf
                         worktree_path: None,
                         duration_ms: None,
                         cost_usd: None,
+                        input_tokens: None,
+                        output_tokens: None,
                         status: "complete".to_string(),
                         created_at_ms: now_ms(),
                     }],
                     native_sessions: HashMap::new(),
+                    last_synced_msg_index: HashMap::new(),
                     updated_at_ms: now_ms(),
                 },
             );

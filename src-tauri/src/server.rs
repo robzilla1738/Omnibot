@@ -259,6 +259,7 @@ pub fn create_chat_thread(
         max_swarm_turns: guard.store.preferences.default_max_swarm_turns,
         messages: Vec::new(),
         native_sessions: HashMap::new(),
+        last_synced_msg_index: HashMap::new(),
         updated_at_ms: now_ms(),
     };
 
@@ -357,6 +358,7 @@ pub fn clear_chat_thread(state: &SharedOmniState, id: &str) -> Result<OmniSnapsh
     if let Some(chat) = guard.store.chats.iter_mut().find(|c| c.id == id) {
         chat.messages.clear();
         chat.native_sessions.clear();
+        chat.last_synced_msg_index.clear();
         chat.updated_at_ms = now_ms();
     }
     let _ = guard.persist();
@@ -406,18 +408,55 @@ pub fn upsert_bot_profile(
     if bot.id.trim().is_empty() {
         bot.id = format!("bot_custom_{}", now_ms());
     }
-    if bot.slug.trim().is_empty() {
-        bot.slug = bot
-            .name
+    let base_slug = if bot.slug.trim().is_empty() {
+        bot.name
             .to_lowercase()
             .chars()
             .map(|c| if c.is_alphanumeric() { c } else { '-' })
             .collect::<String>()
             .trim_matches('-')
-            .to_string();
+            .to_string()
+    } else {
+        bot.slug
+            .to_lowercase()
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '-' })
+            .collect::<String>()
+            .trim_matches('-')
+            .to_string()
+    };
+    let clean_base = if base_slug.is_empty() {
+        "bot".to_string()
+    } else {
+        base_slug
+    };
+    let mut candidate_slug = clean_base.clone();
+    let mut suffix = 2u32;
+    while guard
+        .store
+        .bots
+        .iter()
+        .any(|b| b.id != bot.id && b.slug.eq_ignore_ascii_case(&candidate_slug))
+    {
+        candidate_slug = format!("{clean_base}-{suffix}");
+        suffix += 1;
     }
+    bot.slug = candidate_slug;
+
+    guard.store.dismissed_bot_ids.retain(|d| d != &bot.id);
     if let Some(existing) = guard.store.bots.iter_mut().find(|b| b.id == bot.id) {
         *existing = bot.clone();
+        // Keep dedicated 1:1 thread title & subtitle in sync with updated Bot profile
+        for chat in &mut guard.store.chats {
+            if !chat.is_primary
+                && !chat.is_group
+                && chat.participant_bot_ids.len() == 1
+                && chat.participant_bot_ids[0] == bot.id
+            {
+                chat.title = bot.name.clone();
+                chat.subtitle = format!("{} · {}", bot.role_title, bot.cli_driver.display_name());
+            }
+        }
     } else {
         guard.store.bots.push(bot.clone());
         let direct_id = format!("chat-direct-{}", bot.id);
@@ -438,6 +477,7 @@ pub fn upsert_bot_profile(
                 max_swarm_turns: max_turns,
                 messages: Vec::new(),
                 native_sessions: HashMap::new(),
+                last_synced_msg_index: HashMap::new(),
                 updated_at_ms: now_ms(),
             });
         }
@@ -461,7 +501,28 @@ pub fn delete_bot_profile(state: &SharedOmniState, id: &str) -> Result<OmniSnaps
     let mut guard = state
         .write()
         .map_err(|_| "State lock poisoned".to_string())?;
+    if !guard.store.dismissed_bot_ids.contains(&id.to_string()) {
+        guard.store.dismissed_bot_ids.push(id.to_string());
+    }
     guard.store.bots.retain(|b| b.is_primary || b.id != id);
+    guard.store.chats.retain(|c| {
+        c.is_primary
+            || !(!c.is_group
+                && c.participant_bot_ids.len() == 1
+                && c.participant_bot_ids[0] == id)
+    });
+    for c in &mut guard.store.chats {
+        c.participant_bot_ids.retain(|bid| bid != id);
+        if c.participant_bot_ids.is_empty() {
+            c.participant_bot_ids.push("bot-omni".to_string());
+        }
+    }
+    for w in &mut guard.store.workspaces {
+        w.assigned_bot_ids.retain(|bid| bid != id);
+        if w.lead_bot_id.as_deref() == Some(id) {
+            w.lead_bot_id = Some("bot-omni".to_string());
+        }
+    }
     let _ = guard.persist();
     guard.emit(OmniStreamEvent::StateUpdated { chat_id: None });
     Ok(guard.snapshot())
@@ -479,11 +540,37 @@ async fn http_delete_bot(
 
 pub fn update_omni_preferences(
     state: &SharedOmniState,
-    prefs: OmniPreferences,
+    mut prefs: OmniPreferences,
 ) -> Result<OmniSnapshot, String> {
     let mut guard = state
         .write()
         .map_err(|_| "State lock poisoned".to_string())?;
+    prefs.max_context_messages = prefs.max_context_messages.clamp(2, 24);
+    prefs.max_message_chars = prefs.max_message_chars.clamp(400, 6000);
+    prefs.max_parallel_bots = prefs.max_parallel_bots.clamp(1, 6);
+    prefs.turn_timeout_secs = prefs.turn_timeout_secs.clamp(30, 1800);
+    if prefs.max_turn_budget_usd <= 0.0 {
+        prefs.max_turn_budget_usd = 1.50;
+    }
+
+    let ws_root = prefs.workspace_root.trim().to_string();
+    if !ws_root.is_empty() && !guard.store.workspaces.iter().any(|w| w.path == ws_root) {
+        let name = ws_root
+            .split('/')
+            .rfind(|s| !s.is_empty())
+            .unwrap_or("Project")
+            .to_string();
+        guard.store.workspaces.push(WorkspaceEntry {
+            id: format!("ws_{}", now_ms()),
+            name,
+            path: ws_root.clone(),
+            description: "Local project directory".to_string(),
+            instructions: String::new(),
+            assigned_bot_ids: Vec::new(),
+            lead_bot_id: Some("bot-omni".to_string()),
+            use_worktrees_default: false,
+        });
+    }
     guard.store.preferences = prefs;
     let _ = guard.persist();
     guard.emit(OmniStreamEvent::StateUpdated { chat_id: None });

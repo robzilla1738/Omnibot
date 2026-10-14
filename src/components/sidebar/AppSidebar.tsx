@@ -1,10 +1,16 @@
 import {
   Blocks,
+  Check,
+  Copy,
   LayoutGrid,
   MessageSquare,
+  MoreHorizontal,
+  Palette,
+  Pencil,
   Plus,
   Search,
   Trash2,
+  X,
 } from "lucide-react";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -38,9 +44,28 @@ export interface AppSidebarProps {
   onNewBot: () => void;
   onOpenSearch: () => void;
   onDeleteChat: (chatId: string, e: React.MouseEvent) => void;
+  onUpdateChat: (params: { chatId: string; title?: string }) => Promise<void>;
+  onUpsertBot: (bot: BotProfile) => Promise<void>;
+  onDeleteBot: (botId: string) => Promise<void>;
+  onCustomizeBot: (bot: BotProfile) => void;
   onOpenCliHarnesses: () => void;
   onOpenOmniHub: () => void;
 }
+
+type ContextMenuState =
+  | {
+      kind: "bot";
+      bot: BotProfile;
+      x: number;
+      y: number;
+    }
+  | {
+      kind: "chat";
+      chat: ChatThread;
+      x: number;
+      y: number;
+    }
+  | null;
 
 export function AppSidebar({
   collapsed,
@@ -58,6 +83,10 @@ export function AppSidebar({
   onNewBot,
   onOpenSearch,
   onDeleteChat,
+  onUpdateChat,
+  onUpsertBot,
+  onDeleteBot,
+  onCustomizeBot,
   onOpenCliHarnesses,
   onOpenOmniHub,
 }: AppSidebarProps) {
@@ -69,7 +98,97 @@ export function AppSidebar({
     moved: boolean;
   } | null>(null);
 
+  // Right-click Context Menu State
+  const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
+
+  // Inline Bot Rename / Role Edit State
+  const [editingBotId, setEditingBotId] = useState<string | null>(null);
+  const [botNameDraft, setBotNameDraft] = useState("");
+  const [botRoleDraft, setBotRoleDraft] = useState("");
+
+  // Inline Swarm Room Rename State
+  const [editingChatId, setEditingChatId] = useState<string | null>(null);
+  const [chatTitleDraft, setChatTitleDraft] = useState("");
+
   const currentWidth = collapsed ? COLLAPSED_WIDTH : expandedWidth;
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const closeMenu = () => setContextMenu(null);
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setContextMenu(null);
+    };
+    window.addEventListener("click", closeMenu);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("click", closeMenu);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [contextMenu]);
+
+  const openBotContextMenu = (e: React.MouseEvent, bot: BotProfile) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const x = Math.min(e.clientX, window.innerWidth - 220);
+    const y = Math.min(e.clientY, window.innerHeight - 220);
+    setContextMenu({ kind: "bot", bot, x, y });
+  };
+
+  const openChatContextMenu = (e: React.MouseEvent, chat: ChatThread) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const x = Math.min(e.clientX, window.innerWidth - 220);
+    const y = Math.min(e.clientY, window.innerHeight - 160);
+    setContextMenu({ kind: "chat", chat, x, y });
+  };
+
+  const startInlineBotEdit = (bot: BotProfile) => {
+    setContextMenu(null);
+    if (collapsed) {
+      onCollapsedChange(false);
+    }
+    setEditingBotId(bot.id);
+    setBotNameDraft(bot.name);
+    setBotRoleDraft(bot.roleTitle);
+  };
+
+  const commitInlineBotEdit = async (bot: BotProfile) => {
+    const cleanName = botNameDraft.trim();
+    const cleanRole = botRoleDraft.trim();
+    setEditingBotId(null);
+    if (!cleanName) return;
+    await onUpsertBot({
+      ...bot,
+      name: cleanName,
+      roleTitle: cleanRole || bot.roleTitle,
+    });
+  };
+
+  const handleDuplicateBot = async (bot: BotProfile) => {
+    setContextMenu(null);
+    const count = bots.filter((b) => b.cliDriver === bot.cliDriver).length;
+    await onUpsertBot({
+      ...bot,
+      id: "",
+      name: `${bot.name} ${count + 1}`,
+      slug: `${bot.slug}-${count + 1}`,
+      isPrimary: false,
+      autoCreatedForCli: false,
+    });
+  };
+
+  const startInlineChatEdit = (chat: ChatThread) => {
+    setContextMenu(null);
+    setEditingChatId(chat.id);
+    setChatTitleDraft(chat.title);
+  };
+
+  const commitInlineChatEdit = async (chat: ChatThread) => {
+    const clean = chatTitleDraft.trim();
+    setEditingChatId(null);
+    if (!clean) return;
+    await onUpdateChat({ chatId: chat.id, title: clean });
+  };
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -130,13 +249,27 @@ export function AppSidebar({
   }, [isDragging, collapsed, onCollapsedChange]);
 
   const primaryChat = chats.find((c) => c.isPrimary);
+  const activeChatObj = chats.find((c) => c.id === activeChatId);
   const isPrimarySelected = primaryChat ? activeChatId === primaryChat.id : false;
   const rosterBots = bots.filter((b) => !b.isPrimary);
   const installedHarnesses = harnesses.filter((h) => h.installed);
 
-  // Only show Multi-Bot Swarm Rooms and custom Sidechats (never duplicate 1:1 Bot threads)
+  const isBotDirectSelected = (bot: BotProfile) => {
+    if (!activeChatObj || activeChatObj.isPrimary || activeChatObj.isGroup) {
+      return false;
+    }
+    return (
+      activeChatObj.participantBotIds.length === 1 &&
+      activeChatObj.participantBotIds[0] === bot.id
+    );
+  };
+
+  // Only show Multi-Bot Swarm Rooms and custom multi-participant threads (never duplicate 1:1 Bot threads)
   const swarmAndSidechats = chats.filter(
-    (c) => !c.isPrimary && !c.id.startsWith("chat-direct-")
+    (c) =>
+      !c.isPrimary &&
+      !c.id.startsWith("chat-direct-") &&
+      (c.isGroup || c.participantBotIds.length > 1)
   );
 
   const isPrimaryStreaming = activeRuns.some((r) => r.botId === primaryBot.id);
@@ -186,30 +319,54 @@ export function AppSidebar({
             collapsed ? "px-3 pt-1 pb-3" : "px-4 pt-1 pb-4"
           }`}
         >
-          <button
-            type="button"
-            onClick={onSelectPrimary}
-            title={`${primaryBot.name} (Primary Coordinator)`}
-            className="group flex flex-col items-center justify-center transition-all duration-300 spring-transition active:scale-[0.97] bg-transparent"
-          >
-            <BotCharacterAvatar
-              bot={primaryBot}
-              size={collapsed ? 48 : 72}
-              isStreaming={isPrimaryStreaming}
-              showStarBadge
-            />
-            <span
-              className={`text-[15px] font-medium tracking-tight transition-all duration-200 overflow-hidden ${
-                isPrimarySelected
-                  ? "text-white"
-                  : "text-zinc-300 group-hover:text-white"
-              } ${
-                collapsed ? "max-h-0 opacity-0 mt-0" : "max-h-7 opacity-100 mt-2"
-              }`}
+          {editingBotId === primaryBot.id && !collapsed ? (
+            <div className="flex flex-col items-center gap-2 w-full px-2">
+              <BotCharacterAvatar
+                bot={primaryBot}
+                size={64}
+                isStreaming={isPrimaryStreaming}
+                showStarBadge
+              />
+              <input
+                type="text"
+                autoFocus
+                value={botNameDraft}
+                onChange={(e) => setBotNameDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitInlineBotEdit(primaryBot);
+                  if (e.key === "Escape") setEditingBotId(null);
+                }}
+                onBlur={() => commitInlineBotEdit(primaryBot)}
+                className="w-40 rounded-lg bg-[#1f1f1f] border border-white/15 px-2.5 py-1 text-center text-[14px] font-medium text-white focus:outline-none"
+              />
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={onSelectPrimary}
+              onContextMenu={(e) => openBotContextMenu(e, primaryBot)}
+              title={`${primaryBot.name} (Right-click to rename or customize)`}
+              className="group flex flex-col items-center justify-center transition-all duration-300 spring-transition active:scale-[0.97] bg-transparent"
             >
-              {primaryBot.name}
-            </span>
-          </button>
+              <BotCharacterAvatar
+                bot={primaryBot}
+                size={collapsed ? 48 : 72}
+                isStreaming={isPrimaryStreaming}
+                showStarBadge
+              />
+              <span
+                className={`text-[15px] font-medium tracking-tight transition-all duration-200 overflow-hidden ${
+                  isPrimarySelected
+                    ? "text-white"
+                    : "text-zinc-300 group-hover:text-white"
+                } ${
+                  collapsed ? "max-h-0 opacity-0 mt-0" : "max-h-7 opacity-100 mt-2"
+                }`}
+              >
+                {primaryBot.name}
+              </span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -217,17 +374,15 @@ export function AppSidebar({
       {collapsed && (
         <div className="flex-1 overflow-y-auto sidebar-scroll-mask py-2 flex flex-col items-center gap-3">
           {rosterBots.map((bot) => {
-            const directId = `chat-direct-${bot.slug}`;
-            const altDirectId = `chat-direct-${bot.id}`;
-            const selected =
-              activeChatId === directId || activeChatId === altDirectId;
+            const selected = isBotDirectSelected(bot);
             const running = activeRuns.some((r) => r.botId === bot.id);
             return (
               <button
                 key={bot.id}
                 type="button"
                 onClick={() => onSelectBotDirectChat(bot)}
-                title={`${bot.name} (${bot.cliDriver})`}
+                onContextMenu={(e) => openBotContextMenu(e, bot)}
+                title={`${bot.name} (${bot.cliDriver}) · Right-click for options`}
                 className={`p-1.5 rounded-2xl transition-all active:scale-95 ${
                   selected
                     ? "bg-[#222225] ring-1 ring-white/15"
@@ -270,20 +425,72 @@ export function AppSidebar({
           </div>
 
           {rosterBots.map((bot) => {
-            const directId = `chat-direct-${bot.slug}`;
-            const altDirectId = `chat-direct-${bot.id}`;
-            const selected =
-              activeChatId === directId || activeChatId === altDirectId;
+            const selected = isBotDirectSelected(bot);
             const run = activeRuns.find((r) => r.botId === bot.id);
             const showDriverPill =
               bot.name.toLowerCase() !== bot.cliDriver.toLowerCase();
+            const isEditing = editingBotId === bot.id;
+
+            if (isEditing) {
+              return (
+                <div
+                  key={bot.id}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 rounded-[16px] bg-[#1b1b1b] border border-white/15"
+                >
+                  <BotCharacterAvatar bot={bot} size={36} />
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <input
+                      type="text"
+                      autoFocus
+                      value={botNameDraft}
+                      onChange={(e) => setBotNameDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") commitInlineBotEdit(bot);
+                        if (e.key === "Escape") setEditingBotId(null);
+                      }}
+                      placeholder="Bot name"
+                      className="w-full rounded-md bg-black/50 border border-white/15 px-2 py-0.5 text-[14px] font-medium text-white focus:outline-none"
+                    />
+                    <input
+                      type="text"
+                      value={botRoleDraft}
+                      onChange={(e) => setBotRoleDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") commitInlineBotEdit(bot);
+                        if (e.key === "Escape") setEditingBotId(null);
+                      }}
+                      placeholder="Role subtitle"
+                      className="w-full rounded-md bg-black/50 border border-white/10 px-2 py-0.5 text-[12px] text-zinc-300 focus:outline-none"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => commitInlineBotEdit(bot)}
+                      className="p-1 rounded-md bg-white text-black hover:bg-zinc-200"
+                      title="Save"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditingBotId(null)}
+                      className="p-1 rounded-md bg-white/10 text-zinc-300 hover:text-white"
+                      title="Cancel"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              );
+            }
 
             return (
-              <button
+              <div
                 key={bot.id}
-                type="button"
                 onClick={() => onSelectBotDirectChat(bot)}
-                className={`w-full group flex items-center gap-3 px-3 py-2 rounded-[16px] text-left transition-colors ${
+                onContextMenu={(e) => openBotContextMenu(e, bot)}
+                className={`w-full group relative flex items-center gap-3 px-3 py-2 rounded-[16px] text-left cursor-pointer transition-colors ${
                   selected
                     ? "bg-[#1b1b1b] text-white"
                     : "hover:bg-[#161616] text-zinc-300"
@@ -320,9 +527,17 @@ export function AppSidebar({
                   </div>
                 </div>
                 {run && (
-                  <span className="w-2.5 h-2.5 rounded-full bg-[#8cf1fb] animate-ping shrink-0" />
+                  <span className="w-2.5 h-2.5 rounded-full bg-[#8cf1fb] animate-ping shrink-0 group-hover:hidden" />
                 )}
-              </button>
+                <button
+                  type="button"
+                  onClick={(e) => openBotContextMenu(e, bot)}
+                  title="Bot options (Rename, Customize, Duplicate, Delete)"
+                  className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-white/[0.07] transition-all shrink-0"
+                >
+                  <MoreHorizontal className="w-4 h-4" />
+                </button>
+              </div>
             );
           })}
         </div>
@@ -350,11 +565,15 @@ export function AppSidebar({
                 .map((id) => bots.find((b) => b.id === id))
                 .filter((b): b is BotProfile => Boolean(b));
               const isBusy = activeRuns.some((r) => r.chatId === chat.id);
+              const isEditingChat = editingChatId === chat.id;
 
               return (
                 <div
                   key={chat.id}
-                  onClick={() => onSelectChat(chat.id)}
+                  onClick={() => {
+                    if (!isEditingChat) onSelectChat(chat.id);
+                  }}
+                  onContextMenu={(e) => openChatContextMenu(e, chat)}
                   className={`group relative flex items-center gap-3 px-3 py-2.5 rounded-[16px] cursor-pointer transition-colors ${
                     selected
                       ? "bg-[#1b1b1b] text-white"
@@ -376,14 +595,32 @@ export function AppSidebar({
                   )}
 
                   <div className="min-w-0 flex-1">
-                    <div className="text-[15px] font-medium text-[#f4f4f5] truncate leading-[1.3]">
-                      {chat.title}
-                    </div>
-                    <p className="text-[13px] text-[#8e8d8a] truncate mt-0.5 leading-[1.3]">
-                      {chat.isGroup
-                        ? chatBots.map((b) => `@${b.name}`).join(" · ")
-                        : formatRelativeUpdated(chat.updatedAtMs)}
-                    </p>
+                    {isEditingChat ? (
+                      <input
+                        type="text"
+                        autoFocus
+                        value={chatTitleDraft}
+                        onChange={(e) => setChatTitleDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") commitInlineChatEdit(chat);
+                          if (e.key === "Escape") setEditingChatId(null);
+                        }}
+                        onBlur={() => commitInlineChatEdit(chat)}
+                        onClick={(e) => e.stopPropagation()}
+                        className="w-full rounded-md bg-black/50 border border-white/15 px-2 py-0.5 text-[14px] font-medium text-white focus:outline-none"
+                      />
+                    ) : (
+                      <>
+                        <div className="text-[15px] font-medium text-[#f4f4f5] truncate leading-[1.3]">
+                          {chat.title}
+                        </div>
+                        <p className="text-[13px] text-[#8e8d8a] truncate mt-0.5 leading-[1.3]">
+                          {chat.isGroup
+                            ? chatBots.map((b) => `@${b.name}`).join(" · ")
+                            : formatRelativeUpdated(chat.updatedAtMs)}
+                        </p>
+                      </>
+                    )}
                   </div>
 
                   {isBusy && (
@@ -469,6 +706,100 @@ export function AppSidebar({
               ))}
             </div>
           </button>
+        </div>
+      )}
+
+      {/* Right-Click Context Menu Popover */}
+      {contextMenu && (
+        <div
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+          className="fixed z-50 w-52 rounded-2xl liquid-glass-modal p-1.5 shadow-[0_18px_50px_rgba(0,0,0,0.85)] border border-white/[0.1] space-y-0.5"
+        >
+          {contextMenu.kind === "bot" ? (
+            <>
+              <div className="px-2.5 py-1.5 flex items-center gap-2 border-b border-white/[0.06] mb-1">
+                <BotCharacterAvatar bot={contextMenu.bot} size={22} />
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-white truncate">
+                    {contextMenu.bot.name}
+                  </div>
+                  <div className="text-[10.5px] font-mono text-zinc-400 truncate">
+                    {contextMenu.bot.cliDriver}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => startInlineBotEdit(contextMenu.bot)}
+                className="w-full px-2.5 py-1.5 rounded-xl flex items-center gap-2.5 text-xs text-zinc-200 hover:text-white hover:bg-white/[0.08] transition-colors"
+              >
+                <Pencil className="w-3.5 h-3.5 text-zinc-400" />
+                <span>Rename &amp; Edit Role</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = contextMenu.bot;
+                  setContextMenu(null);
+                  onCustomizeBot(target);
+                }}
+                className="w-full px-2.5 py-1.5 rounded-xl flex items-center gap-2.5 text-xs text-zinc-200 hover:text-white hover:bg-white/[0.08] transition-colors"
+              >
+                <Palette className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Customize Shape &amp; CLI</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDuplicateBot(contextMenu.bot)}
+                className="w-full px-2.5 py-1.5 rounded-xl flex items-center gap-2.5 text-xs text-zinc-200 hover:text-white hover:bg-white/[0.08] transition-colors"
+              >
+                <Copy className="w-3.5 h-3.5 text-zinc-400" />
+                <span>Duplicate Bot ({contextMenu.bot.cliDriver})</span>
+              </button>
+              {!contextMenu.bot.isPrimary && (
+                <>
+                  <div className="my-1 border-t border-white/[0.06]" />
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const id = contextMenu.bot.id;
+                      setContextMenu(null);
+                      await onDeleteBot(id);
+                    }}
+                    className="w-full px-2.5 py-1.5 rounded-xl flex items-center gap-2.5 text-xs text-red-400 hover:text-red-300 hover:bg-red-500/15 transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Delete Bot</span>
+                  </button>
+                </>
+              )}
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => startInlineChatEdit(contextMenu.chat)}
+                className="w-full px-2.5 py-1.5 rounded-xl flex items-center gap-2.5 text-xs text-zinc-200 hover:text-white hover:bg-white/[0.08] transition-colors"
+              >
+                <Pencil className="w-3.5 h-3.5 text-zinc-400" />
+                <span>Rename Swarm Room</span>
+              </button>
+              <div className="my-1 border-t border-white/[0.06]" />
+              <button
+                type="button"
+                onClick={(e) => {
+                  const id = contextMenu.chat.id;
+                  setContextMenu(null);
+                  onDeleteChat(id, e);
+                }}
+                className="w-full px-2.5 py-1.5 rounded-xl flex items-center gap-2.5 text-xs text-red-400 hover:text-red-300 hover:bg-red-500/15 transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Delete Swarm Room</span>
+              </button>
+            </>
+          )}
         </div>
       )}
 

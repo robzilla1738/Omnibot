@@ -79,6 +79,8 @@ export interface BotProfile {
   systemPrompt: string;
   memories: string[];
   autoCreatedForCli: boolean;
+  customCommand?: string | null;
+  maxTurnBudgetUsd?: number | null;
 }
 
 export interface ToolInvocation {
@@ -117,6 +119,8 @@ export interface ChatMessage {
   worktreePath?: string | null;
   durationMs?: number | null;
   costUsd?: number | null;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
   status: "streaming" | "complete" | "error" | "stopped" | string;
   createdAtMs: number;
 }
@@ -134,6 +138,7 @@ export interface ChatThread {
   maxSwarmTurns: number;
   messages: ChatMessage[];
   nativeSessions: Record<string, string>;
+  lastSyncedMsgIndex?: Record<string, number>;
   updatedAtMs: number;
 }
 
@@ -143,6 +148,9 @@ export interface WorkspaceEntry {
   path: string;
   description: string;
   instructions: string;
+  assignedBotIds?: string[];
+  leadBotId?: string | null;
+  useWorktreesDefault?: boolean;
 }
 
 export interface RoutineEntry {
@@ -247,6 +255,13 @@ export interface OmniPreferences {
   approveAllTools: boolean;
   globalInstructions: string;
   sharedMemories: string[];
+  maxContextMessages?: number;
+  maxMessageChars?: number;
+  maxTurnBudgetUsd?: number;
+  maxParallelBots?: number;
+  turnTimeoutSecs?: number;
+  preventHandoffLoops?: boolean;
+  onlyExplicitHandoffs?: boolean;
 }
 
 export interface OmniSnapshot {

@@ -1,10 +1,12 @@
 import {
+  ArrowDown,
   ArrowLeftRight,
   ArrowUp,
   Brain,
   Check,
   ChevronDown,
   ChevronRight,
+  Copy,
   Cpu,
   Loader2,
   Plus,
@@ -94,8 +96,10 @@ export function ChatWorkspace({
 
   const [slashIndex, setSlashIndex] = useState(0);
   const [mentionIndex, setMentionIndex] = useState(0);
+  const [isNearBottom, setIsNearBottom] = useState(true);
 
   const composerInputRef = useRef<HTMLInputElement | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
 
   const chatParticipants = useMemo(() => {
@@ -118,9 +122,26 @@ export function ChatWorkspace({
   );
   const isStreaming = chatActiveRuns.length > 0;
 
+  // Compute a lightweight signature of streaming text/thinking lengths so sticky scroll tracks live deltas
+  const lastMsg = chat.messages[chat.messages.length - 1];
+  const streamSignature = lastMsg
+    ? `${chat.messages.length}:${lastMsg.text.length}:${lastMsg.thinking.length}:${lastMsg.toolCalls.length}`
+    : "0";
+
+  const handleScroll = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setIsNearBottom(distance < 150);
+  }, []);
+
   useEffect(() => {
-    transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chat.messages.length, isStreaming]);
+    if (!isNearBottom) return;
+    const el = scrollContainerRef.current;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [streamSignature, isNearBottom, isStreaming]);
 
   const slashMatch = useMemo(() => {
     const m = /(?:^|\s)\/([a-zA-Z0-9_-]*)$/.exec(input);
@@ -317,6 +338,8 @@ export function ChatWorkspace({
 
       {/* Full-Height Scrollable Transcript Area */}
       <div
+        ref={scrollContainerRef}
+        onScroll={handleScroll}
         className={`h-full w-full overflow-y-auto overflow-x-hidden chat-scroll-mask px-6 ${
           isEmpty ? "flex flex-col items-center justify-center" : "pt-20 pb-40"
         }`}
@@ -335,10 +358,9 @@ export function ChatWorkspace({
                 key={msg.id}
                 message={msg}
                 bots={bots}
-                onQuickHandoff={(targetBot, sourceText) => {
-                  const snippet = sourceText.slice(0, 500);
+                onQuickHandoff={(targetBot) => {
                   handleSend(
-                    `@${targetBot.name} review @${msg.authorName || "Bot"}'s response above and follow up or improve on it:\n\n> ${snippet.replace(/\n/g, "\n> ")}`,
+                    `@${targetBot.name} review @${msg.authorName || "Bot"}'s response above and follow up or improve on it.`,
                     targetBot.id
                   );
                 }}
@@ -384,6 +406,23 @@ export function ChatWorkspace({
         aria-hidden
         className="pointer-events-none absolute bottom-0 inset-x-0 h-32 chat-bottom-feather z-10"
       />
+
+      {/* Floating Jump-to-Latest Pill when scrolled up */}
+      {!isEmpty && !isNearBottom && (
+        <div className="absolute bottom-20 inset-x-0 flex justify-center z-20 pointer-events-none">
+          <button
+            type="button"
+            onClick={() => {
+              setIsNearBottom(true);
+              transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
+            }}
+            className="pointer-events-auto px-3.5 py-1.5 rounded-full liquid-glass-pill text-xs font-medium text-zinc-100 hover:text-white flex items-center gap-1.5 shadow-xl active:scale-95"
+          >
+            <ArrowDown className="w-3.5 h-3.5 text-[#8cf1fb]" />
+            <span>{isStreaming ? "Streaming below" : "Jump to latest"}</span>
+          </button>
+        </div>
+      )}
 
       {/* Floating Bottom Composer Area with Liquid Glass */}
       <div className="absolute bottom-0 inset-x-0 px-5 pb-4 pt-2 z-20 pointer-events-none">
@@ -920,11 +959,22 @@ function MessageCard({
 }) {
   const [toolsExpanded, setToolsExpanded] = useState(false);
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   const authorBot = useMemo(
     () => bots.find((b) => b.id === message.authorBotId),
     [bots, message.authorBotId]
   );
+
+  const isActivelyThinking =
+    message.status === "streaming" &&
+    Boolean(message.thinking) &&
+    !message.text.trim();
+
+  const showThinkingBody = thinkingExpanded || isActivelyThinking;
+
+  const totalTokens =
+    (message.inputTokens ?? 0) + (message.outputTokens ?? 0);
 
   const renderedHtml = useMemo(() => {
     const cleanText = message.text
@@ -999,15 +1049,30 @@ function MessageCard({
               )}
             </div>
 
-            <div className="flex items-center gap-2 text-[11.5px] text-[#8e8d8a] shrink-0">
+            <div className="flex items-center gap-2 text-[11px] text-[#8e8d8a] font-mono shrink-0">
+              {totalTokens > 0 && (
+                <span title={`Input: ~${message.inputTokens ?? 0} tok · Output: ~${message.outputTokens ?? 0} tok`}>
+                  {totalTokens >= 1000
+                    ? `${(totalTokens / 1000).toFixed(1)}k tok`
+                    : `${totalTokens} tok`}
+                </span>
+              )}
+              {message.costUsd != null && message.costUsd > 0 && (
+                <span className="text-emerald-300/90">
+                  ${message.costUsd.toFixed(3)}
+                </span>
+              )}
               {message.durationMs != null && message.durationMs > 0 && (
                 <span>{(message.durationMs / 1000).toFixed(1)}s</span>
               )}
               {message.status === "streaming" && (
-                <span className="text-[#8cf1fb] flex items-center gap-1 font-medium">
+                <span className="text-[#8cf1fb] flex items-center gap-1 font-sans font-medium">
                   <Loader2 className="w-3 h-3 animate-spin" />
                   <span>Live</span>
                 </span>
+              )}
+              {message.status === "stopped" && (
+                <span className="text-amber-300 font-sans">Stopped</span>
               )}
             </div>
           </div>
@@ -1022,16 +1087,18 @@ function MessageCard({
               >
                 <span className="flex items-center gap-1.5 font-medium">
                   <Brain className="w-3.5 h-3.5 text-purple-300" />
-                  <span>Thought process</span>
+                  <span>
+                    {isActivelyThinking ? "Thinking live..." : "Thought process"}
+                  </span>
                 </span>
-                {thinkingExpanded ? (
+                {showThinkingBody ? (
                   <ChevronDown className="w-3.5 h-3.5" />
                 ) : (
                   <ChevronRight className="w-3.5 h-3.5" />
                 )}
               </button>
-              {thinkingExpanded && (
-                <p className="mt-2 pt-2 border-t border-white/[0.06] text-xs text-zinc-400 leading-relaxed whitespace-pre-wrap font-mono">
+              {showThinkingBody && (
+                <p className="mt-2 pt-2 border-t border-white/[0.06] text-xs text-zinc-400 leading-relaxed whitespace-pre-wrap font-mono max-h-60 overflow-y-auto">
                   {message.thinking}
                 </p>
               )}
@@ -1126,43 +1193,75 @@ function MessageCard({
               {message.handoffs.map((h, i) => (
                 <div
                   key={i}
-                  className="rounded-xl bg-[#8cf1fb]/10 border border-[#8cf1fb]/25 px-3 py-2 flex items-center justify-between gap-2 text-xs text-[#8cf1fb]"
+                  className="rounded-xl bg-[#8cf1fb]/10 border border-[#8cf1fb]/25 px-3 py-2 space-y-1 text-xs text-[#8cf1fb]"
                 >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <ArrowLeftRight className="w-3.5 h-3.5 shrink-0" />
-                    <span className="font-semibold truncate">
-                      @{h.fromBotName} handed off to{" "}
-                      {h.toBotNames.map((n) => `@${n}`).join(", ")}
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <ArrowLeftRight className="w-3.5 h-3.5 shrink-0" />
+                      <span className="font-semibold truncate">
+                        @{h.fromBotName} handed off to{" "}
+                        {h.toBotNames.map((n) => `@${n}`).join(", ")}
+                      </span>
+                    </div>
+                    <span className="text-[10.5px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-black/30 text-cyan-200 shrink-0">
+                      {h.mode}
                     </span>
                   </div>
-                  <span className="text-[10.5px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-black/30 text-cyan-200 shrink-0">
-                    {h.mode}
-                  </span>
+                  {h.note && !h.note.startsWith("Handed off to ") && (
+                    <p className="text-[11.5px] text-cyan-100/80 pl-5 line-clamp-2">
+                      {h.note}
+                    </p>
+                  )}
                 </div>
               ))}
             </div>
           )}
         </div>
 
-        {/* Hover Action Row: One-Click Pass Baton / Cross-Review with Another CLI Bot */}
-        {message.status === "complete" &&
-          message.text.trim().length > 0 &&
-          otherBots.length > 0 && (
-            <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1.5 pl-1">
-              <span className="text-[11px] text-zinc-500 mr-1">Hand off to:</span>
-              {otherBots.slice(0, 4).map((b) => (
-                <button
-                  key={b.id}
-                  type="button"
-                  onClick={() => onQuickHandoff(b, message.text)}
-                  className="px-2.5 py-1 rounded-full liquid-glass-chip text-[11px] text-zinc-300 hover:text-white flex items-center gap-1.5 active:scale-95"
-                >
-                  <BotCharacterAvatar bot={b} size={14} />
-                  <span>@{b.name}</span>
-                </button>
-              ))}
-            </div>
-          )}
+        {/* Hover Action Row: Copy & One-Click Pass Baton / Cross-Review with Another CLI Bot */}
+        {message.status !== "streaming" && message.text.trim().length > 0 && (
+          <div className="opacity-0 group-hover:opacity-100 transition-opacity flex flex-wrap items-center gap-1.5 pl-1">
+            <button
+              type="button"
+              onClick={async () => {
+                await navigator.clipboard.writeText(message.text);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+              }}
+              className="px-2.5 py-1 rounded-full liquid-glass-chip text-[11px] text-zinc-300 hover:text-white flex items-center gap-1 active:scale-95"
+            >
+              {copied ? (
+                <>
+                  <Check className="w-3 h-3 text-emerald-400" />
+                  <span>Copied</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3 h-3" />
+                  <span>Copy</span>
+                </>
+              )}
+            </button>
+            {otherBots.length > 0 && (
+              <>
+                <span className="text-[11px] text-zinc-500 ml-1 mr-0.5">
+                  Hand off to:
+                </span>
+                {otherBots.slice(0, 4).map((b) => (
+                  <button
+                    key={b.id}
+                    type="button"
+                    onClick={() => onQuickHandoff(b, message.text)}
+                    className="px-2.5 py-1 rounded-full liquid-glass-chip text-[11px] text-zinc-300 hover:text-white flex items-center gap-1.5 active:scale-95"
+                  >
+                    <BotCharacterAvatar bot={b} size={14} />
+                    <span>@{b.name}</span>
+                  </button>
+                ))}
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -56,6 +56,7 @@ export function DesktopShell({
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("details");
+  const [openStudioSignal, setOpenStudioSignal] = useState(0);
   const [cliHarnessesOpen, setCliHarnessesOpen] = useState(false);
   const [omniHubState, setOmniHubState] = useState<{
     open: boolean;
@@ -404,6 +405,28 @@ export function DesktopShell({
         onNewBot={() => setOmniHubState({ open: true, section: "bots" })}
         onOpenSearch={() => setCommandModal({ open: true, mode: "search" })}
         onDeleteChat={handleDeleteChat}
+        onUpdateChat={async (params) => {
+          const next = await updateOmniChat(params);
+          setSnapshot(next);
+        }}
+        onUpsertBot={async (bot) => {
+          const next = await upsertOmniBot(bot);
+          setSnapshot(next);
+        }}
+        onDeleteBot={async (botId) => {
+          const next = await deleteOmniBot(botId);
+          setSnapshot(next);
+          if (activeChat.participantBotIds.includes(botId)) {
+            const primary = next.chats.find((c) => c.isPrimary);
+            if (primary) setActiveChatId(primary.id);
+          }
+        }}
+        onCustomizeBot={async (bot) => {
+          await handleSelectBotDirectChat(bot);
+          setInspectorTab("details");
+          setInspectorOpen(true);
+          setOpenStudioSignal((n) => n + 1);
+        }}
         onOpenCliHarnesses={() => setCliHarnessesOpen(true)}
         onOpenOmniHub={() => setOmniHubState({ open: true, section: "bots" })}
       />
@@ -469,6 +492,17 @@ export function DesktopShell({
           const next = await upsertOmniBot(bot);
           setSnapshot(next);
         }}
+        onDeleteBot={async (botId) => {
+          const next = await deleteOmniBot(botId);
+          setSnapshot(next);
+          const primary = next.chats.find((c) => c.isPrimary);
+          if (primary) setActiveChatId(primary.id);
+        }}
+        onUpsertProject={async (ws: WorkspaceEntry) => {
+          const next = await upsertOmniWorkspace(ws);
+          setSnapshot(next);
+        }}
+        openStudioSignal={openStudioSignal}
         onUpdatePreferences={async (prefs: OmniPreferences) => {
           const next = await saveOmniPreferences(prefs);
           setSnapshot(next);
