@@ -28,7 +28,7 @@
     "@playwright/test": "^1.64.0",
     "@tailwindcss/vite": "^4.1.4",
     "@tauri-apps/cli": "^2.2.0",
-    "@types/node": "^22.0.0",
+    "@types/node": "^26.6.5",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "^4.3.4",
