@@ -24,6 +24,19 @@ def run(*args, capture=False):
                           text=True, capture_output=capture)
 
 
+def sign_app(app, identity):
+    # Tauri does not sign Sparkle's Updater.app and Autoupdate helper. Seal all
+    # nested code explicitly, inside out, before signing the containing app.
+    framework = app / "Contents/Frameworks/Sparkle.framework"
+    base = framework / "Versions/B"
+    for path in [base / "Autoupdate", base / "Updater.app",
+                 base / "XPCServices/Downloader.xpc", base / "XPCServices/Installer.xpc",
+                 framework, app]:
+        if not path.exists():
+            raise SystemExit(f"Missing required signing target: {path}")
+        run("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, path)
+
+
 def validate_app(app, version, team):
     info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
     expected = {"CFBundleIdentifier": ACCOUNT, "CFBundleShortVersionString": version,
@@ -83,6 +96,7 @@ def main():
     run("pnpm", "tauri:build", "--target", "universal-apple-darwin", "--bundles", "app",
         "--config", json.dumps({"bundle": {"macOS": {"signingIdentity": args.identity}}}))
     app = ROOT / "src-tauri/target/universal-apple-darwin/release/bundle/macos/Omnibot.app"
+    sign_app(app, args.identity)
     validate_app(app, version, team_match[1])
     out = ROOT / "release-artifacts" / version
     if out.exists():
