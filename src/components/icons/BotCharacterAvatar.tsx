@@ -498,13 +498,16 @@ export function BotCharacterAvatar({
   cliDriver: propCliDriver,
   size = 44,
   isStreaming = false,
-  showStarBadge = false,
-  showCliBadge = false,
+  showStarBadge: propShowStarBadge,
+  showCliBadge: propShowCliBadge,
   className = "",
 }: BotCharacterAvatarProps): React.ReactElement {
   const gradId = useId().replace(/:/g, "");
   const isPrimary = propIsPrimary ?? bot?.isPrimary ?? false;
   const cliDriver = propCliDriver ?? bot?.cliDriver;
+  const showStarBadge = propShowStarBadge ?? (isPrimary && size >= 28);
+  const showCliBadge =
+    propShowCliBadge ?? (!isPrimary && Boolean(cliDriver) && size >= 28);
   const rawShape = propShape ?? bot?.shape ?? "blob";
   const effectiveShape =
     isPrimary && rawShape === "omni-prism" ? "blob" : rawShape;
@@ -607,17 +610,17 @@ export function BotCharacterAvatar({
 
       {showCliBadge && cliDriver && !showStarBadge && (
         <span
-          className="absolute flex items-center justify-center rounded-full bg-[#141418] text-white shadow-md ring-2 ring-[#0e0e0e]"
+          className="absolute flex items-center justify-center rounded-full bg-[#16161a] text-white shadow-md ring-2 ring-[#0e0e0e]"
           style={{
-            width: Math.max(15, Math.round(size * 0.34)),
-            height: Math.max(15, Math.round(size * 0.34)),
+            width: Math.max(16, Math.round(size * 0.37)),
+            height: Math.max(16, Math.round(size * 0.37)),
             right: -2,
             bottom: -2,
           }}
         >
           <CliProviderGlyph
             driver={cliDriver}
-            size={Math.max(9, Math.round(size * 0.2))}
+            size={Math.max(10, Math.round(size * 0.21))}
           />
         </span>
       )}

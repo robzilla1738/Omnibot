@@ -326,7 +326,15 @@ export function CliHarnessesModal({
                       className="flex items-center justify-between gap-3.5 py-1"
                     >
                       <div className="flex items-center gap-3.5 min-w-0 flex-1">
-                        <CliBrandBadge driver={h.kind} size={44} />
+                        {matchingBot ? (
+                          <BotCharacterAvatar
+                            bot={matchingBot}
+                            size={44}
+                            showCliBadge
+                          />
+                        ) : (
+                          <CliBrandBadge driver={h.kind} size={44} />
+                        )}
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
                             <span className="text-[14px] font-semibold text-zinc-100 truncate">
