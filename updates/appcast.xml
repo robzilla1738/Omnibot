@@ -1,0 +1,18 @@
+<?xml version="1.0" standalone="yes"?><!-- sparkle-sign-warning:
+IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
+--><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>Omnibot</title>
+        <item>
+            <title>0.1.1</title>
+            <pubDate>Wed, 14 Oct 2026 14:32:10 -0500</pubDate>
+            <sparkle:version>0.1.1</sparkle:version>
+            <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/robzilla1738/Omnibot/releases/download/v0.1.1/Omnibot-0.1.1-universal.zip" length="11209907" type="application/octet-stream" sparkle:edSignature="ZgGj5SQcKIdog5FYfDsPCV8JqU2j7OwOFCIgIDcICzjLKLaQTqYi4xTwa029DzmBoZqmqfdWoLLwrhfMCpCDDA=="></enclosure>
+        </item>
+    </channel>
+</rss><!-- sparkle-signatures:
+edSignature: E5H/NNDwaAanXRh/0etuc9stp0UUX/8I2t9lurokACYfPIx2W7LLZN9XFDFEGhajFYWCVC4JjyMWSkLb9reZDA==
+length: 1057
+-->
