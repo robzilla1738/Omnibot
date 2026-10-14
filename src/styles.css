@@ -1,0 +1,338 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    font-family: "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    font-size: 16px;
+    --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+    --ease-out-quart: cubic-bezier(0.165, 0.84, 0.44, 1);
+  }
+
+  body {
+    background-color: #121212;
+    color: #f4f4f5;
+    font-family: "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.55;
+    letter-spacing: -0.011em;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3, h4 {
+    font-family: "SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    letter-spacing: -0.02em;
+  }
+}
+
+/* ============================================================================
+   Unified Dark Surface System (Matched 1:1 to Magnus Bot & Grok Bot)
+   - Sidebars (Left & Right): #0e0e0e  rgb(14, 14, 14)
+   - Main Chat Background:    #121212  rgb(18, 18, 18)
+   - Chat Outputs & Cards:    #1b1b1b  rgb(27, 27, 27)
+   - Inputs & Pill Controls:  #1f1f1f  rgb(31, 31, 31)
+   - Hover / Active Surface:  #262626  rgb(38, 38, 38)
+   ============================================================================ */
+
+.liquid-glass-pill {
+  background-color: #1f1f1f;
+  border: 1px solid rgba(255, 255, 255, 0.065);
+  transition:
+    background-color 180ms var(--ease-spring),
+    border-color 180ms var(--ease-spring),
+    transform 180ms var(--ease-spring);
+}
+
+.liquid-glass-pill:hover {
+  background-color: #252525;
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.floating-header-pill {
+  background-color: rgba(31, 31, 31, 0.88);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  transition:
+    background-color 180ms var(--ease-spring),
+    border-color 180ms var(--ease-spring),
+    transform 180ms var(--ease-spring);
+}
+
+.floating-header-pill:hover {
+  background-color: rgba(38, 38, 38, 0.94);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.liquid-glass-card {
+  background-color: #1b1b1b;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  transition:
+    background-color 200ms var(--ease-spring),
+    border-color 200ms var(--ease-spring),
+    transform 200ms var(--ease-spring);
+}
+
+.liquid-glass-modal {
+  background-color: rgba(27, 27, 27, 0.96);
+  backdrop-filter: blur(28px);
+  -webkit-backdrop-filter: blur(28px);
+  border: 1px solid rgba(255, 255, 255, 0.085);
+  box-shadow:
+    0 24px 72px -12px rgba(0, 0, 0, 0.85),
+    0 6px 20px rgba(0, 0, 0, 0.45);
+}
+
+.liquid-glass-chip {
+  background-color: #1f1f1f;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  transition:
+    background-color 160ms var(--ease-spring),
+    border-color 160ms var(--ease-spring),
+    transform 160ms var(--ease-spring);
+}
+
+.liquid-glass-chip:hover {
+  background-color: #272727;
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.liquid-glass-active {
+  background-color: #262626;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+}
+
+.spring-transition {
+  transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.chat-scroll-mask {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0px,
+    rgba(0, 0, 0, 0.4) 22px,
+    black 68px,
+    black calc(100% - 88px),
+    rgba(0, 0, 0, 0.35) calc(100% - 28px),
+    transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0px,
+    rgba(0, 0, 0, 0.4) 22px,
+    black 68px,
+    black calc(100% - 88px),
+    rgba(0, 0, 0, 0.35) calc(100% - 28px),
+    transparent 100%
+  );
+}
+
+.chat-top-feather {
+  background: linear-gradient(
+    to bottom,
+    rgba(18, 18, 18, 0.95) 0%,
+    rgba(18, 18, 18, 0.68) 45%,
+    rgba(18, 18, 18, 0.2) 78%,
+    rgba(18, 18, 18, 0) 100%
+  );
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  mask-image: linear-gradient(to bottom, black 0%, rgba(0, 0, 0, 0.6) 55%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, black 0%, rgba(0, 0, 0, 0.6) 55%, transparent 100%);
+}
+
+.chat-bottom-feather {
+  background: linear-gradient(
+    to top,
+    rgba(18, 18, 18, 0.96) 0%,
+    rgba(18, 18, 18, 0.74) 45%,
+    rgba(18, 18, 18, 0.22) 78%,
+    rgba(18, 18, 18, 0) 100%
+  );
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  mask-image: linear-gradient(to top, black 0%, rgba(0, 0, 0, 0.65) 55%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to top, black 0%, rgba(0, 0, 0, 0.65) 55%, transparent 100%);
+}
+
+.sidebar-scroll-mask {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0px,
+    black 14px,
+    black calc(100% - 82px),
+    rgba(0, 0, 0, 0.35) calc(100% - 28px),
+    transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0px,
+    black 14px,
+    black calc(100% - 82px),
+    rgba(0, 0, 0, 0.35) calc(100% - 28px),
+    transparent 100%
+  );
+}
+
+.sidebar-bottom-feather {
+  background: linear-gradient(
+    to top,
+    rgba(14, 14, 14, 0.98) 0%,
+    rgba(14, 14, 14, 0.78) 45%,
+    rgba(14, 14, 14, 0.25) 78%,
+    rgba(14, 14, 14, 0) 100%
+  );
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  mask-image: linear-gradient(to top, black 0%, rgba(0, 0, 0, 0.65) 55%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to top, black 0%, rgba(0, 0, 0, 0.65) 55%, transparent 100%);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.is-scrolling {
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+  background: transparent;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: transparent;
+  border-radius: 9999px;
+}
+
+.is-scrolling::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.16);
+}
+
+.is-scrolling::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(255, 255, 255, 0.28);
+}
+
+/* Markdown prose inside Omni Bot assistant cards */
+.omni-prose {
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.omni-prose p {
+  margin-top: 0;
+  margin-bottom: 0.75rem;
+  line-height: 1.6;
+}
+
+.omni-prose p:last-child {
+  margin-bottom: 0;
+}
+
+.omni-prose ul,
+.omni-prose ol {
+  margin-top: 0.35rem;
+  margin-bottom: 0.75rem;
+  padding-left: 1.35rem;
+}
+
+.omni-prose ul {
+  list-style-type: disc;
+}
+
+.omni-prose ol {
+  list-style-type: decimal;
+}
+
+.omni-prose li {
+  margin-bottom: 0.28rem;
+  line-height: 1.58;
+}
+
+.omni-prose code {
+  font-family: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.84em;
+  background: #1f1f1f;
+  padding: 0.15rem 0.38rem;
+  border-radius: 0.35rem;
+  color: #e4e4e7;
+}
+
+.omni-prose pre {
+  background: #121212;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 0.75rem;
+  padding: 0.85rem 1rem;
+  overflow-x: auto;
+  margin: 0.65rem 0;
+}
+
+.omni-prose pre code {
+  background: transparent;
+  padding: 0;
+  font-size: 0.82rem;
+  color: #d4d4d8;
+}
+
+.omni-prose a {
+  color: #8cf1fb;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.omni-prose a:hover {
+  text-decoration: underline;
+}
+
+.omni-prose h1,
+.omni-prose h2,
+.omni-prose h3 {
+  font-weight: 600;
+  color: #ffffff;
+  margin-top: 1rem;
+  margin-bottom: 0.45rem;
+}
+
+.omni-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75rem 0;
+  font-size: 0.85rem;
+}
+
+.omni-prose th,
+.omni-prose td {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 0.45rem 0.65rem;
+  text-align: left;
+}
+
+.omni-prose th {
+  background: #1f1f1f;
+  font-weight: 600;
+}
+
+.bot-mention-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.05rem 0.42rem;
+  border-radius: 9999px;
+  background: rgba(140, 241, 251, 0.12);
+  border: 1px solid rgba(140, 241, 251, 0.28);
+  color: #8cf1fb;
+  font-weight: 600;
+  font-size: 0.9em;
+}
