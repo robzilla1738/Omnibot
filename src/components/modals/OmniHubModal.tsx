@@ -1,3 +1,7 @@
+import { MemoryManager } from "../memory/MemoryManager";
+import { routineScheduleLabel } from "../routines/RoutineEditor";
+import { BotModelSelect } from "../bots/BotModelSelect";
+import { Collapse } from "../ui/Collapse";
 import {
   Bot,
   Brain,
@@ -6,6 +10,8 @@ import {
   Copy,
   FolderGit2,
   Play,
+  Pin,
+  PinOff,
   Plus,
   Search,
   Settings,
@@ -14,7 +20,8 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { AvatarPicker } from "../bots/AvatarPicker";
+import { useEffect, useId, useState } from "react";
 import type {
   BotColor,
   BotProfile,
@@ -52,6 +59,9 @@ export interface OmniHubModalProps {
   routines: RoutineEntry[];
   preferences: OmniPreferences;
   onUpsertBot: (bot: BotProfile) => Promise<void>;
+  onTogglePin: (bot: BotProfile) => Promise<void>;
+  onOpenSetup: () => void;
+  onOpenCliHarnesses: () => void;
   onDeleteBot: (id: string) => Promise<void>;
   onUpdatePreferences: (prefs: OmniPreferences) => Promise<void>;
   onUpsertProject: (ws: WorkspaceEntry) => Promise<void>;
@@ -70,8 +80,8 @@ const HUB_SECTIONS: Array<{
 }> = [
   {
     id: "bots",
-    label: "Bots & Roster",
-    subtitle: "Create and customize persistent CLI Bots, provider mascots, and roles",
+    label: "Bot library",
+    subtitle: "Your bots live here. Pin favorites to keep them in the sidebar.",
   },
   {
     id: "projects",
@@ -80,8 +90,8 @@ const HUB_SECTIONS: Array<{
   },
   {
     id: "memories",
-    label: "Shared Memories",
-    subtitle: "Persistent facts injected across every Bot and Swarm Room",
+    label: "Memory",
+    subtitle: "Persistent facts injected across every Bot and Group chat",
   },
   {
     id: "skills",
@@ -95,7 +105,7 @@ const HUB_SECTIONS: Array<{
   },
   {
     id: "instructions",
-    label: "Swarm Rules & Trust",
+    label: "Team Rules & Trust",
     subtitle: "Global instructions, handoff limits, and CLI permission defaults",
   },
 ];
@@ -112,6 +122,9 @@ export function OmniHubModal({
   preferences,
   onUpsertBot,
   onDeleteBot,
+  onTogglePin,
+  onOpenSetup,
+  onOpenCliHarnesses,
   onUpdatePreferences,
   onUpsertProject,
   onDeleteProject,
@@ -121,6 +134,7 @@ export function OmniHubModal({
   onSelectBotDirectChat,
   onStartSidechatWithSkill,
 }: OmniHubModalProps) {
+  const disclosureId = useId();
   const [section, setSection] = useState<OmniHubSection>(initialSection);
   const [searchQuery, setSearchQuery] = useState("");
 
@@ -131,6 +145,10 @@ export function OmniHubModal({
   const [botRole, setBotRole] = useState("");
   const [botDesc, setBotDesc] = useState("");
   const [botShape, setBotShape] = useState<BotShape>("claude-spark");
+  const [botAvatarImage, setBotAvatarImage] = useState<string | null>(null);
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const [botSaveError, setBotSaveError] = useState("");
+  const [botSaving, setBotSaving] = useState(false);
   const [botColor, setBotColor] = useState<BotColor>("orange");
   const [botDriver, setBotDriver] = useState<CliDriverKind>("claude");
   const [botModel, setBotModel] = useState<string>("");
@@ -145,12 +163,13 @@ export function OmniHubModal({
   const [showNewProject, setShowNewProject] = useState(false);
   const [editingProjectId, setEditingProjectId] = useState<string>("");
   const [projName, setProjName] = useState("");
-  const [projPath, setProjPath] = useState(preferences.workspaceRoot);
+  const [projPath, setProjPath] = useState("");
   const [projDesc, setProjDesc] = useState("");
   const [projInstructions, setProjInstructions] = useState("");
   const [projAssignedBotIds, setProjAssignedBotIds] = useState<string[]>([]);
   const [projLeadBotId, setProjLeadBotId] = useState<string>("bot-omni");
   const [projUseWorktrees, setProjUseWorktrees] = useState(false);
+  const [projAutoApprove, setProjAutoApprove] = useState(false);
 
   // Instructions state
   const [globalInstructionsDraft, setGlobalInstructionsDraft] = useState(
@@ -171,6 +190,8 @@ export function OmniHubModal({
   const installedHarnesses = harnesses.filter((h) => h.installed);
 
   const openNewBotEditor = () => {
+    setBotAvatarImage(null);
+    setBotSaveError("");
     setEditingBotId("");
     setBotName("");
     setBotRole("Specialized Coding Teammate");
@@ -179,7 +200,7 @@ export function OmniHubModal({
     setBotColor("violet");
     const defaultDriver = installedHarnesses[0]?.kind ?? "claude";
     setBotDriver(defaultDriver);
-    setBotModel(installedHarnesses[0]?.models[0] ?? "");
+    setBotModel("");
     setBotEffort("high");
     setBotPermission("auto");
     setBotPrompt("");
@@ -187,6 +208,8 @@ export function OmniHubModal({
   };
 
   const openExistingBotEditor = (b: BotProfile) => {
+    setBotAvatarImage(b.avatarImage ?? null);
+    setBotSaveError("");
     setEditingBotId(b.id);
     setBotName(b.name);
     setBotRole(b.roleTitle);
@@ -218,7 +241,8 @@ export function OmniHubModal({
   const handleSaveBot = async () => {
     if (!botName.trim()) return;
     const existing = bots.find((b) => b.id === editingBotId);
-    await onUpsertBot({
+    setBotSaving(true); setBotSaveError("");
+    try { await onUpsertBot({
       id: editingBotId,
       name: botName.trim(),
       slug:
@@ -229,7 +253,8 @@ export function OmniHubModal({
           .replace(/[^a-z0-9]+/g, "-"),
       roleTitle: botRole.trim() || "Coding Agent",
       description:
-        botDesc.trim() || `Powered by ${botDriver} CLI inside Botfinity`,
+        botDesc.trim() || `Powered by ${botDriver} CLI inside Omnibot`,
+      avatarImage: botAvatarImage,
       shape: botShape,
       color: botColor,
       isPrimary: existing?.isPrimary ?? false,
@@ -244,6 +269,8 @@ export function OmniHubModal({
       maxTurnBudgetUsd: existing?.maxTurnBudgetUsd ?? null,
     });
     setShowBotForm(false);
+    } catch (e) { setBotSaveError(e instanceof Error ? e.message : String(e)); }
+    finally { setBotSaving(false); }
   };
 
   const handleAddMemory = async () => {
@@ -266,12 +293,13 @@ export function OmniHubModal({
   const openNewProjectForm = () => {
     setEditingProjectId("");
     setProjName("");
-    setProjPath(preferences.workspaceRoot);
+    setProjPath("");
     setProjDesc("");
     setProjInstructions("");
     setProjAssignedBotIds([]);
     setProjLeadBotId("bot-omni");
     setProjUseWorktrees(false);
+    setProjAutoApprove(preferences.approveAllTools);
     setShowNewProject(true);
   };
 
@@ -284,6 +312,7 @@ export function OmniHubModal({
     setProjAssignedBotIds(p.assignedBotIds ?? []);
     setProjLeadBotId(p.leadBotId || "bot-omni");
     setProjUseWorktrees(Boolean(p.useWorktreesDefault));
+    setProjAutoApprove(Boolean(p.approveAllTools));
     setShowNewProject(true);
   };
 
@@ -298,6 +327,8 @@ export function OmniHubModal({
       assignedBotIds: projAssignedBotIds,
       leadBotId: projLeadBotId || "bot-omni",
       useWorktreesDefault: projUseWorktrees,
+      memories: projects.find(p => p.id === editingProjectId)?.memories ?? [],
+      approveAllTools: projAutoApprove,
     });
     setShowNewProject(false);
   };
@@ -342,33 +373,34 @@ export function OmniHubModal({
   return (
     <div
       aria-hidden={!open}
-      className={`fixed inset-0 z-50 flex items-center justify-center p-6 select-none transition-all duration-250 spring-transition ${
+      inert={!open}
+      className={`fixed inset-0 z-50 flex items-center justify-center p-6 select-none transition-opacity duration-250 spring-transition ${
         open
           ? "bg-black/65 backdrop-blur-md opacity-100 pointer-events-auto"
-          : "bg-black/0 backdrop-blur-none opacity-0 pointer-events-none"
+          : "bg-black/65 backdrop-blur-md opacity-0 pointer-events-none"
       }`}
       onClick={onClose}
     >
       <div
-        className={`w-full max-w-[920px] h-[80vh] max-h-[700px] rounded-[24px] bg-[#121212] border border-white/[0.08] shadow-[0_28px_90px_rgba(0,0,0,0.85)] flex overflow-hidden transition-all duration-250 spring-transition ${
+        className={`w-full max-w-[920px] h-[80vh] max-h-[700px] rounded-[24px] bg-[#121212] border border-white/[0.08] shadow-[0_28px_90px_rgba(0,0,0,0.85)] flex overflow-hidden transition-[opacity,scale,translate] duration-250 spring-transition ${
           open
             ? "scale-100 opacity-100 translate-y-0"
-            : "scale-[0.96] opacity-0 translate-y-2"
+            : "scale-[0.985] opacity-0 translate-y-1"
         }`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Left Navigation Rail */}
-        <div className="w-[244px] shrink-0 bg-[#0e0e0e] border-r border-white/[0.07] p-4 flex flex-col justify-between">
+        <div className="w-[244px] shrink-0 bg-[#0e0e0e] p-4 flex flex-col justify-between">
           <div className="space-y-4">
             <div className="px-2 pt-1 flex items-center gap-2.5">
               <img
-                src="/botfinity-gauntlet.png"
-                alt="Botfinity"
+                src="/omnibot-gauntlet.png"
+                alt="Omnibot"
                 className="w-8 h-8 object-contain shrink-0"
               />
               <div className="min-w-0">
                 <div className="text-[15px] font-semibold text-white tracking-tight truncate">
-                  Botfinity Hub
+                  Omnibot Hub
                 </div>
                 <div className="text-[11.5px] text-zinc-400 truncate">
                   Bots, Projects &amp; Memory
@@ -413,7 +445,7 @@ export function OmniHubModal({
 
         {/* Right Content Area */}
         <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-          <div className="px-7 pt-5 pb-4 border-b border-white/[0.07] flex items-center justify-between gap-4 shrink-0">
+          <div className="px-7 pt-5 pb-4 flex items-center justify-between gap-4 shrink-0">
             <div className="min-w-0">
               <h2 className="text-[19px] font-semibold text-white tracking-tight truncate">
                 {activeSectionMeta.label}
@@ -432,12 +464,12 @@ export function OmniHubModal({
             </button>
           </div>
 
-          <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-7 space-y-5">
+          <div key={section} className="motion-view stable-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-7 space-y-5">
             {section === "bots" && (
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
                   <span className="text-xs text-zinc-400">
-                    {bots.length} persistent Bots configured on this Mac
+                    {bots.length} {bots.length === 1 ? "bot" : "bots"} in your library
                   </span>
                   <button
                     type="button"
@@ -447,13 +479,15 @@ export function OmniHubModal({
                     <Plus className="w-3.5 h-3.5" />
                     <span>Create New Bot</span>
                   </button>
+                  <button type="button" onClick={onOpenSetup} className="px-3 py-1.5 rounded-full border border-white/10 text-xs text-zinc-300 hover:text-white">Add from CLIs</button>
+                  <button type="button" onClick={onOpenCliHarnesses} className="text-xs text-zinc-400 hover:text-white">Local tools</button>
                 </div>
 
-                {showBotForm && (
-                  <div className="rounded-2xl liquid-glass-card p-5 space-y-4 border-cyan-400/30">
+                <Collapse open={showBotForm} id={disclosureId + '-showBotForm'}><div className="rounded-2xl liquid-glass-card p-5 space-y-4 border-cyan-400/30">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3">
                         <BotCharacterAvatar
+                          bot={{ avatarImage: botAvatarImage }}
                           shape={botShape}
                           color={botColor}
                           cliDriver={botDriver}
@@ -507,7 +541,7 @@ export function OmniHubModal({
                             type="button"
                             onClick={() => {
                               setBotDriver(h.kind);
-                              setBotModel(h.models[0] ?? "");
+                              setBotModel("");
                             }}
                             className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-colors ${
                               botDriver === h.kind
@@ -523,18 +557,7 @@ export function OmniHubModal({
 
                     {/* Model, Effort & Permission Row */}
                     <div className="grid grid-cols-3 gap-3">
-                      <div className="space-y-1">
-                        <label className="block text-xs text-zinc-400">
-                          Default Model
-                        </label>
-                        <input
-                          type="text"
-                          value={botModel}
-                          onChange={(e) => setBotModel(e.target.value)}
-                          placeholder="Default CLI model"
-                          className="w-full rounded-xl bg-black/40 border border-white/10 px-2.5 py-1.5 text-xs font-mono text-white focus:outline-none"
-                        />
-                      </div>
+                      <BotModelSelect label="Default model" value={botModel || null} harness={installedHarnesses.find(h => h.kind === botDriver)} onChange={model => setBotModel(model ?? "")} />
                       <div className="space-y-1">
                         <label className="block text-xs text-zinc-400">
                           Reasoning Effort
@@ -584,48 +607,10 @@ export function OmniHubModal({
                       </div>
                     </div>
 
-                    {/* Color + Shape Pickers */}
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-1.5">
-                        <label className="block text-xs text-zinc-400">
-                          Character Color
-                        </label>
-                        <div className="flex flex-wrap gap-2">
-                          {BOT_COLORS.map((c) => (
-                            <button
-                              key={c.id}
-                              type="button"
-                              onClick={() => setBotColor(c.id)}
-                              style={{ backgroundColor: c.swatch }}
-                              className={`w-6 h-6 rounded-full ${
-                                botColor === c.id ? "ring-2 ring-white scale-110" : "opacity-75"
-                              }`}
-                            />
-                          ))}
-                        </div>
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="block text-xs text-zinc-400">
-                          Character Mascot / Shape
-                        </label>
-                        <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
-                          {BOT_SHAPES.slice(0, 18).map((s) => (
-                            <button
-                              key={s.id}
-                              type="button"
-                              onClick={() => setBotShape(s.id)}
-                              className={`px-2 py-1 rounded-lg text-[11px] ${
-                                botShape === s.id
-                                  ? "bg-white text-black font-semibold"
-                                  : "bg-[#1f1f1f] text-zinc-300"
-                              }`}
-                            >
-                              {s.label}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
+                    <AvatarPicker value={{ shape: botShape, color: botColor, avatarImage: botAvatarImage }} onBusyChange={setAvatarBusy} onChange={next => {
+                      setBotShape(next.shape as BotShape); setBotColor(next.color as BotColor); setBotAvatarImage(next.avatarImage ?? null);
+                    }} />
+                    {botSaveError && <p role="alert" className="text-sm text-red-300">{botSaveError}</p>}
 
                     <textarea
                       rows={3}
@@ -639,13 +624,13 @@ export function OmniHubModal({
                       <button
                         type="button"
                         onClick={handleSaveBot}
+                        disabled={avatarBusy || botSaving || !botName.trim()}
                         className="px-4 py-2 rounded-full bg-white text-black text-xs font-semibold hover:bg-zinc-200"
                       >
                         Save Bot
                       </button>
                     </div>
-                  </div>
-                )}
+                  </div></Collapse>
 
                 <div className="grid grid-cols-2 gap-3.5">
                   {bots.map((b) => (
@@ -667,7 +652,7 @@ export function OmniHubModal({
                               <span className="text-[14.5px] font-semibold text-white truncate">
                                 {b.name}
                               </span>
-                              <span className="text-[11px] font-mono px-1.5 py-0.2 rounded bg-white/[0.06] text-zinc-300">
+                              <span className="text-[11px]  px-1.5 py-0.2 rounded bg-white/[0.06] text-zinc-300">
                                 {b.cliDriver}
                               </span>
                             </div>
@@ -687,6 +672,13 @@ export function OmniHubModal({
                         )}
                       </div>
 
+                      {!b.isPrimary && <button
+                        type="button"
+                        aria-label={`${preferences.pinnedBotIds?.includes(b.id) ? "Unpin" : "Pin"} ${b.name} ${preferences.pinnedBotIds?.includes(b.id) ? "from" : "to"} sidebar`}
+                        aria-pressed={preferences.pinnedBotIds?.includes(b.id) ?? false}
+                        onClick={() => void onTogglePin(b)}
+                        className="flex items-center gap-2 text-xs text-zinc-400 hover:text-white w-fit"
+                      >{preferences.pinnedBotIds?.includes(b.id) ? <PinOff size={13} /> : <Pin size={13} />}{preferences.pinnedBotIds?.includes(b.id) ? "Unpin from sidebar" : "Pin to sidebar"}</button>}
                       <div className="flex items-center gap-2 pt-1">
                         <button
                           type="button"
@@ -738,8 +730,7 @@ export function OmniHubModal({
                   </button>
                 </div>
 
-                {showNewProject && (
-                  <div className="rounded-2xl liquid-glass-card p-5 space-y-4 border-cyan-400/30">
+                <Collapse open={showNewProject} id={disclosureId + '-showNewProject'}><div className="rounded-2xl liquid-glass-card p-5 space-y-4 border-cyan-400/30">
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-semibold text-white">
                         {editingProjectId ? `Configure Project: ${projName}` : "Add Local Project"}
@@ -758,18 +749,19 @@ export function OmniHubModal({
                         type="text"
                         value={projName}
                         onChange={(e) => setProjName(e.target.value)}
-                        placeholder="Project name (e.g. omni-bot)"
+                        placeholder="Project name (e.g. My app)"
                         className="w-full rounded-xl bg-black/40 border border-white/10 px-3 py-2 text-[13px] text-white focus:outline-none"
                       />
                       <input
                         type="text"
                         value={projPath}
                         onChange={(e) => setProjPath(e.target.value)}
-                        placeholder="/Users/rcourson/Tests/omni-bot"
-                        className="w-full rounded-xl bg-black/40 border border-white/10 px-3 py-2 text-[13px] text-white font-mono focus:outline-none"
+                        placeholder="/Users/you/Projects/my-app"
+                        className="w-full rounded-xl bg-black/40 border border-white/10 px-3 py-2 text-[13px] text-white  focus:outline-none"
                       />
                     </div>
 
+                    <label className="flex items-start gap-3 rounded-xl bg-white/[0.04] p-4 text-sm"><input type="checkbox" checked={projAutoApprove} onChange={event => setProjAutoApprove(event.target.checked)} className="mt-1 accent-white" /><span>Automatically approve tools in this project<span className="block text-xs text-zinc-500 mt-1">When off, each CLI uses its normal permission rules. Home conversations keep standard permissions.</span></span></label>
                     {/* Assigned Bots on this Project */}
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between text-xs text-zinc-400">
@@ -855,7 +847,7 @@ export function OmniHubModal({
                       <div className="flex items-center justify-between rounded-xl bg-black/30 border border-white/[0.07] px-3 py-2.5">
                         <div>
                           <div className="text-xs font-medium text-white">
-                            Isolate Swarm in Worktrees
+                            Isolate Group in Worktrees
                           </div>
                           <div className="text-[11px] text-zinc-400">
                             Default for group chats on this project
@@ -896,8 +888,7 @@ export function OmniHubModal({
                         Save Project Configuration
                       </button>
                     </div>
-                  </div>
-                )}
+                  </div></Collapse>
 
                 <div className="grid grid-cols-2 gap-3.5">
                   {projects.map((proj) => {
@@ -929,7 +920,7 @@ export function OmniHubModal({
                               )}
                             </div>
                           </div>
-                          <div className="text-xs font-mono text-zinc-400 truncate">
+                          <div className="text-xs  text-zinc-400 truncate">
                             {proj.path}
                           </div>
                           {proj.instructions && (
@@ -982,54 +973,7 @@ export function OmniHubModal({
               </div>
             )}
 
-            {section === "memories" && (
-              <div className="space-y-4">
-                <div className="flex items-center gap-2.5">
-                  <input
-                    type="text"
-                    value={newMemoryText}
-                    onChange={(e) => setNewMemoryText(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") handleAddMemory();
-                    }}
-                    placeholder="Teach your Swarm a persistent fact (e.g. 'Always push personal repos to robzilla1738')..."
-                    className="min-w-0 flex-1 rounded-xl bg-black/40 border border-white/12 px-3.5 py-2.5 text-[13.5px] text-zinc-100 placeholder:text-zinc-500 focus:outline-none"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleAddMemory}
-                    className="px-4 py-2.5 rounded-xl bg-white text-black text-[13px] font-semibold hover:bg-zinc-200 shrink-0"
-                  >
-                    Add Memory
-                  </button>
-                </div>
-
-                <div className="space-y-2">
-                  {preferences.sharedMemories.map((entry, idx) => (
-                    <div
-                      key={idx}
-                      className="group rounded-2xl liquid-glass-card px-4 py-3 flex items-start justify-between gap-3"
-                    >
-                      <div className="flex items-start gap-3 min-w-0 flex-1">
-                        <span className="text-xs font-mono text-zinc-500 pt-0.5 shrink-0">
-                          #{idx + 1}
-                        </span>
-                        <p className="text-[13.5px] text-zinc-100 leading-relaxed break-words">
-                          {entry}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveMemory(idx)}
-                        className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-zinc-400 hover:text-red-400"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+            {section === "memories" && <MemoryManager bots={bots} projects={projects} preferences={preferences} onBot={onUpsertBot} onProject={onUpsertProject} onPreferences={onUpdatePreferences} />}
 
             {section === "skills" && (
               <div className="space-y-4">
@@ -1090,6 +1034,7 @@ export function OmniHubModal({
 
             {section === "routines" && (
               <div className="space-y-3">
+                <p className="text-xs text-zinc-400">Run saved tasks manually or on their schedule while Omnibot is open. Create routines from a chat’s settings.</p>
                 {routines.map((r) => (
                   <div
                     key={r.id}
@@ -1114,23 +1059,7 @@ export function OmniHubModal({
                       >
                         <Play className="w-3.5 h-3.5" />
                       </button>
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={r.enabled}
-                        onClick={() =>
-                          onUpsertRoutine({ ...r, enabled: !r.enabled })
-                        }
-                        className={`relative inline-flex h-6 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                          r.enabled ? "bg-[#3b82f6]" : "bg-white/[0.14]"
-                        }`}
-                      >
-                        <span
-                          className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition ${
-                            r.enabled ? "translate-x-4" : "translate-x-0"
-                          }`}
-                        />
-                      </button>
+                      <span className="text-xs text-zinc-500">{routineScheduleLabel(r)}</span>
                       <button
                         type="button"
                         onClick={() => onDeleteRoutine(r.id)}
@@ -1150,7 +1079,7 @@ export function OmniHubModal({
                   <div className="flex items-center justify-between">
                     <div>
                       <div className="text-[14px] font-semibold text-white">
-                        Global Swarm Instructions
+                        Global Team Instructions
                       </div>
                       <p className="text-xs text-zinc-400">
                         Injected into the system context of every Bot turn
@@ -1186,7 +1115,7 @@ export function OmniHubModal({
                       <span>Auto-Approve Local CLI Tool Execution</span>
                     </div>
                     <p className="text-xs text-zinc-400 mt-0.5">
-                      Allow non-interactive CLI turns to read/edit project files and run shell checks without blocking
+                      Default tool approval for new projects. Existing projects have their own setting. Home conversations use standard permissions.
                     </p>
                   </div>
                   <button
@@ -1212,7 +1141,7 @@ export function OmniHubModal({
                 </div>
 
                 {/* Token & Swarm Loop Guardrails */}
-                <div className="rounded-2xl liquid-glass-card divide-y divide-white/[0.06] overflow-hidden">
+                <div className="rounded-2xl liquid-glass-card overflow-hidden">
                   <div className="px-4 py-3 flex items-center justify-between gap-4">
                     <div>
                       <div className="text-[13.5px] font-semibold text-white">
@@ -1339,7 +1268,7 @@ export function OmniHubModal({
                               maxTurnBudgetUsd: usd,
                             })
                           }
-                          className={`px-2.5 py-1 rounded-lg text-xs font-mono font-semibold ${
+                          className={`px-2.5 py-1 rounded-lg text-xs  font-semibold ${
                             (preferences.maxTurnBudgetUsd ?? 1.5) === usd
                               ? "bg-white text-black"
                               : "bg-[#1f1f1f] text-zinc-400 hover:text-white"
@@ -1357,7 +1286,7 @@ export function OmniHubModal({
                         Max Concurrent Parallel Bots (@all)
                       </div>
                       <p className="text-xs text-zinc-400">
-                        Limits simultaneous CLI subprocesses in parallel swarm waves
+                        Limits simultaneous CLI subprocesses in parallel group turns
                       </p>
                     </div>
                     <div className="flex items-center gap-1">

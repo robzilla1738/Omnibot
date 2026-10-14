@@ -209,18 +209,19 @@ export function CliHarnessesModal({
   return (
     <div
       aria-hidden={!open}
-      className={`fixed inset-0 z-50 flex items-center justify-center p-6 select-none transition-all duration-250 spring-transition ${
+      inert={!open}
+      className={`fixed inset-0 z-50 flex items-center justify-center p-6 select-none transition-opacity duration-250 spring-transition ${
         open
           ? "bg-black/65 backdrop-blur-sm opacity-100 pointer-events-auto"
-          : "bg-black/0 backdrop-blur-none opacity-0 pointer-events-none"
+          : "bg-black/65 backdrop-blur-md opacity-0 pointer-events-none"
       }`}
       onClick={onClose}
     >
       <div
-        className={`w-full max-w-[860px] h-[78vh] max-h-[680px] rounded-[24px] bg-[#121212] border border-white/[0.08] shadow-[0_28px_90px_rgba(0,0,0,0.85)] flex flex-col overflow-hidden transition-all duration-250 spring-transition ${
+        className={`w-full max-w-[860px] h-[78vh] max-h-[680px] rounded-[24px] bg-[#121212] border border-white/[0.08] shadow-[0_28px_90px_rgba(0,0,0,0.85)] flex flex-col overflow-hidden transition-[opacity,scale,translate] duration-250 spring-transition ${
           open
             ? "scale-100 opacity-100 translate-y-0"
-            : "scale-[0.96] opacity-0 translate-y-2"
+            : "scale-[0.985] opacity-0 translate-y-1"
         }`}
         onClick={(e) => e.stopPropagation()}
       >
@@ -228,7 +229,7 @@ export function CliHarnessesModal({
         <div className="shrink-0 px-7 pt-5 pb-3.5 flex items-center justify-between">
           <div>
             <h2 className="text-[20px] font-semibold text-white tracking-tight">
-              Local Coding Harnesses &amp; Swarm Tools
+              Local Coding Tools
             </h2>
             <p className="text-xs text-[#8e8d8a] mt-0.5">
               Auto-detected CLI agents, role templates, MCP servers, and local skills
@@ -303,7 +304,7 @@ export function CliHarnessesModal({
         </div>
 
         {/* Scrollable 2-Column Catalog Body */}
-        <div className="flex-1 min-h-0 overflow-y-auto px-7 pb-7 space-y-6">
+        <div key={category} className="motion-view stable-scroll flex-1 min-h-0 overflow-y-auto px-7 pb-7 space-y-6">
           {/* 1. Local Coding CLIs */}
           {filteredHarnesses.length > 0 && (
             <section className="space-y-3.5">
@@ -348,14 +349,14 @@ export function CliHarnessesModal({
                               </span>
                             )}
                             {h.version && (
-                              <span className="text-[11px] font-mono text-zinc-400 truncate max-w-[90px]">
+                              <span className="text-[11px]  text-zinc-400 truncate max-w-[90px]">
                                 {h.version.split(" ")[0]}
                               </span>
                             )}
                           </div>
                           <div
                             title={testRes?.message || h.binaryPath || h.installHint}
-                            className="text-[12px] font-mono text-zinc-400 truncate mt-0.5"
+                            className="text-[12px]  text-zinc-400 truncate mt-0.5"
                           >
                             {testRes ? (
                               <span className="text-emerald-300">
@@ -432,7 +433,7 @@ export function CliHarnessesModal({
             <section className="space-y-3.5">
               <div className="flex items-center justify-between">
                 <h3 className="text-[13.5px] font-semibold text-zinc-200">
-                  Specialized Swarm Bot Templates
+                  Specialized Bot Templates
                 </h3>
                 <span className="text-xs text-zinc-500">
                   Add role teammates to your roster
@@ -461,7 +462,7 @@ export function CliHarnessesModal({
                             <span className="text-[14px] font-semibold text-zinc-100 truncate">
                               {tpl.name}
                             </span>
-                            <span className="text-[11px] font-mono text-zinc-400">
+                            <span className="text-[11px]  text-zinc-400">
                               {tpl.preferredDriver}
                             </span>
                           </div>
@@ -525,7 +526,7 @@ export function CliHarnessesModal({
                         <div className="text-[14px] font-semibold text-zinc-100 truncate">
                           {mcp.name}
                         </div>
-                        <div className="text-[12px] text-zinc-400 font-mono truncate mt-0.5">
+                        <div className="text-[12px] text-zinc-400  truncate mt-0.5">
                           {mcp.source} · {mcp.commandOrUrl}
                         </div>
                       </div>

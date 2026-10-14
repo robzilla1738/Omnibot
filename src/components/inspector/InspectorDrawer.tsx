@@ -1,3 +1,7 @@
+import { RoutineEditor, routineScheduleLabel } from "../routines/RoutineEditor";
+import { BotModelSelect } from "../bots/BotModelSelect";
+import { Collapse } from "../ui/Collapse";
+import { AvatarPicker } from "../bots/AvatarPicker";
 import {
   Brain,
   Check,
@@ -20,7 +24,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import {
   getComputerOverview,
   getGitFileDiff,
@@ -57,6 +61,7 @@ export interface InspectorDrawerProps {
   onSelectTab: (tab: InspectorTab) => void;
   onClose: () => void;
   chat: ChatThread;
+  onChooseProject: () => void;
   activeBot: BotProfile;
   bots: BotProfile[];
   harnesses: CliHarnessInfo[];
@@ -69,6 +74,7 @@ export interface InspectorDrawerProps {
     chatId: string;
     title?: string;
     participantBotIds?: string[];
+    workspacePath?: string;
     useWorktrees?: boolean;
     maxSwarmTurns?: number;
   }) => Promise<void>;
@@ -93,6 +99,7 @@ export function InspectorDrawer({
   onSelectTab,
   onClose,
   chat,
+  onChooseProject,
   activeBot,
   bots,
   harnesses,
@@ -118,6 +125,7 @@ export function InspectorDrawer({
 }: InspectorDrawerProps) {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(chat.title);
+  const disclosureId = useId();
   const [customizeAvatarOpen, setCustomizeAvatarOpen] = useState(false);
   const [swarmMembersOpen, setSwarmMembersOpen] = useState(false);
   const [botNameDraft, setBotNameDraft] = useState(activeBot.name);
@@ -135,9 +143,7 @@ export function InspectorDrawer({
   }, [openStudioSignal]);
 
   const [showNewRoutineForm, setShowNewRoutineForm] = useState(false);
-  const [newRoutineName, setNewRoutineName] = useState("");
-  const [newRoutineCron, setNewRoutineCron] = useState("0 9 * * 1-5");
-  const [newRoutinePrompt, setNewRoutinePrompt] = useState("");
+  const [routineDraftVersion, setRoutineDraftVersion] = useState(0);
 
   const [selectedDiffFile, setSelectedDiffFile] = useState<string | null>(null);
   const [selectedDiffContent, setSelectedDiffContent] = useState<string>("");
@@ -184,7 +190,7 @@ export function InspectorDrawer({
     setSelectedDiffFile(filePath);
     setSelectedDiffContent("Loading diff...");
     try {
-      const diff = await getGitFileDiff(filePath);
+      const diff = await getGitFileDiff(filePath, chat.id);
       setSelectedDiffContent(diff || "(No diff output)");
     } catch (err) {
       setSelectedDiffContent(
@@ -205,34 +211,20 @@ export function InspectorDrawer({
     }
   };
 
-  const handleCreateRoutine = async () => {
-    if (!newRoutineName.trim() || !newRoutinePrompt.trim()) return;
-    await onUpsertRoutine({
-      id: "",
-      name: newRoutineName.trim(),
-      cron: newRoutineCron.trim() || "0 9 * * 1-5",
-      prompt: newRoutinePrompt.trim(),
-      botId: activeBot.id,
-      enabled: true,
-    });
-    setNewRoutineName("");
-    setNewRoutinePrompt("");
-    setShowNewRoutineForm(false);
-  };
-
   const installedHarnesses = harnesses.filter((h) => h.installed);
   const activeProjectName =
-    projects.find((p) => p.path === preferences.workspaceRoot)?.name ||
-    preferences.workspaceRoot.split("/").filter(Boolean).pop() ||
+    projects.find((p) => p.path === chat.workspacePath)?.name ||
+    (chat.workspacePath ?? "").split("/").filter(Boolean).pop() ||
     "Project";
 
   return (
     <aside
       aria-hidden={!open}
+      inert={!open}
       className={`relative shrink-0 h-full bg-[#0e0e0e] select-none z-20 overflow-hidden transition-[width,opacity,border-color] duration-300 spring-transition ${
         open
-          ? "w-[372px] opacity-100 border-l border-white/[0.06]"
-          : "w-0 opacity-0 border-l border-transparent pointer-events-none"
+          ? "w-[372px] opacity-100 "
+          : "w-0 opacity-0 pointer-events-none"
       }`}
     >
       <div
@@ -299,7 +291,7 @@ export function InspectorDrawer({
             />
           ) : (
             <div className="mt-1 flex items-center gap-2 text-[13px] text-[#8e8d8a]">
-              <span className="font-mono text-zinc-400">
+              <span className=" text-zinc-400">
                 {activeBot.cliDriver}
               </span>
               <span>·</span>
@@ -339,7 +331,7 @@ export function InspectorDrawer({
                 },
                 { id: "computer", label: "Computer" },
               ] as const
-            ).map((t) => {
+            ).filter(t => t.id !== "git" || !!chat.workspacePath).map((t) => {
               const active = activeTab === t.id;
               return (
                 <button
@@ -360,12 +352,11 @@ export function InspectorDrawer({
         </div>
 
         {/* Scrollable Tab Body */}
-        <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden sidebar-scroll-mask px-4 pt-1 pb-16 space-y-5">
+        <div key={activeTab} className="motion-view stable-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden inspector-scroll-mask px-4 pt-3 pb-8 space-y-5">
           {activeTab === "details" && (
             <div className="space-y-5">
               {/* Collapsible Character & CLI Studio */}
-              {customizeAvatarOpen && (
-                <div className="liquid-glass-card rounded-2xl p-4 space-y-4">
+              <Collapse open={customizeAvatarOpen} id={disclosureId + '-customizeAvatarOpen'}><div className="liquid-glass-card rounded-2xl p-4 space-y-4">
                   <div className="flex items-center justify-between">
                     <span className="text-[13.5px] font-semibold text-white">
                       {activeBot.name} · Character &amp; CLI
@@ -454,7 +445,8 @@ export function InspectorDrawer({
                               onUpsertBot({
                                 ...activeBot,
                                 cliDriver: h.kind as CliDriverKind,
-                                model: h.models[0] ?? null,
+                                customCommand: null,
+                                model: null,
                               })
                             }
                             className={`px-2.5 py-1.5 rounded-xl text-xs font-medium flex items-center justify-between transition-colors ${
@@ -471,75 +463,12 @@ export function InspectorDrawer({
                     </div>
                   </div>
 
-                  {/* Color Palette Picker */}
-                  <div className="space-y-1.5">
-                    <label className="block text-xs text-[#8e8d8a]">
-                      Character Color
-                    </label>
-                    <div className="flex flex-wrap gap-2">
-                      {BOT_COLORS.map((c) => {
-                        const selected = activeBot.color === c.id;
-                        return (
-                          <button
-                            key={c.id}
-                            type="button"
-                            title={c.label}
-                            onClick={() =>
-                              onUpsertBot({
-                                ...activeBot,
-                                color: c.id as BotColor,
-                              })
-                            }
-                            style={{ backgroundColor: c.swatch }}
-                            className={`w-6 h-6 rounded-full transition-transform ${
-                              selected
-                                ? "ring-2 ring-white scale-110"
-                                : "opacity-80 hover:opacity-100"
-                            }`}
-                          />
-                        );
-                      })}
-                    </div>
-                  </div>
+                  <BotModelSelect value={activeBot.model ?? null} harness={installedHarnesses.find(h => h.kind === activeBot.cliDriver)} onChange={model => onUpsertBot({ ...activeBot, model })} />
 
-                  {/* Shape Grid */}
-                  <div className="space-y-1.5">
-                    <label className="block text-xs text-[#8e8d8a]">
-                      Bot Shape ({BOT_SHAPES.length})
-                    </label>
-                    <div className="grid grid-cols-5 gap-1.5 max-h-52 overflow-y-auto p-1">
-                      {BOT_SHAPES.map((s) => {
-                        const selected = activeBot.shape === s.id;
-                        return (
-                          <button
-                            key={s.id}
-                            type="button"
-                            title={s.label}
-                            onClick={() =>
-                              onUpsertBot({
-                                ...activeBot,
-                                shape: s.id as BotShape,
-                              })
-                            }
-                            className={`p-1.5 rounded-xl flex items-center justify-center transition-all ${
-                              selected
-                                ? "bg-[#2a2a2e] ring-1 ring-white/30"
-                                : "bg-[#151517] hover:bg-[#202024]"
-                            }`}
-                          >
-                            <BotCharacterAvatar
-                              shape={s.id}
-                              color={activeBot.color}
-                              size={32}
-                            />
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
+                  <AvatarPicker key={activeBot.id} value={activeBot} onChange={async appearance => { await onUpsertBot({ ...activeBot, ...appearance }); }} />
 
                   {!activeBot.isPrimary && onDeleteBot && (
-                    <div className="pt-2 border-t border-white/[0.06] flex justify-end">
+                    <div className="pt-2 flex justify-end">
                       <button
                         type="button"
                         onClick={async () => {
@@ -553,14 +482,19 @@ export function InspectorDrawer({
                       </button>
                     </div>
                   )}
-                </div>
-              )}
+                </div></Collapse>
 
+              <div className="rounded-2xl liquid-glass-card px-4 py-4 space-y-3">
+                <div className="text-sm text-zinc-200">{chat.workspacePath ? "This chat’s project" : "Personal conversation"}</div>
+                <p className="text-xs text-zinc-400 break-words leading-relaxed">{chat.workspacePath ?? "Your bot uses its personal home and memory. Choose a project to start a separate work chat."}</p>
+                <button type="button" className="rounded-full bg-white/10 px-3 py-2 text-xs text-zinc-200" onClick={onChooseProject}>{chat.workspacePath ? "Start another project chat" : "Choose a project"}</button>
+              </div>
               {/* Quick Project & Git Status Summary Row */}
-              <div className="liquid-glass-card rounded-2xl divide-y divide-white/[0.06] overflow-hidden">
+              <div className="liquid-glass-card rounded-2xl overflow-hidden">
                 <button
                   type="button"
                   onClick={() => onSelectTab("git")}
+                  hidden={!chat.workspacePath}
                   className="w-full px-4 py-3 flex items-center justify-between gap-3 text-left hover:bg-white/[0.03] transition-colors"
                 >
                   <div className="flex items-center gap-3 min-w-0">
@@ -571,7 +505,7 @@ export function InspectorDrawer({
                       <div className="text-[14.5px] font-medium text-[#f4f4f5] truncate">
                         {activeProjectName}
                       </div>
-                      <div className="text-xs text-[#8e8d8a] font-mono truncate flex items-center gap-1.5">
+                      <div className="text-xs text-[#8e8d8a]  truncate flex items-center gap-1.5">
                         <GitBranch className="w-3 h-3 text-emerald-400 shrink-0" />
                         <span>{gitStatus.branch || "main"}</span>
                         {gitStatus.changedFiles.length > 0 && (
@@ -612,8 +546,7 @@ export function InspectorDrawer({
                     />
                   </button>
 
-                  {swarmMembersOpen && (
-                    <div className="px-3 pb-3 pt-1 space-y-1 border-t border-white/[0.04]">
+                  <Collapse open={swarmMembersOpen} id={disclosureId + '-swarmMembersOpen'}><div className="px-3 pb-3 pt-1 space-y-1 ">
                       {bots.map((b) => {
                         const inChat = chat.participantBotIds.includes(b.id);
                         return (
@@ -632,7 +565,7 @@ export function InspectorDrawer({
                               <span className="font-medium truncate">
                                 {b.name}
                               </span>
-                              <span className="font-mono text-[10.5px] text-zinc-500">
+                              <span className=" text-[10.5px] text-zinc-500">
                                 ({b.cliDriver})
                               </span>
                             </span>
@@ -642,17 +575,16 @@ export function InspectorDrawer({
                           </button>
                         );
                       })}
-                    </div>
-                  )}
+                    </div></Collapse>
                 </div>
               </div>
 
-              {/* Multi-Bot Swarm Room Controls */}
+              {/* Multi-Bot Group chat Controls */}
               <div className="space-y-2">
                 <span className="px-1.5 text-[13.5px] font-normal text-[#8e8d8a] block">
-                  Swarm &amp; Execution Controls
+                  Group &amp; Execution Controls
                 </span>
-                <div className="liquid-glass-card rounded-2xl divide-y divide-white/[0.06] overflow-hidden">
+                <div className="liquid-glass-card rounded-2xl overflow-hidden">
                   <div className="px-4 py-3 flex items-center justify-between gap-3">
                     <div className="min-w-0">
                       <div className="text-[14.5px] font-medium text-[#f4f4f5]">
@@ -737,6 +669,9 @@ export function InspectorDrawer({
                   </span>
                   <button
                     type="button"
+                    aria-label={showNewRoutineForm ? "Close new routine" : "New routine"}
+                    aria-expanded={showNewRoutineForm}
+                    aria-controls={disclosureId + "-showNewRoutineForm"}
                     onClick={() => setShowNewRoutineForm((v) => !v)}
                     className="px-3 py-1 rounded-full bg-[#1f1f1f] hover:bg-[#272727] border border-white/[0.06] text-[12.5px] font-medium text-zinc-200 hover:text-white flex items-center gap-1.5 active:scale-95 transition-colors"
                   >
@@ -749,45 +684,14 @@ export function InspectorDrawer({
                   </button>
                 </div>
 
-                {showNewRoutineForm && (
-                  <div className="liquid-glass-card rounded-2xl p-4 space-y-2.5">
-                    <input
-                      type="text"
-                      value={newRoutineName}
-                      onChange={(e) => setNewRoutineName(e.target.value)}
-                      placeholder="Routine name (e.g. Daily PR & Lint Check)"
-                      className="w-full rounded-xl bg-[#1f1f1f] border border-white/[0.07] px-3 py-2 text-[13px] text-zinc-100 placeholder:text-zinc-500 focus:outline-none"
-                    />
-                    <input
-                      type="text"
-                      value={newRoutineCron}
-                      onChange={(e) => setNewRoutineCron(e.target.value)}
-                      placeholder="Cron schedule (e.g. 0 9 * * 1-5)"
-                      className="w-full rounded-xl bg-[#1f1f1f] border border-white/[0.07] px-3 py-2 text-[13px] text-zinc-100 font-mono placeholder:text-zinc-500 focus:outline-none"
-                    />
-                    <textarea
-                      rows={2}
-                      value={newRoutinePrompt}
-                      onChange={(e) => setNewRoutinePrompt(e.target.value)}
-                      placeholder="Prompt the Bot will execute..."
-                      className="w-full rounded-xl bg-[#1f1f1f] border border-white/[0.07] px-3 py-2 text-[13px] text-zinc-100 placeholder:text-zinc-500 focus:outline-none resize-none"
-                    />
-                    <div className="flex justify-end gap-2 pt-1">
-                      <button
-                        type="button"
-                        onClick={handleCreateRoutine}
-                        className="px-4 py-1.5 rounded-full bg-[#3b82f6] hover:bg-[#2563eb] text-white text-[12.5px] font-medium"
-                      >
-                        Save Routine
-                      </button>
-                    </div>
-                  </div>
-                )}
+                <Collapse open={showNewRoutineForm} id={disclosureId + '-showNewRoutineForm'}>
+                  <RoutineEditor key={`${chat.id}-${activeBot.id}-${routineDraftVersion}`} bots={bots} harnesses={harnesses} chat={chat} initialBotId={activeBot.id} onSave={async routine => { await onUpsertRoutine(routine); setShowNewRoutineForm(false); setRoutineDraftVersion(version => version + 1); }} />
+                </Collapse>
 
-                <div className="liquid-glass-card rounded-2xl divide-y divide-white/[0.06] overflow-hidden">
+                <div className="liquid-glass-card rounded-2xl overflow-hidden">
                   {routines.length === 0 ? (
                     <div className="p-4 text-[13px] text-[#8e8d8a]">
-                      No scheduled routines yet.
+                      Save a routine to repeat a useful task.
                     </div>
                   ) : (
                     routines.map((routine) => {
@@ -803,24 +707,26 @@ export function InspectorDrawer({
                               {routine.name}
                             </div>
                             <div className="text-[12.5px] text-[#8e8d8a] truncate mt-0.5 flex items-center gap-2">
-                              <span>@{rBot.name}</span>
+                              <span title={routine.model || rBot.model || "CLI default"}>@{rBot.name}</span>
                               <span>·</span>
-                              <span>{routine.cron}</span>
+                              <span>{routineScheduleLabel(routine)}</span>
                               <button
                                 type="button"
                                 onClick={() => onRunRoutineNow(routine)}
-                                title="Run routine now in active chat"
+                                title="Run routine with its saved bot and model"
                                 className="text-cyan-300 hover:text-white inline-flex items-center gap-0.5"
                               >
                                 <Play className="w-3 h-3" />
                                 <span>Run</span>
                               </button>
                             </div>
+                            {routine.lastError && <p className="mt-1 text-xs text-red-300">{routine.lastError}</p>}
                           </div>
 
-                          <button
+                          {routine.schedule && routine.schedule.frequency !== "manual" && <button
                             type="button"
                             role="switch"
+                            aria-label={`Enable ${routine.name}`}
                             aria-checked={routine.enabled}
                             onClick={() =>
                               onUpsertRoutine({
@@ -837,7 +743,7 @@ export function InspectorDrawer({
                                 routine.enabled ? "translate-x-4" : "translate-x-0"
                               }`}
                             />
-                          </button>
+                          </button>}
                         </div>
                       );
                     })
@@ -845,12 +751,12 @@ export function InspectorDrawer({
                 </div>
               </div>
 
-              {/* Quick Launch into Botfinity Hub */}
+              {/* Quick Launch into Omnibot Hub */}
               <div className="space-y-2">
                 <span className="px-1.5 text-[13.5px] font-normal text-[#8e8d8a] block">
-                  Botfinity Hub
+                  Omnibot Hub
                 </span>
-                <div className="liquid-glass-card rounded-2xl divide-y divide-white/[0.06] overflow-hidden">
+                <div className="liquid-glass-card rounded-2xl overflow-hidden">
                   <button
                     type="button"
                     onClick={() => onOpenOmniHub("memories")}
@@ -886,7 +792,7 @@ export function InspectorDrawer({
             </div>
           )}
 
-          {activeTab === "git" && (
+          {activeTab === "git" && chat.workspacePath && (
             <div className="space-y-5">
               {/* Project Switcher & Bot Assignment Card */}
               <div className="liquid-glass-card rounded-2xl p-4 space-y-3">
@@ -902,48 +808,17 @@ export function InspectorDrawer({
                     Configure Projects
                   </button>
                 </div>
-                <div className="space-y-1">
-                  {projects.map((p) => {
-                    const isCurrent = p.path === preferences.workspaceRoot;
-                    return (
-                      <button
-                        key={p.id}
-                        type="button"
-                        onClick={() =>
-                          onUpdatePreferences({
-                            ...preferences,
-                            workspaceRoot: p.path,
-                          })
-                        }
-                        className={`w-full px-3 py-2 rounded-xl flex items-center justify-between gap-2 text-left text-xs transition-colors ${
-                          isCurrent
-                            ? "bg-white/[0.08] text-white font-semibold"
-                            : "hover:bg-white/[0.04] text-zinc-300"
-                        }`}
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate">{p.name}</div>
-                          <div className="text-[11px] font-mono text-zinc-400 truncate">
-                            {p.path}
-                          </div>
-                        </div>
-                        {isCurrent && (
-                          <Check className="w-4 h-4 text-[#8cf1fb] shrink-0" />
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
+                <div className="space-y-2"><p className="text-sm text-zinc-200">{activeProjectName}</p><p className="text-xs text-zinc-500 break-all">{chat.workspacePath}</p><button className="text-xs text-zinc-300 hover:text-white" onClick={onChooseProject}>Open another project chat</button></div>
 
                 {/* Quick Bot Assignment for Active Project */}
                 {(() => {
                   const activeProj = projects.find(
-                    (p) => p.path === preferences.workspaceRoot
+                    (p) => p.path === chat.workspacePath
                   );
                   if (!activeProj || !onUpsertProject) return null;
                   const assignedIds = activeProj.assignedBotIds ?? [];
                   return (
-                    <div className="pt-2 border-t border-white/[0.06] space-y-2">
+                    <div className="pt-2 space-y-2">
                       <div className="flex items-center justify-between text-[11.5px] text-[#8e8d8a]">
                         <span>
                           Bots on {activeProj.name}{" "}
@@ -1015,7 +890,7 @@ export function InspectorDrawer({
                         ? `Branch: ${gitStatus.branch}`
                         : "Not a Git repository"}
                     </div>
-                    <div className="text-xs text-[#8e8d8a] font-mono truncate">
+                    <div className="text-xs text-[#8e8d8a]  truncate">
                       {gitStatus.rootPath}
                     </div>
                   </div>
@@ -1054,7 +929,7 @@ export function InspectorDrawer({
                 )}
 
                 {gitStatus.diffStat && (
-                  <pre className="text-[11px] font-mono text-zinc-400 bg-black/40 rounded-xl p-2.5 overflow-x-auto">
+                  <pre className="font-mono text-[11px]  text-zinc-400 bg-black/40 rounded-xl p-2.5 overflow-x-auto">
                     {gitStatus.diffStat}
                   </pre>
                 )}
@@ -1064,7 +939,7 @@ export function InspectorDrawer({
                 <span className="px-1.5 text-[13.5px] font-normal text-[#8e8d8a] block">
                   Changed Files ({gitStatus.changedFiles.length})
                 </span>
-                <div className="liquid-glass-card rounded-2xl divide-y divide-white/[0.06] overflow-hidden">
+                <div className="liquid-glass-card rounded-2xl overflow-hidden">
                   {gitStatus.changedFiles.length === 0 ? (
                     <div className="p-4 text-[13px] text-[#8e8d8a]">
                       Working tree is clean.
@@ -1081,7 +956,7 @@ export function InspectorDrawer({
                               className="flex items-center gap-2.5 min-w-0 flex-1 text-left"
                             >
                               <FileCode2 className="w-4 h-4 text-cyan-400 shrink-0" />
-                              <span className="text-[13px] font-mono text-zinc-100 truncate">
+                              <span className="text-[13px]  text-zinc-100 truncate">
                                 {f.path}
                               </span>
                             </button>
@@ -1108,7 +983,7 @@ export function InspectorDrawer({
                             </div>
                           </div>
                           {expanded && (
-                            <pre className="px-3.5 py-2.5 bg-black/60 border-t border-white/[0.06] text-[11px] font-mono text-zinc-300 overflow-x-auto max-h-60">
+                            <pre className="font-mono px-3.5 py-2.5 bg-black/60 text-[11px]  text-zinc-300 overflow-x-auto max-h-60">
                               {selectedDiffContent}
                             </pre>
                           )}
@@ -1124,16 +999,16 @@ export function InspectorDrawer({
                   <span className="px-1.5 text-[13.5px] font-normal text-[#8e8d8a] block">
                     Git Worktrees ({gitStatus.worktrees.length})
                   </span>
-                  <div className="liquid-glass-card rounded-2xl divide-y divide-white/[0.06] overflow-hidden">
+                  <div className="liquid-glass-card rounded-2xl overflow-hidden">
                     {gitStatus.worktrees.map((wt) => (
                       <div key={wt.path} className="px-3.5 py-2.5 space-y-0.5">
                         <div className="flex items-center justify-between text-xs">
-                          <span className="font-mono font-semibold text-[#8cf1fb]">
+                          <span className=" font-semibold text-[#8cf1fb]">
                             {wt.branch}
                           </span>
-                          <span className="font-mono text-zinc-500">{wt.head}</span>
+                          <span className=" text-zinc-500">{wt.head}</span>
                         </div>
-                        <div className="text-[11.5px] font-mono text-zinc-400 truncate">
+                        <div className="text-[11.5px]  text-zinc-400 truncate">
                           {wt.path}
                         </div>
                       </div>
@@ -1180,7 +1055,7 @@ export function InspectorDrawer({
                       type="text"
                       value={workspaceInput}
                       onChange={(e) => setWorkspaceInput(e.target.value)}
-                      className="min-w-0 flex-1 rounded-xl bg-[#1f1f1f] border border-white/[0.07] px-3 py-2 text-[12.5px] text-zinc-100 font-mono focus:outline-none"
+                      className="min-w-0 flex-1 rounded-xl bg-[#1f1f1f] border border-white/[0.07] px-3 py-2 text-[12.5px] text-zinc-100  focus:outline-none"
                     />
                     <button
                       type="button"
@@ -1213,7 +1088,7 @@ export function InspectorDrawer({
                     <RefreshCw className="w-3.5 h-3.5" />
                   </button>
                 </div>
-                <div className="liquid-glass-card rounded-2xl max-h-56 overflow-y-auto divide-y divide-white/[0.06]">
+                <div className="liquid-glass-card rounded-2xl max-h-56 overflow-y-auto ">
                   {localFiles.slice(0, 30).map((f) => (
                     <button
                       key={f.path}
@@ -1246,7 +1121,7 @@ export function InspectorDrawer({
                 <span className="px-1.5 text-[13.5px] font-normal text-[#8e8d8a] block">
                   Recent CLI &amp; Tool Telemetry
                 </span>
-                <div className="liquid-glass-card rounded-2xl divide-y divide-white/[0.06] overflow-hidden">
+                <div className="liquid-glass-card rounded-2xl overflow-hidden">
                   {computerActivity.length === 0 ? (
                     <div className="p-4 text-[13px] text-[#8e8d8a]">
                       No CLI subprocess runs recorded yet in this session.
@@ -1255,7 +1130,7 @@ export function InspectorDrawer({
                     computerActivity.slice(0, 12).map((act) => (
                       <div key={act.id} className="px-3.5 py-2.5 space-y-0.5">
                         <div className="flex items-center justify-between text-[12.5px]">
-                          <span className="font-mono text-[#f4f4f5] truncate">
+                          <span className=" text-[#f4f4f5] truncate">
                             {act.toolName}
                           </span>
                           <span className="text-[11.5px] text-[#8e8d8a] flex items-center gap-1 shrink-0">

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::UNIX_EPOCH;
@@ -112,9 +112,16 @@ pub fn read_workspace_file(
             target.display()
         ));
     }
-    let bytes = fs::read(&target)
-        .map_err(|e| format!("Could not read file {}: {e}", target.display()))?;
     let limit = max_bytes.clamp(512, 256_000);
+    let file = fs::File::open(&target)
+        .map_err(|e| format!("Could not read file {}: {e}", target.display()))?;
+    if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+        return Err("Only regular files can be previewed.".into());
+    }
+    let mut bytes = Vec::new();
+    file.take((limit + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Could not read file {}: {e}", target.display()))?;
     let slice = if bytes.len() > limit {
         &bytes[..limit]
     } else {
@@ -153,7 +160,9 @@ pub fn open_on_desktop(
 
     if trimmed.is_empty() {
         let Some(app) = clean_app else {
-            return Err("Provide either a file/folder/URL target or an application name.".to_string());
+            return Err(
+                "Provide either a file/folder/URL target or an application name.".to_string(),
+            );
         };
         let status = Command::new("open")
             .args(["-a", app])
@@ -165,7 +174,10 @@ pub fn open_on_desktop(
         return Ok(format!("Opened application '{app}'."));
     }
 
-    if trimmed.starts_with("https://") || trimmed.starts_with("http://localhost") || trimmed.starts_with("http://127.0.0.1") {
+    if trimmed.starts_with("https://")
+        || trimmed.starts_with("http://localhost")
+        || trimmed.starts_with("http://127.0.0.1")
+    {
         let mut cmd = Command::new("open");
         if let Some(app) = clean_app {
             cmd.args(["-a", app]);
@@ -192,7 +204,10 @@ pub fn open_on_desktop(
         .status()
         .map_err(|e| format!("Failed to open '{}': {e}", resolved.display()))?;
     if !status.success() {
-        return Err(format!("macOS open exited with error for '{}'.", resolved.display()));
+        return Err(format!(
+            "macOS open exited with error for '{}'.",
+            resolved.display()
+        ));
     }
 
     if reveal_in_finder {
@@ -218,7 +233,10 @@ pub fn write_clipboard_text(text: &str) -> Result<String, String> {
     if !status.success() {
         return Err("pbcopy exited with an error.".to_string());
     }
-    Ok(format!("Copied {} characters to clipboard.", text.chars().count()))
+    Ok(format!(
+        "Copied {} characters to clipboard.",
+        text.chars().count()
+    ))
 }
 
 fn entry_from_path(path: &Path, name_override: Option<String>) -> LocalFileEntry {
@@ -243,12 +261,7 @@ fn entry_from_path(path: &Path, name_override: Option<String>) -> LocalFileEntry
     }
 }
 
-fn walk_matching_files(
-    dir: &Path,
-    needle: &str,
-    depth: usize,
-    out: &mut Vec<LocalFileEntry>,
-) {
+fn walk_matching_files(dir: &Path, needle: &str, depth: usize, out: &mut Vec<LocalFileEntry>) {
     if depth > 5 || out.len() >= 80 {
         return;
     }
@@ -267,9 +280,12 @@ fn walk_matching_files(
         if is_blocked_path(&path) {
             continue;
         }
-        let Ok(meta) = entry.metadata() else {
+        let Ok(meta) = fs::symlink_metadata(&path) else {
             continue;
         };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
         let is_dir = meta.is_dir();
         if needle == "*" || name.to_ascii_lowercase().contains(needle) {
             out.push(entry_from_path(&path, Some(name)));

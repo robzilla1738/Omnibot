@@ -40,23 +40,35 @@ struct StreamParserState {
     current_block_text: String,
     current_block_thinking: String,
     last_part_id: String,
-    saw_partial_deltas: bool,
+    saw_text_deltas: bool,
+    saw_thinking_deltas: bool,
     needs_paragraph_break: bool,
     tool_calls: Vec<ToolInvocation>,
     native_session_id: Option<String>,
     cost_usd: Option<f64>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+    usage_events: std::collections::HashSet<String>,
+    incomplete_input: bool,
+    incomplete_output: bool,
+    incomplete_cost: bool,
+    failed: bool,
 }
 
 fn resolve_driver_binary(bot: &BotProfile) -> Option<(String, Vec<String>)> {
-    if let Some(custom) = bot.custom_command.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        let parts: Vec<&str> = custom.split_whitespace().collect();
+    if let Some(custom) = bot
+        .custom_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let parts = shlex::split(custom)?;
         if let Some((first, rest)) = parts.split_first() {
-            if let Some(bin) = find_binary(&[first]) {
-                return Some((bin, rest.iter().map(|s| (*s).to_string()).collect()));
+            if let Some(bin) = find_binary(&[first.as_str()]) {
+                return Some((bin, rest.to_vec()));
             }
         }
+        return None;
     }
 
     let bin = match bot.cli_driver {
@@ -77,10 +89,7 @@ fn resolve_driver_binary(bot: &BotProfile) -> Option<(String, Vec<String>)> {
     Some((bin, Vec::new()))
 }
 
-pub async fn execute_bot_turn(
-    state: SharedOmniState,
-    req: DriverTurnRequest,
-) -> DriverTurnOutput {
+pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) -> DriverTurnOutput {
     let start = Instant::now();
     let kind = req.bot.cli_driver;
 
@@ -91,8 +100,25 @@ pub async fn execute_bot_turn(
             kind.as_str(),
             req.bot.name
         );
-        update_message_delta(&state, &req.chat_id, &req.message_id, &req.bot.id, &err_msg, false);
-        finish_active_run(&state, &req.chat_id, &req.message_id, &req.bot.id, "error", 0, None, None, None);
+        update_message_delta(
+            &state,
+            &req.chat_id,
+            &req.message_id,
+            &req.bot.id,
+            &err_msg,
+            false,
+        );
+        finish_active_run(
+            &state,
+            &req.chat_id,
+            &req.message_id,
+            &req.bot.id,
+            "error",
+            0,
+            None,
+            None,
+            None,
+        );
         return DriverTurnOutput {
             text: err_msg,
             thinking: String::new(),
@@ -128,6 +154,9 @@ pub async fn execute_bot_turn(
         cmd.args(&extra_custom_args);
     }
 
+    #[cfg(unix)]
+    cmd.process_group(0);
+
     match kind {
         CliDriverKind::Claude => {
             cmd.args([
@@ -152,18 +181,13 @@ pub async fn execute_bot_turn(
             {
                 cmd.args(["--model", m]);
             }
-            if matches!(
-                req.bot.reasoning_effort.as_str(),
-                "low" | "medium" | "high"
-            ) {
+            if matches!(req.bot.reasoning_effort.as_str(), "low" | "medium" | "high") {
                 cmd.args(["--effort", &req.bot.reasoning_effort]);
             }
             if req.bot.permission_mode == "plan" {
                 cmd.args(["--permission-mode", "plan"]);
             } else if req.approve_all || req.bot.permission_mode == "bypassPermissions" {
                 cmd.arg("--dangerously-skip-permissions");
-            } else {
-                cmd.args(["--permission-mode", "acceptEdits"]);
             }
         }
         CliDriverKind::Codex => {
@@ -182,9 +206,18 @@ pub async fn execute_bot_turn(
                 cmd.args(["-m", m]);
             }
             if req.bot.permission_mode == "plan" {
-                cmd.args(["-s", "read-only"]);
+                cmd.args(["-c", "sandbox_mode=\"read-only\""]);
             } else if req.approve_all {
-                cmd.args(["-s", "workspace-write"]);
+                cmd.args(["-c", "sandbox_mode=\"workspace-write\""]);
+            }
+            if matches!(
+                req.bot.reasoning_effort.as_str(),
+                "low" | "medium" | "high" | "xhigh"
+            ) {
+                cmd.args([
+                    "-c",
+                    &format!("model_reasoning_effort={:?}", req.bot.reasoning_effort),
+                ]);
             }
             cmd.arg(&combined_prompt);
         }
@@ -265,7 +298,7 @@ pub async fn execute_bot_turn(
                 cmd.args(["--append-system-prompt", req.system_context.trim()]);
             }
             if let Some(sid) = req.resume_session_id.as_deref().filter(|s| !s.is_empty()) {
-                cmd.args(["--session-id", sid]);
+                cmd.args(["--session", sid]);
             }
             if let Some(m) = req
                 .bot
@@ -279,17 +312,72 @@ pub async fn execute_bot_turn(
         }
         CliDriverKind::Gemini | CliDriverKind::Antigravity | CliDriverKind::Muse => {
             cmd.args(["-p", &combined_prompt]);
-        }
-        CliDriverKind::Aider => {
-            cmd.args(["--yes", "--no-pretty", "--message", &combined_prompt]);
-        }
-        CliDriverKind::Ollama => {
-            let model = req
+            if let Some(model) = req
                 .bot
                 .model
-                .clone()
-                .unwrap_or_else(|| "qwen2.5-coder:32b".to_string());
-            cmd.args(["run", &model, &combined_prompt]);
+                .as_deref()
+                .filter(|m| !m.is_empty() && *m != "default")
+            {
+                cmd.args(["--model", model]);
+            }
+        }
+        CliDriverKind::Aider => {
+            cmd.args(["--no-pretty", "--message", &combined_prompt]);
+            if req.approve_all {
+                cmd.arg("--yes-always");
+            }
+            if req.bot.permission_mode == "plan" {
+                cmd.args(["--chat-mode", "ask"]);
+            }
+            if let Some(model) = req
+                .bot
+                .model
+                .as_deref()
+                .filter(|m| !m.is_empty() && *m != "default")
+            {
+                cmd.args(["--model", model]);
+            }
+        }
+        CliDriverKind::Ollama => {
+            let Some(model) = req
+                .bot
+                .model
+                .as_deref()
+                .filter(|model| !model.trim().is_empty() && *model != "default")
+            else {
+                let error = "Choose an installed Ollama model in this bot's settings before sending a message.";
+                update_message_delta(
+                    &state,
+                    &req.chat_id,
+                    &req.message_id,
+                    &req.bot.id,
+                    error,
+                    false,
+                );
+                finish_active_run(
+                    &state,
+                    &req.chat_id,
+                    &req.message_id,
+                    &req.bot.id,
+                    "error",
+                    0,
+                    None,
+                    None,
+                    None,
+                );
+                return DriverTurnOutput {
+                    text: error.into(),
+                    thinking: String::new(),
+                    tool_calls: Vec::new(),
+                    native_session_id: None,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    cost_usd: None,
+                    input_tokens: None,
+                    output_tokens: None,
+                    status: "error".into(),
+                };
+            };
+            cmd.args(["run", model, &combined_prompt]);
         }
         CliDriverKind::Acp | CliDriverKind::Custom => {
             cmd.arg(&combined_prompt);
@@ -324,8 +412,25 @@ pub async fn execute_bot_turn(
         Ok(c) => c,
         Err(e) => {
             let err_text = format!("Failed to spawn `{}`: {e}", binary_path);
-            update_message_delta(&state, &req.chat_id, &req.message_id, &req.bot.id, &err_text, false);
-            finish_active_run(&state, &req.chat_id, &req.message_id, &req.bot.id, "error", 0, None, None, None);
+            update_message_delta(
+                &state,
+                &req.chat_id,
+                &req.message_id,
+                &req.bot.id,
+                &err_text,
+                false,
+            );
+            finish_active_run(
+                &state,
+                &req.chat_id,
+                &req.message_id,
+                &req.bot.id,
+                "error",
+                0,
+                None,
+                None,
+                None,
+            );
             return DriverTurnOutput {
                 text: err_text,
                 thinking: String::new(),
@@ -349,6 +454,8 @@ pub async fn execute_bot_turn(
     let mut parser = StreamParserState::default();
     let mut stderr_buf = Vec::new();
     let mut was_cancelled = false;
+    let mut stdout_open = true;
+    let mut stderr_open = true;
     let mut hit_guardrail: Option<String> = None;
 
     let timeout_limit = Duration::from_secs(req.turn_timeout_secs.clamp(30, 1800));
@@ -359,9 +466,12 @@ pub async fn execute_bot_turn(
         .filter(|b| *b > 0.0);
 
     loop {
+        if !stdout_open && !stderr_open && child.try_wait().ok().flatten().is_some() {
+            break;
+        }
         if is_chat_cancelled(&state, &req.chat_id) {
             was_cancelled = true;
-            let _ = child.kill().await;
+            terminate_process_tree(&mut child).await;
             break;
         }
 
@@ -370,7 +480,7 @@ pub async fn execute_bot_turn(
                 "\n\n> **Guardrail triggered**: Turn exceeded {}s timeout limit.",
                 timeout_limit.as_secs()
             ));
-            let _ = child.kill().await;
+            terminate_process_tree(&mut child).await;
             break;
         }
 
@@ -380,13 +490,13 @@ pub async fn execute_bot_turn(
                     "\n\n> **Budget guardrail triggered**: Turn cost (${:.3}) exceeded max turn budget (${:.2}).",
                     actual_cost, limit
                 ));
-                let _ = child.kill().await;
+                terminate_process_tree(&mut child).await;
                 break;
             }
         }
 
         tokio::select! {
-            line_res = stdout_lines.next_line() => {
+            line_res = stdout_lines.next_line(), if stdout_open => {
                 match line_res {
                     Ok(Some(line)) => {
                         parse_cli_output_line(
@@ -398,22 +508,25 @@ pub async fn execute_bot_turn(
                             &mut parser,
                         );
                     }
-                    Ok(None) => break,
-                    Err(_) => break,
+                    Ok(None) => stdout_open = false,
+                    Err(_) => { stdout_open = false; parser.failed = true; },
                 }
             }
-            err_res = stderr_lines.next_line() => {
-                if let Ok(Some(err_line)) = err_res {
-                    let clean = strip_ansi(&err_line);
-                    if !clean.trim().is_empty() && stderr_buf.len() < 40 {
-                        stderr_buf.push(clean);
+            err_res = stderr_lines.next_line(), if stderr_open => {
+                match err_res {
+                    Ok(Some(line)) => {
+                        let clean = strip_ansi(&line);
+                        if !clean.trim().is_empty() && stderr_buf.len() < 40 {
+                            stderr_buf.push(clean.chars().take(4000).collect::<String>());
+                        }
                     }
+                    _ => stderr_open = false,
                 }
             }
             _ = tokio::time::sleep(Duration::from_millis(160)) => {
                 if is_chat_cancelled(&state, &req.chat_id) {
                     was_cancelled = true;
-                    let _ = child.kill().await;
+                    terminate_process_tree(&mut child).await;
                     break;
                 }
             }
@@ -435,11 +548,18 @@ pub async fn execute_bot_turn(
     let exit_status = child.wait().await.ok();
     let duration_ms = start.elapsed().as_millis() as u64;
 
-    if parser.accumulated_text.trim().is_empty() && !stderr_buf.is_empty() && !was_cancelled {
+    if !exit_status.is_some_and(|s| s.success())
+        && stderr_buf.is_empty()
+        && !was_cancelled
+        && hit_guardrail.is_none()
+    {
+        stderr_buf.push(format!("CLI exited unsuccessfully: {exit_status:?}"));
+    }
+    if !stderr_buf.is_empty() && !was_cancelled && !exit_status.is_some_and(|s| s.success()) {
         let joined_err = stderr_buf.join("\n");
         // Check if session resume failed (e.g. expired or invalid session ID)
-        let formatted_err = format!("```\n{}\n```", joined_err.trim());
-        parser.accumulated_text = formatted_err.clone();
+        let formatted_err = format!("\n\n```\n{}\n```", joined_err.trim());
+        parser.accumulated_text.push_str(&formatted_err);
         update_message_delta(
             &state,
             &req.chat_id,
@@ -450,17 +570,9 @@ pub async fn execute_bot_turn(
         );
     }
 
-    // Fallback token estimation when CLI does not emit explicit token usage
-    let est_in = parser.input_tokens.unwrap_or_else(|| {
-        ((req.prompt.len() + req.system_context.len()) as u64 / 4).max(1)
-    });
-    let est_out = parser.output_tokens.unwrap_or_else(|| {
-        ((parser.accumulated_text.len() + parser.accumulated_thinking.len()) as u64 / 4).max(1)
-    });
-
     let final_status = if was_cancelled || hit_guardrail.is_some() {
         "stopped"
-    } else if exit_status.is_some_and(|s| s.success()) || !parser.accumulated_text.trim().is_empty() {
+    } else if exit_status.is_some_and(|s| s.success()) && !parser.failed {
         "complete"
     } else {
         "error"
@@ -474,18 +586,16 @@ pub async fn execute_bot_turn(
         final_status,
         duration_ms,
         parser.cost_usd,
-        Some(est_in),
-        Some(est_out),
+        parser.input_tokens,
+        parser.output_tokens,
     );
 
     if let Ok(mut guard) = state.write() {
         guard.record_activity(
             &format!("{} ({})", req.bot.name, kind.as_str()),
             format!(
-                "Completed turn in {} (~{} in / {} out tok, {} tools)",
+                "Completed turn in {} ({} tools)",
                 req.cwd,
-                est_in,
-                est_out,
                 parser.tool_calls.len()
             ),
             final_status,
@@ -500,10 +610,21 @@ pub async fn execute_bot_turn(
         native_session_id: parser.native_session_id,
         duration_ms,
         cost_usd: parser.cost_usd,
-        input_tokens: Some(est_in),
-        output_tokens: Some(est_out),
+        input_tokens: parser.input_tokens,
+        output_tokens: parser.output_tokens,
         status: final_status.to_string(),
     }
+}
+
+async fn terminate_process_tree(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // The child starts in a new process group, so this cannot signal the app's group.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+    let _ = child.kill().await;
 }
 
 fn is_chat_cancelled(state: &SharedOmniState, chat_id: &str) -> bool {
@@ -513,51 +634,151 @@ fn is_chat_cancelled(state: &SharedOmniState, chat_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+// Accept terminal usage envelopes only. Streaming snapshots can repeat, refer to
+// individual API calls, or omit cache tokens; they are not turn totals.
 fn extract_usage_tokens(val: &Value, parser: &mut StreamParserState) {
-    let usage = val
-        .get("usage")
-        .or_else(|| val.get("message").and_then(|m| m.get("usage")))
-        .or_else(|| val.get("event").and_then(|e| e.get("usage")))
-        .or_else(|| {
-            val.get("event")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.get("usage"))
+    let kind = val.get("type").and_then(Value::as_str).unwrap_or("");
+    let (usage, additive, id, cost) = match kind {
+        "result" | "turn.completed" => (
+            val.get("usage"),
+            false,
+            None,
+            val.get("total_cost_usd").or_else(|| val.get("cost_usd")),
+        ),
+        "step_finish" => {
+            let part = &val["part"];
+            (
+                part.get("tokens"),
+                true,
+                part.get("id").and_then(Value::as_str),
+                part.get("cost"),
+            )
+        }
+        // Pi reports one completed assistant message per API step.
+        "message_end" if val["message"]["role"] == "assistant" => {
+            let message = &val["message"];
+            (
+                message.get("usage"),
+                true,
+                message.get("id").and_then(Value::as_str),
+                message.pointer("/usage/cost/total"),
+            )
+        }
+        _ => return,
+    };
+    if let Some(id) = id {
+        if !parser.usage_events.insert(format!("{kind}:{id}")) {
+            return;
+        }
+    }
+    let mut input = usage
+        .and_then(|u| {
+            u.get("input_tokens")
+                .or_else(|| u.get("input"))
+                .or_else(|| u.get("prompt_tokens"))
         })
-        .or_else(|| val.get("part").and_then(|p| p.get("tokens")));
-
-    if let Some(u) = usage {
-        if let Some(inp) = u
-            .get("input_tokens")
-            .or_else(|| u.get("input"))
-            .or_else(|| u.get("prompt_tokens"))
-            .and_then(|v| v.as_u64())
-        {
-            let cached = u
-                .get("cache_read_input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            parser.input_tokens = Some(inp + cached);
-        }
-        if let Some(out) = u
-            .get("output_tokens")
-            .or_else(|| u.get("output"))
-            .or_else(|| u.get("completion_tokens"))
-            .and_then(|v| v.as_u64())
-        {
-            parser.output_tokens = Some(out);
+        .and_then(Value::as_u64);
+    let output = usage
+        .and_then(|u| {
+            u.get("output_tokens")
+                .or_else(|| u.get("output"))
+                .or_else(|| u.get("completion_tokens"))
+        })
+        .and_then(Value::as_u64);
+    if let (Some(count), Some(u)) = (input, usage) {
+        // Anthropic and Pi report cache reads/writes separately. Codex's
+        // cached_input_tokens is already a subset of input_tokens.
+        let cache = if kind == "step_finish" {
+            u.pointer("/cache/read")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .checked_add(
+                    u.pointer("/cache/write")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                )
+        } else {
+            u.get("cache_read_input_tokens")
+                .or_else(|| u.get("cacheRead"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .checked_add(
+                    u.get("cache_creation_input_tokens")
+                        .or_else(|| u.get("cacheWrite"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                )
+        };
+        input = cache.and_then(|cache| count.checked_add(cache));
+    }
+    if !additive {
+        parser.incomplete_input = false;
+        parser.incomplete_output = false;
+        parser.incomplete_cost = false;
+    }
+    parser.incomplete_input |= input.is_none();
+    parser.incomplete_output |= output.is_none();
+    let cost = cost
+        .and_then(Value::as_f64)
+        .filter(|c| c.is_finite() && *c >= 0.0);
+    parser.incomplete_cost |= cost.is_none();
+    fn assign(target: &mut Option<u64>, value: Option<u64>, additive: bool) {
+        if let Some(value) = value {
+            *target = if additive {
+                target.unwrap_or(0).checked_add(value)
+            } else {
+                Some(value)
+            };
         }
     }
+    assign(&mut parser.input_tokens, input, additive);
+    assign(&mut parser.output_tokens, output, additive);
+    if let Some(cost) = cost {
+        let cost = if additive {
+            parser.cost_usd.unwrap_or(0.0) + cost
+        } else {
+            cost
+        };
+        parser.cost_usd = cost.is_finite().then_some(cost);
+    }
+    if parser.incomplete_input {
+        parser.input_tokens = None;
+    }
+    if parser.incomplete_output {
+        parser.output_tokens = None;
+    }
+    if parser.incomplete_cost {
+        parser.cost_usd = None;
+    }
+}
 
-    if let Some(c) = val
-        .get("total_cost_usd")
-        .or_else(|| val.get("cost_usd"))
-        .or_else(|| val.get("part").and_then(|p| p.get("cost")))
-        .and_then(|v| v.as_f64())
+fn reported_model(val: &Value) -> Option<String> {
+    let kind = val.get("type").and_then(Value::as_str)?;
+    if ![
+        "system",
+        "assistant",
+        "result",
+        "message_start",
+        "stream_event",
+        "message_end",
+    ]
+    .contains(&kind)
     {
-        if c > 0.0 {
-            parser.cost_usd = Some(c);
-        }
+        return None;
     }
+    if let Some(models) = val
+        .get("modelUsage")
+        .and_then(Value::as_object)
+        .filter(|m| !m.is_empty())
+    {
+        return Some(models.keys().cloned().collect::<Vec<_>>().join(" + "));
+    }
+    val.get("model")
+        .or_else(|| val.pointer("/message/model"))
+        .or_else(|| val.pointer("/event/message/model"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_owned)
 }
 
 fn parse_cli_output_line(
@@ -601,9 +822,58 @@ fn parse_cli_output_line(
         }
     }
 
+    // Provider-level failure envelopes can arrive even when the CLI exits zero.
+    let event_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if event_type == "turn.failed"
+        || event_type == "error"
+        || val
+            .get("message")
+            .and_then(|m| m.get("stopReason"))
+            .and_then(Value::as_str)
+            .is_some_and(|s| s == "error" || s == "aborted")
+        || val.get("is_error").and_then(Value::as_bool) == Some(true)
+    {
+        parser.failed = true;
+        let error = val
+            .get("error")
+            .and_then(|e| e.get("message").or(Some(e)))
+            .or_else(|| val.get("message"))
+            .or_else(|| val.get("result"));
+        let description = error
+            .and_then(Value::as_str)
+            .unwrap_or("Provider reported a failed turn.");
+        let chunk = format!("\n\n{description}");
+        parser.accumulated_text.push_str(&chunk);
+        update_message_delta(state, chat_id, message_id, bot_id, &chunk, false);
+    }
     extract_usage_tokens(&val, parser);
+    if let Some(model) = reported_model(&val) {
+        if let Ok(mut guard) = state.write() {
+            if let Some(message) = guard
+                .store
+                .chats
+                .iter_mut()
+                .find(|c| c.id == chat_id)
+                .and_then(|c| c.messages.iter_mut().find(|m| m.id == message_id))
+            {
+                message.model = Some(model);
+                message.model_reported = true;
+            }
+        }
+    }
 
     let event_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+    if event_type.is_empty() {
+        let chunk = if parser.accumulated_text.is_empty() {
+            trimmed.to_string()
+        } else {
+            format!("\n{trimmed}")
+        };
+        parser.accumulated_text.push_str(&chunk);
+        update_message_delta(state, chat_id, message_id, bot_id, &chunk, false);
+        return;
+    }
 
     match event_type {
         // 1. Anthropic / Claude Code / Grok / Cursor partial stream_event
@@ -612,7 +882,7 @@ fn parse_cli_output_line(
                 handle_anthropic_stream_event(state, chat_id, message_id, bot_id, ev, parser);
             }
         }
-        "content_block_start" | "content_block_delta" => {
+        "message_start" | "content_block_start" | "content_block_delta" => {
             handle_anthropic_stream_event(state, chat_id, message_id, bot_id, &val, parser);
         }
         // 2. Claude / Grok / Cursor assistant message frame
@@ -639,7 +909,7 @@ fn parse_cli_output_line(
                     let btype = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
                     match btype {
                         "text" => {
-                            if !parser.saw_partial_deltas {
+                            if !parser.saw_text_deltas {
                                 if let Some(txt) = block.get("text").and_then(|v| v.as_str()) {
                                     if !txt.is_empty() {
                                         let delta = if txt.starts_with(&parser.current_block_text) {
@@ -670,10 +940,11 @@ fn parse_cli_output_line(
                             }
                         }
                         "thinking" => {
-                            if !parser.saw_partial_deltas {
+                            if !parser.saw_thinking_deltas {
                                 if let Some(th) = block.get("thinking").and_then(|v| v.as_str()) {
                                     if !th.is_empty() {
-                                        let delta = if th.starts_with(&parser.current_block_thinking)
+                                        let delta = if th
+                                            .starts_with(&parser.current_block_thinking)
                                         {
                                             th[parser.current_block_thinking.len()..].to_string()
                                         } else {
@@ -742,6 +1013,10 @@ fn parse_cli_output_line(
                             bot_id,
                             &mut parser.tool_calls,
                             tool_id,
+                            block
+                                .get("is_error")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
                             out_summary,
                         );
                     }
@@ -830,7 +1105,14 @@ fn parse_cli_output_line(
                             .and_then(|v| v.as_str())
                             .unwrap_or("shell command")
                             .to_string();
-                        let status = if event_type == "item.completed" {
+                        let status = if item.get("status").and_then(Value::as_str) == Some("failed")
+                            || item
+                                .get("exit_code")
+                                .and_then(Value::as_i64)
+                                .is_some_and(|code| code != 0)
+                        {
+                            "error"
+                        } else if event_type == "item.completed" {
                             "completed"
                         } else {
                             "running"
@@ -863,7 +1145,14 @@ fn parse_cli_output_line(
                             .and_then(|v| v.as_str())
                             .unwrap_or(item_type)
                             .to_string();
-                        let status = if event_type == "item.completed" {
+                        let status = if item.get("status").and_then(Value::as_str) == Some("failed")
+                            || item
+                                .get("exit_code")
+                                .and_then(Value::as_i64)
+                                .is_some_and(|code| code != 0)
+                        {
+                            "error"
+                        } else if event_type == "item.completed" {
                             "completed"
                         } else {
                             "running"
@@ -978,13 +1267,13 @@ fn parse_cli_output_line(
                 let sub = ame.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 if sub == "text_delta" {
                     if let Some(d) = ame.get("delta").and_then(|v| v.as_str()) {
-                        parser.saw_partial_deltas = true;
+                        parser.saw_text_deltas = true;
                         parser.accumulated_text.push_str(d);
                         update_message_delta(state, chat_id, message_id, bot_id, d, false);
                     }
                 } else if sub == "thinking_delta" {
                     if let Some(d) = ame.get("delta").and_then(|v| v.as_str()) {
-                        parser.saw_partial_deltas = true;
+                        parser.saw_thinking_deltas = true;
                         parser.accumulated_thinking.push_str(d);
                         update_message_delta(state, chat_id, message_id, bot_id, d, true);
                     }
@@ -1002,7 +1291,9 @@ fn parse_cli_output_line(
                 .and_then(|v| v.as_str())
                 .unwrap_or("tool")
                 .to_string();
-            let status = if event_type == "tool_execution_end" {
+            let status = if val.get("isError").and_then(Value::as_bool) == Some(true) {
+                "error"
+            } else if event_type == "tool_execution_end" {
                 "completed"
             } else {
                 "running"
@@ -1034,7 +1325,12 @@ fn handle_anthropic_stream_event(
     extract_usage_tokens(ev, parser);
     let ev_type = ev.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-    if ev_type == "content_block_start" {
+    if ev_type == "message_start" {
+        parser.saw_text_deltas = false;
+        parser.saw_thinking_deltas = false;
+        parser.current_block_text.clear();
+        parser.current_block_thinking.clear();
+    } else if ev_type == "content_block_start" {
         if let Some(cb) = ev.get("content_block") {
             let cb_type = cb.get("type").and_then(|v| v.as_str()).unwrap_or("");
             if cb_type == "text" && !parser.accumulated_text.is_empty() {
@@ -1047,7 +1343,7 @@ fn handle_anthropic_stream_event(
             if dtype == "text_delta" {
                 if let Some(txt) = delta.get("text").and_then(|v| v.as_str()) {
                     if !txt.is_empty() {
-                        parser.saw_partial_deltas = true;
+                        parser.saw_text_deltas = true;
                         let out_chunk = if parser.needs_paragraph_break
                             && !parser.accumulated_text.ends_with('\n')
                             && !txt.starts_with('\n')
@@ -1065,7 +1361,7 @@ fn handle_anthropic_stream_event(
             } else if dtype == "thinking_delta" {
                 if let Some(th) = delta.get("thinking").and_then(|v| v.as_str()) {
                     if !th.is_empty() {
-                        parser.saw_partial_deltas = true;
+                        parser.saw_thinking_deltas = true;
                         parser.accumulated_thinking.push_str(th);
                         update_message_delta(state, chat_id, message_id, bot_id, th, true);
                     }
@@ -1224,6 +1520,7 @@ fn upsert_tool_call(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn complete_tool_call(
     state: &SharedOmniState,
     chat_id: &str,
@@ -1231,20 +1528,15 @@ fn complete_tool_call(
     bot_id: &str,
     local_tools: &mut Vec<ToolInvocation>,
     tool_id: &str,
+    failed: bool,
     output_summary: Option<String>,
 ) {
     let updated = if let Some(t) = local_tools.iter_mut().find(|t| t.id == tool_id) {
-        t.status = "completed".to_string();
+        t.status = if failed { "error" } else { "completed" }.to_string();
         if output_summary.is_some() {
             t.output_summary = output_summary;
         }
         Some(t.clone())
-    } else if let Some(last) = local_tools.last_mut() {
-        last.status = "completed".to_string();
-        if output_summary.is_some() {
-            last.output_summary = output_summary;
-        }
-        Some(last.clone())
     } else {
         None
     };
@@ -1274,6 +1566,7 @@ fn finish_active_run(
         if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message_id) {
             msg.status = status.to_string();
             msg.duration_ms = Some(duration_ms);
+            msg.usage_reported = true;
             if cost_usd.is_some() {
                 msg.cost_usd = cost_usd;
             }
@@ -1285,7 +1578,12 @@ fn finish_active_run(
             }
             for t in &mut msg.tool_calls {
                 if t.status == "running" {
-                    t.status = "completed".to_string();
+                    t.status = if status == "complete" {
+                        "completed"
+                    } else {
+                        status
+                    }
+                    .to_string();
                 }
             }
         }
@@ -1334,4 +1632,318 @@ fn strip_ansi(input: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::Fixture;
+    use serde_json::json;
+
+    fn feed(f: &Fixture, parser: &mut StreamParserState, event: Value) {
+        parse_cli_output_line(&f.state, "room", "message", "A", &event.to_string(), parser);
+    }
+
+    #[test]
+    fn streamed_thinking_does_not_swallow_final_text() {
+        let f = Fixture::new(&["A"]);
+        let mut p = StreamParserState::default();
+        feed(
+            &f,
+            &mut p,
+            json!({"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"Reason"}}),
+        );
+        feed(
+            &f,
+            &mut p,
+            json!({"type":"assistant","message":{"id":"one","content":[{"type":"thinking","thinking":"Reason"},{"type":"text","text":"Answer"}]}}),
+        );
+        assert_eq!(p.accumulated_text, "Answer");
+        assert_eq!(p.accumulated_thinking, "Reason");
+    }
+
+    #[test]
+    fn streamed_text_is_not_duplicated_by_final_message() {
+        let f = Fixture::new(&["A"]);
+        let mut p = StreamParserState::default();
+        feed(
+            &f,
+            &mut p,
+            json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}}),
+        );
+        feed(
+            &f,
+            &mut p,
+            json!({"type":"assistant","message":{"id":"one","content":[{"type":"text","text":"Hello"}]}}),
+        );
+        feed(&f, &mut p, json!({"type":"result","result":"Hello"}));
+        assert_eq!(p.accumulated_text, "Hello");
+    }
+
+    #[test]
+    fn codex_incremental_items_and_provider_errors() {
+        let f = Fixture::new(&["A"]);
+        let mut p = StreamParserState::default();
+        for (kind, text) in [
+            ("item.started", "H"),
+            ("item.updated", "Hello"),
+            ("item.completed", "Hello"),
+        ] {
+            feed(
+                &f,
+                &mut p,
+                json!({"type":kind,"item":{"id":"item1","type":"agent_message","text":text}}),
+            );
+        }
+        assert_eq!(p.accumulated_text, "Hello");
+        feed(
+            &f,
+            &mut p,
+            json!({"type":"turn.failed","error":{"message":"Rate limit"}}),
+        );
+        assert!(p.failed);
+        assert!(p.accumulated_text.contains("Rate limit"));
+    }
+
+    #[test]
+    fn opencode_costs_accumulate_across_steps() {
+        let mut p = StreamParserState::default();
+        for cost in [0.1, 0.2] {
+            extract_usage_tokens(&json!({"type":"step_finish","part":{"cost":cost}}), &mut p);
+        }
+        assert!((p.cost_usd.unwrap() - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn terminal_usage_replaces_stream_snapshots_and_includes_cache_without_double_counting() {
+        let mut p = StreamParserState::default();
+        extract_usage_tokens(
+            &json!({"type":"assistant","message":{"usage":{"input_tokens":99,"output_tokens":1}}}),
+            &mut p,
+        );
+        assert!(p.input_tokens.is_none());
+        let result = json!({"type":"result","usage":{"input_tokens":100,"cache_read_input_tokens":200,"cache_creation_input_tokens":50,"output_tokens":25},"total_cost_usd":0.012345});
+        extract_usage_tokens(&result, &mut p);
+        extract_usage_tokens(&result, &mut p);
+        assert_eq!(p.input_tokens, Some(350));
+        assert_eq!(p.output_tokens, Some(25));
+        assert_eq!(p.cost_usd, Some(0.012345));
+        extract_usage_tokens(
+            &json!({"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10}}),
+            &mut p,
+        );
+        assert_eq!(p.input_tokens, Some(100));
+        assert_eq!(p.output_tokens, Some(10));
+        assert_eq!(p.cost_usd, None);
+    }
+
+    #[test]
+    fn steps_sum_once_and_missing_usage_is_never_filled_with_guesses() {
+        let mut p = StreamParserState::default();
+        let step = json!({"type":"step_finish","part":{"id":"one","cost":0.1,"tokens":{"input":10,"output":5,"cache":{"read":20,"write":3}}}});
+        extract_usage_tokens(&step, &mut p);
+        extract_usage_tokens(&step, &mut p);
+        extract_usage_tokens(
+            &json!({"type":"step_finish","part":{"id":"two","cost":0.2,"tokens":{"input":7,"output":2}}}),
+            &mut p,
+        );
+        assert_eq!(p.input_tokens, Some(40));
+        assert_eq!(p.output_tokens, Some(7));
+        assert!((p.cost_usd.unwrap() - 0.3).abs() < 1e-9);
+        extract_usage_tokens(
+            &json!({"type":"step_finish","part":{"id":"missing"}}),
+            &mut p,
+        );
+        extract_usage_tokens(
+            &json!({"type":"step_finish","part":{"id":"later","cost":0.1,"tokens":{"input":1,"output":1}}}),
+            &mut p,
+        );
+        assert!(p.input_tokens.is_none() && p.output_tokens.is_none() && p.cost_usd.is_none());
+    }
+
+    #[test]
+    fn pi_completed_usage_and_reported_model_are_preserved() {
+        let mut p = StreamParserState::default();
+        extract_usage_tokens(
+            &json!({"type":"message_end","message":{"role":"assistant","usage":{"input":10,"output":5,"cacheRead":20,"cacheWrite":3,"cost":{"total":0.0}}}}),
+            &mut p,
+        );
+        assert_eq!(p.input_tokens, Some(33));
+        assert_eq!(p.output_tokens, Some(5));
+        assert_eq!(p.cost_usd, Some(0.0));
+        assert_eq!(
+            reported_model(&json!({"type":"assistant","message":{"model":"actual-model"}})),
+            Some("actual-model".into())
+        );
+        assert_eq!(
+            reported_model(&json!({"type":"result","modelUsage":{"first":{},"second":{}}})),
+            Some("first + second".into())
+        );
+        assert_eq!(
+            reported_model(&json!({"type":"user","model":"not-provider-metadata"})),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_standard_permissions_do_not_enable_auto_editing() {
+        for (mode, approve, expected) in [
+            ("auto", false, None),
+            ("plan", false, Some("plan")),
+            ("auto", true, Some("--dangerously-skip-permissions")),
+        ] {
+            let f = Fixture::new(&["A"]);
+            f.script("A", "printf '%s\\n' \"$@\" > cli-args.txt\necho Done");
+            let mut bot = f.state.read().unwrap().store.bots[0].clone();
+            bot.cli_driver = CliDriverKind::Claude;
+            bot.permission_mode = mode.into();
+            let result = execute_bot_turn(
+                f.state.clone(),
+                DriverTurnRequest {
+                    chat_id: "room".into(),
+                    message_id: "message".into(),
+                    bot,
+                    prompt: "Hello".into(),
+                    system_context: String::new(),
+                    cwd: f.dir.to_string_lossy().into_owned(),
+                    resume_session_id: None,
+                    approve_all: approve,
+                    turn_timeout_secs: 5,
+                    max_budget_usd: None,
+                },
+            )
+            .await;
+            assert_eq!(result.status, "complete");
+            let args = std::fs::read_to_string(f.dir.join("cli-args.txt")).unwrap();
+            assert!(!args.lines().any(|arg| arg == "acceptEdits"));
+            if let Some(expected) = expected {
+                assert!(args.lines().any(|arg| arg == expected));
+            } else {
+                assert!(!args.contains("--permission-mode"));
+                assert!(!args.contains("--dangerously-skip-permissions"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_output_has_no_invented_tokens_or_cost() {
+        let f = Fixture::new(&["A"]);
+        f.script("A", "echo 'Hello from a local fixture'");
+        crate::orchestrator::dispatch_chat_turn(f.state.clone(), crate::test_support::input("Hi"))
+            .await
+            .unwrap();
+        f.wait().await;
+        let guard = f.state.read().unwrap();
+        let reply = guard.store.chats[0]
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .unwrap();
+        assert!(reply.usage_reported);
+        assert!(
+            reply.input_tokens.is_none()
+                && reply.output_tokens.is_none()
+                && reply.cost_usd.is_none()
+        );
+        assert!(reply.duration_ms.is_some());
+    }
+
+    #[test]
+    fn unknown_tool_result_does_not_complete_another_tool() {
+        let f = Fixture::new(&["A"]);
+        let mut tools = vec![build_tool_invocation(
+            "one",
+            "bash",
+            &Value::Null,
+            "running",
+            None,
+        )];
+        complete_tool_call(
+            &f.state, "room", "message", "A", &mut tools, "missing", false, None,
+        );
+        assert_eq!(tools[0].status, "running");
+    }
+
+    #[test]
+    fn plain_json_answers_are_preserved() {
+        let f = Fixture::new(&["A"]);
+        let mut p = StreamParserState::default();
+        feed(&f, &mut p, json!({"answer": 42}));
+        assert_eq!(p.accumulated_text, "{\"answer\":42}");
+    }
+
+    #[test]
+    fn failed_tool_results_remain_failed() {
+        let f = Fixture::new(&["A"]);
+        let mut p = StreamParserState::default();
+        feed(
+            &f,
+            &mut p,
+            json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"one","name":"bash","input":{}}]}}),
+        );
+        feed(
+            &f,
+            &mut p,
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"one","is_error":true,"content":"command failed"}]}}),
+        );
+        assert_eq!(p.tool_calls[0].status, "error");
+    }
+
+    #[tokio::test]
+    async fn zero_exit_provider_error_is_failed() {
+        let f = Fixture::new(&["A"]);
+        f.script(
+            "A",
+            "echo '{\"type\":\"result\",\"is_error\":true,\"result\":\"Provider error\"}'",
+        );
+        crate::orchestrator::dispatch_chat_turn(
+            f.state.clone(),
+            crate::test_support::input("Start"),
+        )
+        .await
+        .unwrap();
+        f.wait().await;
+        assert_eq!(
+            f.state.read().unwrap().store.chats[0]
+                .messages
+                .last()
+                .unwrap()
+                .status,
+            "error"
+        );
+    }
+
+    #[tokio::test]
+    async fn stderr_eof_does_not_starve_stdout_or_timer() {
+        let f = Fixture::new(&["A"]);
+        f.script("A", "exec 2>&-\nsleep 0.05\necho EXPECTED");
+        crate::orchestrator::dispatch_chat_turn(
+            f.state.clone(),
+            crate::test_support::input("Start"),
+        )
+        .await
+        .unwrap();
+        f.wait().await;
+        let g = f.state.read().unwrap();
+        assert_eq!(g.store.chats[0].messages.last().unwrap().text, "EXPECTED");
+        assert_eq!(g.store.chats[0].messages.last().unwrap().status, "complete");
+    }
+    #[tokio::test]
+    async fn ollama_without_a_model_never_starts_or_downloads_one() {
+        let f = Fixture::new(&["A"]);
+        f.script("A", "touch should-not-run");
+        f.state.write().unwrap().store.bots[0].cli_driver = CliDriverKind::Ollama;
+        crate::orchestrator::dispatch_chat_turn(
+            f.state.clone(),
+            crate::test_support::input("Start"),
+        )
+        .await
+        .unwrap();
+        f.wait().await;
+        assert!(!f.dir.join("should-not-run").exists());
+        let guard = f.state.read().unwrap();
+        let message = guard.store.chats[0].messages.last().unwrap();
+        assert_eq!(message.status, "error");
+        assert!(message.text.contains("Choose an installed Ollama model"));
+    }
 }

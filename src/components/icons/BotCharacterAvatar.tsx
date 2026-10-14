@@ -1,19 +1,4 @@
 import {
-  BarChart3,
-  Bot,
-  Code2,
-  FileCode2,
-  FolderGit2,
-  GitBranch,
-  Globe,
-  Palette,
-  ShieldCheck,
-  Terminal,
-} from "lucide-react";
-import type React from "react";
-import { useEffect, useId, useMemo, useState } from "react";
-import type { BotColor, BotShape, CliDriverKind } from "../../lib/types";
-import {
   AcpLogoIcon,
   ClaudeIcon,
   CursorLogoIcon,
@@ -25,6 +10,24 @@ import {
   OpencodeLogoIcon,
   PiLogoIcon,
 } from "./OmarchyIcons";
+import {
+  BarChart3,
+  Bot,
+  Code2,
+  FileCode2,
+  FolderGit2,
+  GitBranch,
+  Globe,
+  Palette,
+  ShieldCheck,
+  Terminal,
+  Star,
+} from "lucide-react";
+import { avatarSource } from "../../lib/avatar";
+import type React from "react";
+import { useEffect, useId, useMemo, useState } from "react";
+import type { BotColor, BotShape, CliDriverKind } from "../../lib/types";
+
 
 export const BOT_SHAPES: Array<{ id: BotShape; label: string }> = [
   { id: "blob", label: "Blob" },
@@ -469,6 +472,7 @@ function getShapeSvgPath(shape: string): string {
 export interface BotCharacterAvatarProps {
   bot?: {
     name?: string;
+    avatarImage?: string | null;
     shape?: BotShape | string;
     color?: BotColor | string;
     isPrimary?: boolean;
@@ -487,7 +491,7 @@ export interface BotCharacterAvatarProps {
 }
 
 /**
- * Authentic Grok Bot style minimalist character avatar:
+ * Procedural character avatar:
  * Single clean silhouette + smooth 135° gradient + two solid dark capsule eyes.
  */
 export function BotCharacterAvatar({
@@ -502,6 +506,7 @@ export function BotCharacterAvatar({
   showCliBadge: propShowCliBadge,
   className = "",
 }: BotCharacterAvatarProps): React.ReactElement {
+  const imageSource = avatarSource(bot?.avatarImage);
   const gradId = useId().replace(/:/g, "");
   const isPrimary = propIsPrimary ?? bot?.isPrimary ?? false;
   const cliDriver = propCliDriver ?? bot?.cliDriver;
@@ -516,13 +521,16 @@ export function BotCharacterAvatar({
   const [isBlinking, setIsBlinking] = useState(false);
 
   useEffect(() => {
-    const delay = 2800 + Math.random() * 4200;
-    const timer = setTimeout(() => {
-      setIsBlinking(true);
-      setTimeout(() => setIsBlinking(false), 145);
-    }, delay);
+    let timer: ReturnType<typeof setTimeout>;
+    const scheduleBlink = () => {
+      timer = setTimeout(() => {
+        setIsBlinking(true);
+        timer = setTimeout(() => { setIsBlinking(false); scheduleBlink(); }, 145);
+      }, 2800 + Math.random() * 4200);
+    };
+    scheduleBlink();
     return () => clearTimeout(timer);
-  }, [isBlinking]);
+  }, []);
 
   const palette = useMemo(
     () => BOT_COLORS.find((c) => c.id === color) ?? BOT_COLORS[0],
@@ -540,16 +548,14 @@ export function BotCharacterAvatar({
 
   return (
     <div
-      className={`relative inline-flex items-center justify-center select-none shrink-0 ${className}`}
+      className={`relative inline-flex items-center justify-center select-none shrink-0 ${isStreaming ? "bot-avatar-working" : ""} ${className}`}
       style={{ width: size, height: size }}
     >
-      <svg
+      {imageSource ? <img src={imageSource} alt={`${bot?.name || "Bot"} profile picture`} width={size} height={size} className="h-full w-full object-contain rounded-[18%]" /> : <svg aria-hidden="true"
         width={size}
         height={size}
         viewBox="0 0 228.54 228.54"
-        className={`overflow-visible transition-transform duration-300 ${
-          isStreaming ? "scale-[1.04]" : ""
-        }`}
+        className="overflow-visible transition-transform duration-300"
       >
         <defs>
           <linearGradient id={gradId} x1="0%" y1="0%" x2="100%" y2="100%">
@@ -585,7 +591,7 @@ export function BotCharacterAvatar({
             fill="#09090B"
           />
         </g>
-      </svg>
+      </svg>}
 
       {showStarBadge && (
         <span
@@ -597,14 +603,7 @@ export function BotCharacterAvatar({
             bottom: Math.round(size * 0.02),
           }}
         >
-          <svg
-            width={Math.max(8, Math.round(size * 0.155))}
-            height={Math.max(8, Math.round(size * 0.155))}
-            viewBox="0 0 16 16"
-            fill="currentColor"
-          >
-            <path d="M8 1.3l1.95 4.08 4.5.62-3.27 3.15.79 4.48L8 11.5l-3.97 2.13.79-4.48L1.55 6l4.5-.62L8 1.3z" />
-          </svg>
+          <Star size={Math.max(8, Math.round(size * 0.155))} fill="currentColor" strokeWidth={0} />
         </span>
       )}
 
@@ -681,157 +680,19 @@ export function CliProviderGlyph({
     return <OllamaLogoIcon style={style} className={`text-pink-400 ${className}`} />;
   }
   if (d === "aider") {
-    return <GitBranch style={style} className={`text-amber-400 ${className}`} />;
+    return <span style={style} className={`inline-flex items-center justify-center text-[10px] font-medium ${className}`} aria-hidden="true">ai</span>;
   }
-  return <Terminal style={style} className={`text-cyan-300 ${className}`} />;
+  return <span style={style} className={`inline-flex items-center justify-center text-[10px] font-medium ${className}`} aria-hidden="true">{driver.slice(0, 1).toUpperCase()}</span>;
 }
 
-export function CliBrandBadge({
-  driver,
-  size = 42,
-  rounded = "rounded-xl",
-}: {
+export function CliBrandBadge({ driver, size = 42, rounded = "rounded-xl" }: {
   driver: CliDriverKind | string;
   size?: number;
   rounded?: string;
 }): React.ReactElement {
-  const d = driver.toLowerCase();
-  const boxStyle = { width: size, height: size };
-  const svgSize = Math.round(size * 0.52);
-
-  if (d === "claude") {
-    return (
-      <div
-        style={boxStyle}
-        className={`${rounded} bg-[#d97757]/15 border border-[#d97757]/30 text-[#d97757] flex items-center justify-center shrink-0 shadow-sm`}
-      >
-        <ClaudeIcon style={{ width: svgSize, height: svgSize }} />
-      </div>
-    );
-  }
-  if (d === "codex") {
-    return (
-      <div
-        style={boxStyle}
-        className={`${rounded} bg-emerald-500/15 border border-emerald-400/30 text-emerald-400 flex items-center justify-center shrink-0 shadow-sm`}
-      >
-        <OpenaiIcon style={{ width: svgSize, height: svgSize }} />
-      </div>
-    );
-  }
-  if (d === "opencode") {
-    return (
-      <div
-        style={boxStyle}
-        className={`${rounded} bg-white/[0.08] border border-white/15 text-[#F1ECEC] flex items-center justify-center shrink-0 shadow-sm`}
-      >
-        <OpencodeLogoIcon style={{ width: svgSize, height: svgSize }} />
-      </div>
-    );
-  }
-  if (d === "cursor") {
-    return (
-      <div
-        style={boxStyle}
-        className={`${rounded} bg-white/[0.08] border border-white/15 text-[#EDECEC] flex items-center justify-center shrink-0 shadow-sm`}
-      >
-        <CursorLogoIcon style={{ width: svgSize, height: svgSize }} />
-      </div>
-    );
-  }
-  if (d === "grok") {
-    return (
-      <div
-        style={boxStyle}
-        className={`${rounded} bg-white/[0.08] border border-white/15 text-white flex items-center justify-center shrink-0 shadow-sm`}
-      >
-        <GrokIcon style={{ width: svgSize, height: svgSize }} />
-      </div>
-    );
-  }
-  if (d === "pi") {
-    return (
-      <div
-        style={boxStyle}
-        className={`${rounded} bg-violet-500/15 border border-violet-400/30 text-violet-300 flex items-center justify-center shrink-0 shadow-sm`}
-      >
-        <PiLogoIcon style={{ width: svgSize, height: svgSize }} />
-      </div>
-    );
-  }
-  if (d === "muse") {
-    return (
-      <div
-        style={boxStyle}
-        className={`${rounded} bg-cyan-500/15 border border-cyan-400/30 text-cyan-300 flex items-center justify-center shrink-0 shadow-sm`}
-      >
-        <MuseLogoIcon style={{ width: svgSize, height: svgSize }} />
-      </div>
-    );
-  }
-  if (d === "acp") {
-    return (
-      <div
-        style={boxStyle}
-        className={`${rounded} bg-white/[0.08] border border-white/15 text-white flex items-center justify-center shrink-0 shadow-sm`}
-      >
-        <AcpLogoIcon style={{ width: svgSize, height: svgSize }} />
-      </div>
-    );
-  }
-  if (d === "antigravity") {
-    return (
-      <div
-        style={boxStyle}
-        className={`${rounded} bg-blue-500/12 border border-blue-400/25 flex items-center justify-center shrink-0 shadow-sm`}
-      >
-        <img
-          src="/antigravity-logo.png"
-          alt="Antigravity"
-          style={{ width: svgSize, height: svgSize }}
-          className="object-contain"
-        />
-      </div>
-    );
-  }
-  if (d === "gemini") {
-    return (
-      <div
-        style={boxStyle}
-        className={`${rounded} bg-blue-500/15 border border-blue-400/30 text-blue-400 flex items-center justify-center shrink-0 shadow-sm`}
-      >
-        <GeminiIcon style={{ width: svgSize, height: svgSize }} />
-      </div>
-    );
-  }
-  if (d === "ollama") {
-    return (
-      <div
-        style={boxStyle}
-        className={`${rounded} bg-pink-500/15 border border-pink-400/30 text-pink-300 flex items-center justify-center shrink-0 shadow-sm`}
-      >
-        <OllamaLogoIcon style={{ width: svgSize, height: svgSize }} />
-      </div>
-    );
-  }
-  if (d === "aider") {
-    return (
-      <div
-        style={boxStyle}
-        className={`${rounded} bg-amber-500/15 border border-amber-400/30 text-amber-300 flex items-center justify-center shrink-0 shadow-sm`}
-      >
-        <GitBranch style={{ width: svgSize, height: svgSize }} />
-      </div>
-    );
-  }
-  return (
-    <div
-      style={boxStyle}
-      className={`${rounded} bg-cyan-500/12 border border-cyan-400/25 text-cyan-300 flex items-center justify-center shrink-0 shadow-sm`}
-    >
-      <Globe style={{ width: svgSize, height: svgSize }} />
-    </div>
-  );
+  return <div style={{ width: size, height: size }} className={`${rounded} bg-white/[0.05] border border-white/10 flex items-center justify-center shrink-0`}>
+    <CliProviderGlyph driver={driver} size={Math.round(size * 0.52)} />
+  </div>;
 }
 
 export function SkillBrandIcon({

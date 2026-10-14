@@ -130,58 +130,6 @@ impl CliDriverKind {
             Self::Custom => "Custom CLI Specialist",
         }
     }
-
-    pub fn suggested_models(self) -> Vec<String> {
-        match self {
-            Self::Claude => vec![
-                "opus".to_string(),
-                "sonnet".to_string(),
-                "claude-opus-4-6".to_string(),
-                "claude-sonnet-4-6".to_string(),
-                "haiku".to_string(),
-            ],
-            Self::Codex => vec![
-                "gpt-5.4".to_string(),
-                "gpt-5.3-codex".to_string(),
-                "o3".to_string(),
-                "o4-mini".to_string(),
-            ],
-            Self::Opencode => vec![
-                "anthropic/claude-sonnet-4-6".to_string(),
-                "anthropic/claude-opus-4-6".to_string(),
-                "openai/gpt-5.4".to_string(),
-                "google-vertex/gemini-4-argon".to_string(),
-            ],
-            Self::Cursor => vec![
-                "sonnet-4-thinking".to_string(),
-                "claude-opus-4-6".to_string(),
-                "gpt-5".to_string(),
-                "grok-4".to_string(),
-            ],
-            Self::Grok => vec![
-                "grok-4".to_string(),
-                "grok-4-heavy".to_string(),
-                "grok-code-fast-1".to_string(),
-            ],
-            Self::Pi => vec![
-                "anthropic/claude-sonnet-4-6".to_string(),
-                "openai/gpt-5.4".to_string(),
-            ],
-            Self::Antigravity => vec![
-                "gemini-2.5-pro".to_string(),
-                "gemini-2.5-flash".to_string(),
-            ],
-            Self::Muse => vec!["muse-code-1".to_string()],
-            Self::Acp => vec!["default".to_string()],
-            Self::Gemini => vec![
-                "gemini-2.5-pro".to_string(),
-                "gemini-2.5-flash".to_string(),
-            ],
-            Self::Aider => vec!["sonnet".to_string(), "o3".to_string()],
-            Self::Ollama => vec!["qwen2.5-coder:32b".to_string(), "llama3.3".to_string()],
-            Self::Custom => vec!["default".to_string()],
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,6 +146,12 @@ pub struct CliHarnessInfo {
     pub install_hint: String,
     pub auth_hint: String,
     pub models: Vec<String>,
+    #[serde(default)]
+    pub model_labels: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub models_status: String,
+    #[serde(default)]
+    pub models_source: Option<String>,
     pub supports_json_stream: bool,
     pub supports_session_resume: bool,
 }
@@ -279,17 +233,18 @@ pub fn test_cli_harness(kind: CliDriverKind) -> CliHarnessTestResult {
 
 pub fn extended_search_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/Users/rcourson"));
-    for rel in [
-        ".local/bin",
-        ".grok/bin",
-        ".cargo/bin",
-        ".bun/bin",
-        ".opencode/bin",
-        ".cursor/bin",
-        "Library/pnpm",
-    ] {
-        dirs.push(home.join(rel));
+    if let Some(home) = dirs::home_dir() {
+        for rel in [
+            ".local/bin",
+            ".grok/bin",
+            ".cargo/bin",
+            ".bun/bin",
+            ".opencode/bin",
+            ".cursor/bin",
+            "Library/pnpm",
+        ] {
+            dirs.push(home.join(rel));
+        }
     }
     for sys in [
         "/opt/homebrew/bin",
@@ -335,19 +290,66 @@ pub fn find_binary(candidates: &[&str]) -> Option<String> {
 }
 
 fn probe_version(binary_path: &str, flag: &str) -> Option<String> {
-    let output = Command::new(binary_path)
-        .arg(flag)
-        .env("PATH", augmented_path_env())
-        .output()
-        .ok()?;
-    if !output.status.success() && output.stdout.is_empty() {
-        return None;
-    }
-    let raw = if !output.stdout.is_empty() {
-        String::from_utf8_lossy(&output.stdout).into_owned()
-    } else {
-        String::from_utf8_lossy(&output.stderr).into_owned()
-    };
+    // A broken --version command must not hang app startup or a rescan.
+    // Spool to a temporary file to avoid filling an undrained pipe.
+    use std::io::Read;
+    use std::process::Stdio;
+    let path = std::env::temp_dir().join(format!("omni-version-{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut options = fs::OpenOptions::new();
+        options.create_new(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&path).ok()?;
+        let mut command = Command::new(binary_path);
+        command
+            .arg(flag)
+            .env("PATH", augmented_path_env())
+            .stdin(Stdio::null())
+            .stdout(file.try_clone().ok()?)
+            .stderr(file);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command.spawn().ok()?;
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        return None;
+                    }
+                    break;
+                }
+                Ok(None) if start.elapsed() < std::time::Duration::from_secs(3) => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                _ => {
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::kill(-(child.id() as i32), libc::SIGKILL);
+                    }
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+            }
+        }
+        let mut bytes = Vec::new();
+        fs::File::open(&path)
+            .ok()?
+            .take(8192)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    })();
+    let _ = fs::remove_file(path);
+    let raw = result?;
     raw.lines()
         .map(str::trim)
         .find(|l| !l.is_empty() && !l.starts_with("Warning:"))
@@ -355,15 +357,16 @@ fn probe_version(binary_path: &str, flag: &str) -> Option<String> {
 }
 
 pub fn scan_local_cli_harnesses() -> Vec<CliHarnessInfo> {
-    let specs: Vec<(
+    type HarnessSpec<'a> = (
         CliDriverKind,
-        &[&str],
-        &str,
-        &str,
-        &str,
+        &'a [&'a str],
+        &'a str,
+        &'a str,
+        &'a str,
         bool,
         bool,
-    )> = vec![
+    );
+    let specs: Vec<HarnessSpec<'_>> = vec![
         (
             CliDriverKind::Claude,
             &["claude"],
@@ -474,14 +477,11 @@ pub fn scan_local_cli_harnesses() -> Vec<CliHarnessInfo> {
         ),
     ];
 
-    specs
+    let mut harnesses: Vec<CliHarnessInfo> = specs
         .into_iter()
         .map(
             |(kind, bin_candidates, description, install_hint, auth_hint, json_stream, resume)| {
                 let binary_path = find_binary(bin_candidates);
-                let version = binary_path
-                    .as_deref()
-                    .and_then(|p| probe_version(p, "--version"));
                 let installed = binary_path.is_some();
                 CliHarnessInfo {
                     id: kind.as_str().to_string(),
@@ -489,22 +489,43 @@ pub fn scan_local_cli_harnesses() -> Vec<CliHarnessInfo> {
                     name: kind.display_name().to_string(),
                     binary_name: bin_candidates[0].to_string(),
                     binary_path,
-                    version,
+                    version: None,
                     installed,
                     description: description.to_string(),
                     install_hint: install_hint.to_string(),
                     auth_hint: auth_hint.to_string(),
-                    models: kind.suggested_models(),
+                    models: Vec::new(),
+                    model_labels: Default::default(),
+                    models_status: if installed { "loading" } else { "unavailable" }.into(),
+                    models_source: None,
                     supports_json_stream: json_stream,
                     supports_session_resume: resume,
                 }
             },
         )
-        .collect()
+        .collect();
+
+    // At most one probe per registered CLI (12), each with its own timeout.
+    // Preserve registry order while avoiding cumulative process startup delays.
+    std::thread::scope(|scope| {
+        for harness in &mut harnesses {
+            if harness.installed {
+                scope.spawn(move || {
+                    harness.version = harness
+                        .binary_path
+                        .as_deref()
+                        .and_then(|path| probe_version(path, "--version"));
+                });
+            }
+        }
+    });
+    harnesses
 }
 
 pub fn scan_local_skills() -> Vec<LocalSkillItem> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/Users/rcourson"));
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
     let roots = [
         (home.join(".agents/skills"), "~/.agents/skills"),
         (home.join(".claude/skills"), "~/.claude/skills"),
@@ -546,7 +567,7 @@ pub fn scan_local_skills() -> Vec<LocalSkillItem> {
         }
     }
 
-    skills.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    skills.sort_by_key(|a| a.name.to_lowercase());
     skills
 }
 
@@ -590,7 +611,9 @@ fn parse_skill_frontmatter(raw: &str, fallback_slug: &str) -> (String, String) {
 }
 
 pub fn scan_local_mcp_servers() -> Vec<LocalMcpServer> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/Users/rcourson"));
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
     let mut servers = Vec::new();
     let mut seen = HashSet::new();
 

@@ -14,7 +14,7 @@ export function App() {
         setBootError(
           err instanceof Error
             ? err.message
-            : "Could not reach Omni Bot local Rust backend"
+            : "Could not reach Omnibot local Rust backend"
         )
       );
   }, []);
@@ -61,12 +61,12 @@ export function App() {
     return (
       <div className="h-screen w-screen bg-[#121212] text-zinc-200 flex flex-col items-center justify-center p-6 text-center">
         <img
-          src="/botfinity-gauntlet.png"
-          alt="Botfinity"
+          src="/omnibot-gauntlet.png"
+          alt="Omnibot"
           className="w-16 h-16 object-contain"
         />
         <h2 className="mt-4 text-base font-semibold text-white">
-          Botfinity Local Daemon Offline
+          Omnibot Local Daemon Offline
         </h2>
         <p className="mt-1.5 text-xs text-zinc-400 max-w-md">{bootError}</p>
       </div>
@@ -77,12 +77,12 @@ export function App() {
     return (
       <div className="h-screen w-screen bg-[#121212] flex flex-col items-center justify-center gap-3">
         <img
-          src="/botfinity-gauntlet.png"
-          alt="Botfinity"
+          src="/omnibot-gauntlet.png"
+          alt="Omnibot"
           className="w-14 h-14 object-contain animate-pulse"
         />
         <span className="text-xs text-zinc-500">
-          Starting Botfinity...
+          Starting Omnibot...
         </span>
       </div>
     );

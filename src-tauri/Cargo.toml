@@ -1,12 +1,18 @@
 [package]
-name = "omni-bot"
+name = "omnibot"
 version = "0.1.0"
-description = "Local Multi-Agent Coding Swarm & CLI Control Plane"
+description = "Omnibot — Local AI bots, projects, and group chats powered by your coding CLIs"
 authors = ["Robert Courson <robzilla1738>"]
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/robzilla1738/Omnibot"
+
+[[bin]]
+name = "Omnibot"
+path = "src/main.rs"
 
 [lib]
-name = "omni_bot_lib"
+name = "omnibot_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -22,3 +28,7 @@ axum = { version = "0.7" }
 tower-http = { version = "0.6", features = ["cors"] }
 futures-util = "0.3"
 dirs = "5"
+uuid = { version = "1", features = ["v4"] }
+shlex = "1"
+chrono = "0.4"
+libc = "0.2"

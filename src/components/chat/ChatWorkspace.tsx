@@ -1,3 +1,6 @@
+import { Collapse } from "../ui/Collapse";
+import { BotModelSelect } from "../bots/BotModelSelect";
+import DOMPurify from "dompurify";
 import {
   ArrowDown,
   ArrowLeftRight,
@@ -17,7 +20,7 @@ import {
   X,
 } from "lucide-react";
 import { marked } from "marked";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type {
   ActiveBotRun,
   BotProfile,
@@ -34,12 +37,18 @@ import {
 
 export interface ChatWorkspaceProps {
   chat: ChatThread;
+  onChooseProject: () => void;
+  onManageTeam: () => void;
+  onOpenMemory: () => void;
   bots: BotProfile[];
   harnesses: CliHarnessInfo[];
   skills: LocalSkillItem[];
   activeRuns: ActiveBotRun[];
+  workflowActive: boolean;
+  defaultSpeakerId: string;
   inspectorOpen: boolean;
   onToggleInspector: () => void;
+  onOpenBotSettings: (bot: BotProfile) => void;
   onSendMessage: (params: {
     text: string;
     skillSlug?: string;
@@ -53,10 +62,10 @@ export interface ChatWorkspaceProps {
 
 const SWARM_SLASH_COMMANDS = [
   {
-    slug: "swarm",
-    name: "Swarm Coordinate",
+    slug: "group",
+    name: "Group Coordinate",
     description: "Have all Bots in this room collaborate sequentially on the task",
-    prefix: "@all ",
+    prefix: "/group ",
   },
   {
     slug: "race",
@@ -75,22 +84,29 @@ const SWARM_SLASH_COMMANDS = [
 
 export function ChatWorkspace({
   chat,
+  onChooseProject, onManageTeam, onOpenMemory,
   bots,
   harnesses,
   skills,
   activeRuns,
+  workflowActive,
+  defaultSpeakerId,
   inspectorOpen,
   onToggleInspector,
+  onOpenBotSettings,
   onSendMessage,
   onStopChat,
 }: ChatWorkspaceProps) {
   const [input, setInput] = useState("");
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const sendPending = useRef(false);
   const [composerMenuOpen, setComposerMenuOpen] = useState(false);
   const [selectedSkill, setSelectedSkill] = useState<LocalSkillItem | null>(null);
   const [overrideBotId, setOverrideBotId] = useState<string | undefined>(undefined);
   const [overrideModel, setOverrideModel] = useState<string | undefined>(undefined);
   const [reasoningEffort, setReasoningEffort] = useState<"low" | "medium" | "high">(
-    "high"
+    "medium"
   );
   const [parallelMode, setParallelMode] = useState(false);
 
@@ -113,14 +129,20 @@ export function ChatWorkspace({
     if (overrideBotId) {
       return bots.find((b) => b.id === overrideBotId) ?? chatParticipants[0];
     }
-    return chatParticipants[0];
-  }, [overrideBotId, bots, chatParticipants]);
+    return bots.find((b) => b.id === defaultSpeakerId) ?? chatParticipants[0];
+  }, [overrideBotId, bots, chatParticipants, defaultSpeakerId]);
+
+  useEffect(() => {
+    setOverrideModel(undefined);
+    const effort = activeSpeakerBot?.reasoningEffort;
+    setReasoningEffort(effort === "low" || effort === "high" ? effort : "medium");
+  }, [activeSpeakerBot?.id, activeSpeakerBot?.cliDriver, activeSpeakerBot?.model, activeSpeakerBot?.reasoningEffort]);
 
   const chatActiveRuns = useMemo(
     () => activeRuns.filter((r) => r.chatId === chat.id),
     [activeRuns, chat.id]
   );
-  const isStreaming = chatActiveRuns.length > 0;
+  const isStreaming = workflowActive || chatActiveRuns.length > 0;
 
   // Compute a lightweight signature of streaming text/thinking lengths so sticky scroll tracks live deltas
   const lastMsg = chat.messages[chat.messages.length - 1];
@@ -255,7 +277,10 @@ export function ChatWorkspace({
   const handleSend = useCallback(
     async (overridePrompt?: string, targetBotId?: string) => {
       const trimmed = (overridePrompt ?? input).trim();
-      if (!trimmed) return;
+      if (!trimmed || sendPending.current || isStreaming) return;
+      sendPending.current = true;
+      setSending(true);
+      setSendError(null);
 
       if (!overridePrompt) {
         setInput("");
@@ -265,21 +290,32 @@ export function ChatWorkspace({
       setSelectedSkill(null);
       setParallelMode(false);
 
+      try {
       await onSendMessage({
         text: trimmed,
         skillSlug,
-        overrideBotId: targetBotId ?? overrideBotId,
-        overrideModel,
+        overrideBotId: targetBotId ?? activeSpeakerBot?.id,
+        overrideModel: targetBotId && targetBotId !== activeSpeakerBot?.id ? undefined : overrideModel,
         overrideEffort: reasoningEffort,
         parallelMode: isParallel,
       });
+      } catch (error) {
+        if (!overridePrompt) setInput(trimmed);
+        setSelectedSkill(selectedSkill);
+        setParallelMode(isParallel);
+        setSendError(error instanceof Error ? error.message : "Could not send message.");
+      } finally {
+        sendPending.current = false;
+        setSending(false);
+      }
     },
     [
       input,
+      isStreaming,
       selectedSkill,
       parallelMode,
       onSendMessage,
-      overrideBotId,
+      activeSpeakerBot?.id,
       overrideModel,
       reasoningEffort,
     ]
@@ -293,28 +329,31 @@ export function ChatWorkspace({
   const isEmpty = chat.messages.length === 0;
 
   return (
-    <main className="relative flex-1 h-full bg-[#121212] overflow-hidden">
+    <main className="motion-chat relative flex-1 h-full bg-[#121212] overflow-hidden">
       {/* Top Progressive Blur & Soft Vignette Feather */}
       <div
         aria-hidden
         className="pointer-events-none absolute top-0 inset-x-0 h-24 chat-top-feather z-10"
       />
 
+      {sendError && (
+        <div role="alert" className="absolute bottom-28 inset-x-6 z-30 rounded-xl bg-red-950 p-3 text-sm text-red-200">
+          {sendError}
+        </div>
+      )}
       {/* Minimal Top Drag Region — Single Centered Bot Name Pill */}
       <div
         data-tauri-drag-region
-        className="absolute top-0 inset-x-0 h-16 flex items-center justify-center z-20 pointer-events-auto"
+        className="absolute top-0 inset-x-0 min-h-16 pt-2 flex flex-col items-center justify-center gap-1 z-20 pointer-events-auto"
       >
         <button
           type="button"
           onClick={onToggleInspector}
-          title="Click to open Bot Settings, Swarm Members, Project & Git (Cmd+I)"
-          className={`px-4 py-1.5 rounded-full flex items-center gap-2.5 active:scale-[0.97] ${
-            inspectorOpen
-              ? "liquid-glass-active text-white"
-              : "floating-header-pill text-zinc-100"
-          }`}
+          title="Click to open Bot Settings, Group members, Project & Git (Cmd+I)"
+          aria-expanded={inspectorOpen}
+          className="bot-header-pill text-zinc-100"
         >
+          <span className="inline-flex items-center gap-2.5 min-w-0">
           {chatParticipants.length > 1 ? (
             <div className="flex items-center -space-x-1.5">
               {chatParticipants.slice(0, 4).map((b) => (
@@ -325,14 +364,21 @@ export function ChatWorkspace({
             activeSpeakerBot && (
               <BotCharacterAvatar
                 bot={activeSpeakerBot}
-                size={24}
+                size={26}
+                showStarBadge={false}
+                showCliBadge={false}
                 isStreaming={isStreaming}
               />
             )
           )}
-          <span className="text-[14.5px] font-semibold tracking-tight max-w-[260px] truncate">
-            {chat.isPrimary ? activeSpeakerBot?.name || "Botfinity" : chat.title}
+          <span className="text-[16px] font-medium max-w-[260px] truncate">
+            {chat.isGroup ? chat.title : activeSpeakerBot?.name || chat.title}
           </span>
+          </span>
+          <span className="bot-header-chevron" aria-hidden="true"><ChevronRight size={18} /></span>
+        </button>
+        <button onClick={onChooseProject} title={chat.workspacePath ?? "Start a project work chat"} className="max-w-[260px] truncate rounded-md px-2 py-1 text-[11px] text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04]">
+          {chat.workspacePath ? chat.workspacePath.split("/").filter(Boolean).at(-1) : "Personal space"}
         </button>
       </div>
 
@@ -341,7 +387,7 @@ export function ChatWorkspace({
         ref={scrollContainerRef}
         onScroll={handleScroll}
         className={`h-full w-full overflow-y-auto overflow-x-hidden chat-scroll-mask px-6 ${
-          isEmpty ? "flex flex-col items-center justify-center" : "pt-20 pb-40"
+          isEmpty ? "flex flex-col items-center justify-center" : "pt-28 pb-40"
         }`}
       >
         {isEmpty ? (
@@ -349,6 +395,9 @@ export function ChatWorkspace({
             chat={chat}
             participants={chatParticipants}
             allBots={bots}
+            onChooseProject={onChooseProject}
+            onManageTeam={onManageTeam}
+            onOpenMemory={onOpenMemory}
             onSendStarter={(prompt) => handleSend(prompt)}
           />
         ) : (
@@ -358,6 +407,7 @@ export function ChatWorkspace({
                 key={msg.id}
                 message={msg}
                 bots={bots}
+                onOpenBotSettings={onOpenBotSettings}
                 onQuickHandoff={(targetBot) => {
                   handleSend(
                     `@${targetBot.name} review @${msg.authorName || "Bot"}'s response above and follow up or improve on it.`,
@@ -367,32 +417,10 @@ export function ChatWorkspace({
               />
             ))}
 
-            {isStreaming && (
-              <div className="flex flex-wrap items-center gap-2.5 text-xs text-zinc-300 pl-1 py-1">
-                <Loader2 className="w-3.5 h-3.5 animate-spin text-[#8cf1fb]" />
-                <span>
-                  {chatActiveRuns
-                    .map(
-                      (r) =>
-                        `@${r.botName} is ${
-                          r.activity === "thinking"
-                            ? "thinking"
-                            : r.activity.startsWith("tool:")
-                              ? `running ${r.activity.slice(5)}`
-                              : "responding"
-                        }`
-                    )
-                    .join(" · ")}
-                  ...
-                </span>
-                <button
-                  type="button"
-                  onClick={onStopChat}
-                  className="ml-1 px-2.5 py-0.5 rounded-full liquid-glass-chip text-zinc-200 hover:text-white text-[11px] inline-flex items-center gap-1"
-                >
-                  <Square className="w-2.5 h-2.5 fill-current" />
-                  <span>Stop</span>
-                </button>
+            {isStreaming && !chat.messages.some(message => message.status === "streaming") && (
+              <div role="status" className="pl-12 text-[13px] text-zinc-400 flex items-center gap-2">
+                <ThinkingDots />
+                <span>Preparing the next turn</span>
               </div>
             )}
 
@@ -430,9 +458,9 @@ export function ChatWorkspace({
           {/* `/` Slash Command & Skill Autocomplete Popover */}
           {slashMatch && matchingSlashItems.length > 0 && (
             <div className="mb-2.5 rounded-2xl liquid-glass-modal p-2 shadow-2xl space-y-1 max-h-64 overflow-y-auto">
-              <div className="px-2.5 py-1 flex items-center justify-between text-[11px] font-medium uppercase tracking-wider text-zinc-400">
-                <span>Swarm Commands &amp; Local Skills</span>
-                <span className="font-mono text-[10px] text-zinc-500">ESC</span>
+              <div className="px-2.5 py-1 flex items-center justify-between text-[11px] font-medium text-zinc-400">
+                <span>Chat Commands &amp; Local Skills</span>
+                <span className=" text-[10px] text-zinc-500">ESC</span>
               </div>
               {matchingSlashItems.map((item, idx) => {
                 const active = idx === slashIndex;
@@ -466,7 +494,7 @@ export function ChatWorkspace({
                             ? item.cmd.name
                             : item.skill.name}
                         </span>
-                        <span className="text-[11px] font-mono text-zinc-400">
+                        <span className="text-[11px]  text-zinc-400">
                           /{item.kind === "command" ? item.cmd.slug : item.skill.slug}
                         </span>
                       </div>
@@ -485,9 +513,9 @@ export function ChatWorkspace({
           {/* `@` Bot Mention Autocomplete Popover */}
           {mentionMatch && matchingBotMentions.length > 0 && (
             <div className="mb-2.5 rounded-2xl liquid-glass-modal p-2 shadow-2xl space-y-1 max-h-64 overflow-y-auto">
-              <div className="px-2.5 py-1 flex items-center justify-between text-[11px] font-medium uppercase tracking-wider text-zinc-400">
+              <div className="px-2.5 py-1 flex items-center justify-between text-[11px] font-medium text-zinc-400">
                 <span>Mention or Hand Off to a Bot</span>
-                <span className="font-mono text-[10px] text-zinc-500">ESC</span>
+                <span className=" text-[10px] text-zinc-500">ESC</span>
               </div>
               {matchingBotMentions.map((entry, idx) => {
                 const active = idx === mentionIndex;
@@ -515,18 +543,18 @@ export function ChatWorkspace({
                       <div className="flex items-center gap-2">
                         <span className="text-[13.5px] font-semibold truncate">
                           {entry.kind === "all"
-                            ? "@all — Full Swarm Broadcast"
+                            ? "@all — Group Broadcast"
                             : `@${entry.bot.name}`}
                         </span>
                         {entry.kind === "bot" && (
-                          <span className="text-[11px] font-mono text-zinc-400">
+                          <span className="text-[11px]  text-zinc-400">
                             {entry.bot.cliDriver}
                           </span>
                         )}
                       </div>
                       <div className="text-xs text-zinc-400 truncate">
                         {entry.kind === "all"
-                          ? "Dispatch to every Bot in the Swarm Room in parallel"
+                          ? "Dispatch to every Bot in the Group chat in parallel"
                           : entry.bot.roleTitle}
                       </div>
                     </div>
@@ -542,7 +570,7 @@ export function ChatWorkspace({
               {parallelMode && (
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full liquid-glass-chip border-emerald-400/35 text-emerald-200 text-xs font-medium">
                   <ArrowLeftRight className="w-3 h-3" />
-                  <span>Parallel Swarm Mode</span>
+                  <span>Parallel Group Mode</span>
                   <button
                     type="button"
                     onClick={() => setParallelMode(false)}
@@ -603,15 +631,16 @@ export function ChatWorkspace({
           )}
           <div
             aria-hidden={!composerMenuOpen}
-            className={`absolute bottom-14 left-0 w-80 rounded-2xl liquid-glass-modal p-2.5 z-30 space-y-2.5 origin-bottom-left transition-all duration-220 spring-transition ${
+            inert={!composerMenuOpen}
+            className={`absolute bottom-14 left-0 w-80 rounded-2xl liquid-glass-modal p-2.5 z-30 space-y-2.5 origin-bottom-left transition-[opacity,scale,translate] duration-200 spring-transition ${
               composerMenuOpen
                 ? "scale-100 opacity-100 translate-y-0 pointer-events-auto"
-                : "scale-[0.94] opacity-0 translate-y-2 pointer-events-none"
+                : "scale-[0.985] opacity-0 translate-y-1 pointer-events-none"
             }`}
           >
             {/* Target Bot Picker */}
             <div className="px-1">
-              <div className="px-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
+              <div className="px-1.5 text-[10.5px] font-medium text-zinc-400 mb-1.5">
                 Route Turn to Bot
               </div>
               <div className="max-h-36 overflow-y-auto space-y-0.5 pr-0.5">
@@ -635,7 +664,7 @@ export function ChatWorkspace({
                       <span className="flex items-center gap-2 min-w-0">
                         <BotCharacterAvatar bot={b} size={20} />
                         <span className="truncate">{b.name}</span>
-                        <span className="text-[10.5px] font-mono text-zinc-400">
+                        <span className="text-[10.5px]  text-zinc-400">
                           ({b.cliDriver})
                         </span>
                       </span>
@@ -668,57 +697,12 @@ export function ChatWorkspace({
               </div>
             </div>
 
-            {/* Model Override for Active CLI Driver */}
-            {activeSpeakerHarness && activeSpeakerHarness.models.length > 0 && (
-              <div className="border-t border-white/[0.07] pt-2 px-1">
-                <div className="px-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-zinc-400 mb-1.5 flex items-center gap-1.5">
-                  <Cpu className="w-3.5 h-3.5" />
-                  <span>{activeSpeakerHarness.name} Model</span>
-                </div>
-                <div className="max-h-32 overflow-y-auto space-y-0.5 pr-0.5">
-                  <button
-                    type="button"
-                    onClick={() => setOverrideModel(undefined)}
-                    className={`w-full px-2.5 py-1.5 rounded-xl flex items-center justify-between text-xs transition-colors ${
-                      !overrideModel
-                        ? "liquid-glass-active text-white font-semibold"
-                        : "hover:bg-white/[0.06] text-zinc-300"
-                    }`}
-                  >
-                    <span>
-                      Default ({activeSpeakerBot?.model || activeSpeakerHarness.models[0]})
-                    </span>
-                    {!overrideModel && (
-                      <Check className="w-3.5 h-3.5 text-cyan-400" />
-                    )}
-                  </button>
-                  {activeSpeakerHarness.models.map((m) => {
-                    const active = overrideModel === m;
-                    return (
-                      <button
-                        key={m}
-                        type="button"
-                        onClick={() => setOverrideModel(m)}
-                        className={`w-full px-2.5 py-1.5 rounded-xl flex items-center justify-between text-xs font-mono transition-colors ${
-                          active
-                            ? "liquid-glass-active text-white font-semibold"
-                            : "hover:bg-white/[0.06] text-zinc-300"
-                        }`}
-                      >
-                        <span className="truncate">{m}</span>
-                        {active && (
-                          <Check className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
+            {activeSpeakerHarness && <div className="px-2 pt-2">
+              <BotModelSelect label={`${activeSpeakerHarness.name} model`} harness={activeSpeakerHarness} value={overrideModel ?? null} defaultLabel={activeSpeakerBot?.model ? `Bot default (${activeSpeakerBot.model})` : "CLI default"} onChange={model => setOverrideModel(model ?? undefined)} />
+            </div>}
 
-            {/* Thinking Effort */}
-            <div className="px-2 pb-1 border-t border-white/[0.07] pt-2">
-              <div className="text-[10.5px] font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
+            <div className="px-2 pb-1 pt-2">
+              <div className="text-[10.5px] font-medium text-zinc-400 mb-1.5">
                 Reasoning Effort
               </div>
               <div className="grid grid-cols-3 gap-1.5">
@@ -745,7 +729,7 @@ export function ChatWorkspace({
             <button
               type="button"
               onClick={() => setComposerMenuOpen((v) => !v)}
-              title="Switch target Bot, CLI model, or parallel swarm mode"
+              title="Switch target Bot, CLI model, or parallel group mode"
               className="w-7 h-7 rounded-full liquid-glass-chip flex items-center justify-center text-zinc-200 hover:text-white shrink-0 active:scale-95"
             >
               <Plus
@@ -828,20 +812,21 @@ export function ChatWorkspace({
               }}
               placeholder={
                 chat.isGroup
-                  ? `Message Swarm (${chatParticipants.map((b) => `@${b.name}`).join(", ")}) — type @ to hand off, / for skills`
-                  : `Message ${activeSpeakerBot?.name || "Botfinity"} — type @ to summon another Bot, / for skills`
+                  ? `Message Group (${chatParticipants.map((b) => `@${b.name}`).join(", ")}) — type @ to hand off, / for skills`
+                  : !chat.workspacePath ? `Message ${activeSpeakerBot?.name || "Omnibot"}…` : `Message ${activeSpeakerBot?.name || "Omnibot"} — type @ to summon another Bot, / for skills`
               }
               className="flex-1 bg-transparent text-[15px] text-zinc-100 placeholder:text-zinc-500 focus:outline-none"
             />
 
             <button
               type="button"
-              disabled={!input.trim()}
-              onClick={() => handleSend()}
-              title="Send message"
+              disabled={!isStreaming && (!input.trim() || sending)}
+              onClick={() => isStreaming ? onStopChat() : handleSend()}
+              aria-label={isStreaming ? "Stop response" : "Send message"}
+              title={isStreaming ? "Stop response" : "Send message"}
               className="w-8 h-8 rounded-full bg-white hover:bg-zinc-200 disabled:opacity-35 text-black flex items-center justify-center transition-transform active:scale-95 shadow-md shrink-0"
             >
-              <ArrowUp className="w-4 h-4 stroke-[2.5]" />
+              {isStreaming ? <Square className="w-3 h-3 fill-current" /> : <ArrowUp className="w-4 h-4 stroke-[2.5]" />}
             </button>
           </div>
         </div>
@@ -853,16 +838,10 @@ export function ChatWorkspace({
 /**
  * Vertically & horizontally centered minimal empty state hero.
  */
-function EmptyChatHero({
-  chat,
-  participants,
-  allBots,
-  onSendStarter,
-}: {
-  chat: ChatThread;
-  participants: BotProfile[];
-  allBots: BotProfile[];
+function EmptyChatHero({ chat, participants, allBots, onSendStarter, onChooseProject, onManageTeam, onOpenMemory }: {
+  chat: ChatThread; participants: BotProfile[]; allBots: BotProfile[];
   onSendStarter: (prompt: string) => void;
+  onChooseProject: () => void; onManageTeam: () => void; onOpenMemory: () => void;
 }) {
   const lead = participants[0];
   const second =
@@ -870,6 +849,25 @@ function EmptyChatHero({
     allBots.find((b) => !b.isPrimary && b.id !== lead?.id) ??
     lead;
 
+  if (!chat.workspacePath && !chat.isGroup && (chat.isPrimary || chat.isBotHome)) return (
+    <div className="flex flex-col items-center text-center max-w-lg mx-auto px-6 space-y-6">
+      {lead && <BotCharacterAvatar bot={lead} size={84} showStarBadge={lead.isPrimary} showCliBadge={false} />}
+      <div className="space-y-3"><h2 className="text-[28px] font-medium text-white">{lead?.name ?? chat.title}</h2><p className="text-[15px] text-zinc-400 leading-relaxed">{chat.isPrimary ? "A place for your ideas, plans, and everything you’re working toward." : `Ask ${lead?.name ?? "your bot"} for help with anything you’re working on.`}</p></div>
+      <div className="flex flex-wrap justify-center gap-3">
+        <button onClick={onChooseProject} className="rounded-full bg-white text-black px-5 py-3 text-sm motion-cta">Choose a project</button>
+        <button onClick={onManageTeam} className="rounded-full liquid-glass-pill px-5 py-3 text-sm">Manage my team</button>
+        <button onClick={onOpenMemory} className="rounded-full liquid-glass-pill px-5 py-3 text-sm">Memory</button>
+      </div>
+      <p className="text-xs text-zinc-500">Your bot remembers your preferences. Add a project whenever it helps.</p>
+    </div>
+  );
+  if (!chat.workspacePath && !chat.isGroup) return (
+    <div className="flex flex-col items-center text-center max-w-lg mx-auto px-6 gap-5">
+      {lead && <BotCharacterAvatar bot={lead} size={64} showCliBadge={false} />}
+      <h2 className="text-[26px] font-medium text-white">{chat.title === lead?.name ? "What would you like to get done?" : chat.title}</h2>
+      <p className="text-[15px] text-zinc-400">A fresh task with {lead?.name ?? "your bot"}. Ask for anything, and add a workspace if it helps.</p>
+    </div>
+  );
   const starters = chat.isGroup
     ? [
         {
@@ -877,7 +875,7 @@ function EmptyChatHero({
           prompt: `@${lead?.name || "Claude"} propose a clean plan for our next task, then hand off to @${second?.name || "Codex"} to review edge cases.`,
         },
         {
-          label: "Parallel Swarm audit (@all)",
+          label: "Parallel Group audit (@all)",
           prompt:
             "@all Inspect this project and share your top 2 highest-leverage improvements.",
         },
@@ -952,11 +950,14 @@ function MessageCard({
   message,
   bots,
   onQuickHandoff,
+  onOpenBotSettings,
 }: {
   message: ChatMessage;
   bots: BotProfile[];
   onQuickHandoff: (targetBot: BotProfile, sourceText: string) => void;
+  onOpenBotSettings: (bot: BotProfile) => void;
 }) {
+  const thinkingId = useId();
   const [toolsExpanded, setToolsExpanded] = useState(false);
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -971,10 +972,10 @@ function MessageCard({
     Boolean(message.thinking) &&
     !message.text.trim();
 
-  const showThinkingBody = thinkingExpanded || isActivelyThinking;
+  const showThinkingBody = thinkingExpanded;
 
   const totalTokens =
-    (message.inputTokens ?? 0) + (message.outputTokens ?? 0);
+    message.usageReported && message.inputTokens != null && message.outputTokens != null ? message.inputTokens + message.outputTokens : null;
 
   const renderedHtml = useMemo(() => {
     const cleanText = message.text
@@ -983,10 +984,11 @@ function MessageCard({
       .trim();
     if (!cleanText) return "";
     const rawHtml = marked.parse(cleanText, { async: false }) as string;
-    return rawHtml.replace(
-      /(^|\s)(@[a-zA-Z0-9_-]+)/g,
-      '$1<span class="bot-mention-pill">$2</span>'
-    );
+    return DOMPurify.sanitize(rawHtml, {
+      USE_PROFILES: { html: true },
+      FORBID_TAGS: ["form", "input", "button", "style", "iframe"],
+      FORBID_ATTR: ["style"],
+    });
   }, [message.text]);
 
   if (message.role === "user") {
@@ -1011,8 +1013,8 @@ function MessageCard({
   );
 
   return (
-    <div className="group flex items-start gap-3 min-w-0">
-      <div className="pt-0.5 shrink-0">
+    <div className="group group/message flex items-start gap-3 min-w-0">
+      <button type="button" disabled={!authorBot} aria-label={`Open ${message.authorName || authorBot?.name || "bot"} profile settings`} onClick={() => authorBot && onOpenBotSettings(authorBot)} className="pt-0.5 shrink-0 rounded-xl">
         <BotCharacterAvatar
           bot={authorBot}
           shape={message.authorShape ?? authorBot?.shape ?? "blob"}
@@ -1022,53 +1024,54 @@ function MessageCard({
           size={36}
           isStreaming={message.status === "streaming"}
           showStarBadge={authorBot?.isPrimary}
+          showCliBadge={false}
         />
-      </div>
+      </button>
 
       <div className="flex-1 max-w-[620px] min-w-0 space-y-2">
-        <div className="w-full overflow-hidden rounded-2xl liquid-glass-card px-5 py-4 text-[15px] text-zinc-100 space-y-3 break-words">
+        <div className="w-full overflow-hidden rounded-2xl liquid-glass-card px-5 py-4 min-h-[100px] text-[15px] text-zinc-100 space-y-3 break-words">
           {/* Bot Identity & CLI Harness Header Bar */}
-          <div className="flex items-center justify-between gap-2 pb-1 border-b border-white/[0.05]">
+          <div className="flex items-center justify-between gap-2 pb-1 ">
             <div className="flex items-center gap-2 min-w-0">
-              <span className="text-[13.5px] font-semibold text-white truncate">
+              <button type="button" disabled={!authorBot} aria-label={`Open ${message.authorName || authorBot?.name || "bot"} settings`} onClick={() => authorBot && onOpenBotSettings(authorBot)} className="text-[13.5px] font-semibold text-white truncate rounded-md hover:text-zinc-300">
                 {message.authorName || authorBot?.name || "Bot"}
-              </span>
-              {message.cliDriver && (
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white/[0.05] text-[11px] font-mono text-zinc-400">
-                  <CliProviderGlyph driver={message.cliDriver} size={11} />
-                  <span>{message.cliDriver}</span>
-                  {message.model && (
-                    <span className="text-zinc-500">· {message.model}</span>
-                  )}
+              </button>
+              {(message.cliDriver ?? authorBot?.cliDriver) && (
+                <span className="provider-hover-badge inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white/[0.05] text-[11px] text-zinc-400">
+                  <CliProviderGlyph driver={message.cliDriver ?? authorBot?.cliDriver ?? "custom"} size={11} />
+                  <span title={message.modelReported ? "Model reported by the CLI" : "Requested model; the CLI has not confirmed the resolved model"}>{message.model && message.model !== "default" ? message.model : "CLI default"}</span>
                 </span>
               )}
               {message.worktreePath && (
-                <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 text-[10.5px] font-mono">
+                <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 text-[10.5px]">
                   worktree
                 </span>
               )}
             </div>
 
-            <div className="flex items-center gap-2 text-[11px] text-[#8e8d8a] font-mono shrink-0">
-              {totalTokens > 0 && (
-                <span title={`Input: ~${message.inputTokens ?? 0} tok · Output: ~${message.outputTokens ?? 0} tok`}>
+            <div className="flex items-center gap-2 text-[11px] text-[#8e8d8a] shrink-0">
+              {totalTokens != null && (
+                <span title={`CLI reported: ${totalTokens!.toLocaleString()} tokens · Input (including cache): ${message.inputTokens?.toLocaleString()} · Output: ${message.outputTokens?.toLocaleString()}`}>
                   {totalTokens >= 1000
-                    ? `${(totalTokens / 1000).toFixed(1)}k tok`
+                    ? `≈${(totalTokens / 1000).toFixed(1)}k tok`
                     : `${totalTokens} tok`}
                 </span>
               )}
-              {message.costUsd != null && message.costUsd > 0 && (
-                <span className="text-emerald-300/90">
-                  ${message.costUsd.toFixed(3)}
+              {message.usageReported && message.costUsd != null && message.costUsd >= 0 && (
+                <span title={`CLI reported cost: $${message.costUsd}. This may differ from your provider invoice or subscription billing.`} className="text-emerald-300/90">
+                  {message.costUsd === 0 ? "$0" : message.costUsd < 0.000001 ? "<$0.000001" : `${Number(message.costUsd.toPrecision(6)) !== message.costUsd ? "≈" : ""}$${Number(message.costUsd.toPrecision(6))}`}
                 </span>
               )}
-              {message.durationMs != null && message.durationMs > 0 && (
-                <span>{(message.durationMs / 1000).toFixed(1)}s</span>
+              {message.status !== "streaming" && totalTokens == null && (!message.usageReported || message.costUsd == null) && (
+                <span title="No verified turn totals are available. Older estimated counts are hidden; some CLIs do not report usage.">Usage unavailable</span>
               )}
-              {message.status === "streaming" && (
-                <span className="text-[#8cf1fb] flex items-center gap-1 font-sans font-medium">
-                  <Loader2 className="w-3 h-3 animate-spin" />
-                  <span>Live</span>
+              {message.durationMs != null && message.durationMs > 0 && (
+                <span title={`Elapsed CLI execution time: ${message.durationMs.toLocaleString()} ms`}>{(message.durationMs / 1000).toFixed(1)}s</span>
+              )}
+              {message.status === "streaming" && renderedHtml && !runningTool && (
+                <span role="status" className="inline-flex items-center gap-1.5 text-zinc-400">
+                  <span aria-hidden="true" className="h-1 w-1 rounded-full bg-zinc-400" />
+                  Writing
                 </span>
               )}
               {message.status === "stopped" && (
@@ -1077,18 +1080,26 @@ function MessageCard({
             </div>
           </div>
 
+          {message.status === "streaming" && !renderedHtml && !runningTool && (
+            <div role="status" aria-label={`${message.authorName || "Bot"} is thinking`} className="thinking-state flex items-center gap-2.5 py-1 text-[14px] text-zinc-400">
+              <span>Thinking</span><ThinkingDots />
+            </div>
+          )}
+
           {/* Collapsible Thinking / Reasoning Block */}
           {message.thinking && (
             <div className="rounded-xl liquid-glass-chip px-3 py-2">
               <button
                 type="button"
+                aria-expanded={showThinkingBody}
+                aria-controls={thinkingId}
                 onClick={() => setThinkingExpanded((v) => !v)}
                 className="w-full flex items-center justify-between text-xs text-zinc-300 hover:text-white"
               >
                 <span className="flex items-center gap-1.5 font-medium">
                   <Brain className="w-3.5 h-3.5 text-purple-300" />
                   <span>
-                    {isActivelyThinking ? "Thinking live..." : "Thought process"}
+                    {isActivelyThinking ? "View thinking" : "Thought process"}
                   </span>
                 </span>
                 {showThinkingBody ? (
@@ -1097,11 +1108,11 @@ function MessageCard({
                   <ChevronRight className="w-3.5 h-3.5" />
                 )}
               </button>
-              {showThinkingBody && (
-                <p className="mt-2 pt-2 border-t border-white/[0.06] text-xs text-zinc-400 leading-relaxed whitespace-pre-wrap font-mono max-h-60 overflow-y-auto">
+              <Collapse open={showThinkingBody} id={thinkingId}>
+                <p className="mt-2 pt-2 text-xs text-zinc-400 leading-relaxed whitespace-pre-wrap max-h-60 overflow-y-auto">
                   {message.thinking}
                 </p>
-              )}
+              </Collapse>
             </div>
           )}
 
@@ -1135,14 +1146,14 @@ function MessageCard({
               </button>
 
               {toolsExpanded && (
-                <div className="mt-2 pt-2 border-t border-white/[0.06] space-y-2">
+                <div className="mt-2 pt-2 space-y-2">
                   {message.toolCalls.map((tc) => (
                     <div
                       key={tc.id}
                       className="rounded-lg bg-black/35 px-2.5 py-1.5 space-y-1 text-xs"
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <span className="font-mono text-[11.5px] text-zinc-200 flex items-center gap-1.5 truncate">
+                        <span className="text-[11.5px] text-zinc-200 flex items-center gap-1.5 truncate">
                           <Terminal className="w-3 h-3 text-cyan-400 shrink-0" />
                           <span className="truncate">{tc.name}</span>
                         </span>
@@ -1174,17 +1185,11 @@ function MessageCard({
           )}
 
           {/* Main Markdown Prose */}
-          {renderedHtml ? (
+          {renderedHtml && (
             <div
               className="omni-prose"
               dangerouslySetInnerHTML={{ __html: renderedHtml }}
             />
-          ) : (
-            message.status === "streaming" && (
-              <div className="text-xs text-zinc-500 italic">
-                Waiting for CLI output...
-              </div>
-            )
           )}
 
           {/* Outgoing Bot-to-Bot Handoff Banners */}
@@ -1265,4 +1270,8 @@ function MessageCard({
       </div>
     </div>
   );
+}
+
+function ThinkingDots() {
+  return <span aria-hidden="true" className="thinking-dots inline-flex items-center gap-1"><i /><i /><i /></span>;
 }

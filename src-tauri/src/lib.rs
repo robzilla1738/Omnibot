@@ -1,9 +1,13 @@
 pub mod computer;
 pub mod drivers;
 pub mod git_ops;
+pub mod homes;
+pub mod models;
 pub mod orchestrator;
+pub mod routines;
 pub mod scanner;
 pub mod server;
+pub mod setup;
 pub mod state;
 
 use computer::{
@@ -37,13 +41,8 @@ fn omni_snapshot(state: State<'_, ManagedOmniState>) -> Result<OmniSnapshot, Str
 }
 
 #[tauri::command]
-fn omni_rescan(state: State<'_, ManagedOmniState>) -> Result<OmniSnapshot, String> {
-    let mut guard = state
-        .0
-        .write()
-        .map_err(|_| "State lock poisoned".to_string())?;
-    guard.rescan_environment();
-    Ok(guard.snapshot())
+async fn omni_rescan(state: State<'_, ManagedOmniState>) -> Result<OmniSnapshot, String> {
+    state::rescan_environment(state.0.clone()).await
 }
 
 #[tauri::command]
@@ -71,6 +70,22 @@ fn omni_create_chat(
 }
 
 #[tauri::command]
+fn omni_complete_setup(
+    state: State<'_, ManagedOmniState>,
+    input: setup::SetupInput,
+) -> Result<OmniSnapshot, String> {
+    setup::complete_setup(&state.0, input)
+}
+
+#[tauri::command]
+fn omni_pin_bot(
+    state: State<'_, ManagedOmniState>,
+    input: setup::PinBotInput,
+) -> Result<OmniSnapshot, String> {
+    setup::pin_bot(&state.0, input)
+}
+
+#[tauri::command]
 fn omni_update_chat(
     state: State<'_, ManagedOmniState>,
     input: UpdateChatInput,
@@ -79,10 +94,7 @@ fn omni_update_chat(
 }
 
 #[tauri::command]
-fn omni_clear_chat(
-    state: State<'_, ManagedOmniState>,
-    id: String,
-) -> Result<OmniSnapshot, String> {
+fn omni_clear_chat(state: State<'_, ManagedOmniState>, id: String) -> Result<OmniSnapshot, String> {
     clear_chat_thread(&state.0, &id)
 }
 
@@ -103,10 +115,7 @@ fn omni_upsert_bot(
 }
 
 #[tauri::command]
-fn omni_delete_bot(
-    state: State<'_, ManagedOmniState>,
-    id: String,
-) -> Result<OmniSnapshot, String> {
+fn omni_delete_bot(state: State<'_, ManagedOmniState>, id: String) -> Result<OmniSnapshot, String> {
     delete_bot_profile(&state.0, &id)
 }
 
@@ -229,10 +238,7 @@ fn omni_open_local_item(
 }
 
 #[tauri::command]
-fn omni_git_diff(
-    state: State<'_, ManagedOmniState>,
-    file_path: String,
-) -> Result<String, String> {
+fn omni_git_diff(state: State<'_, ManagedOmniState>, file_path: String) -> Result<String, String> {
     let root = {
         let guard = state
             .0
@@ -297,10 +303,13 @@ pub fn run() {
     let runtime = tokio::runtime::Runtime::new().expect("Failed to initialize Tokio runtime");
     let (port, shared_state, event_tx) = runtime
         .block_on(spawn_local_server())
-        .expect("Failed to start local Omni Bot server");
+        .expect("Failed to start local Omnibot server");
+
+    runtime.spawn(models::refresh(shared_state.clone()));
+    runtime.spawn(routines::scheduler(shared_state.clone()));
 
     if std::env::args().any(|a| a == "--server-only") {
-        println!("Omni Bot server listening on http://127.0.0.1:{port}");
+        println!("Omnibot server listening on http://127.0.0.1:{port}");
         runtime.block_on(async {
             let _ = tokio::signal::ctrl_c().await;
         });
@@ -318,8 +327,15 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let mut rx = event_tx.subscribe();
             tauri::async_runtime::spawn(async move {
-                while let Ok(ev) = rx.recv().await {
-                    let _ = app_handle.emit("omni-stream-event", &ev);
+                loop {
+                    let event = match rx.recv().await {
+                        Ok(event) => event,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            state::OmniStreamEvent::StateUpdated { chat_id: None }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    };
+                    let _ = app_handle.emit("omni-stream-event", &event);
                 }
             });
 
@@ -327,6 +343,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             omni_snapshot,
+            omni_complete_setup,
+            omni_pin_bot,
             omni_rescan,
             omni_send_message,
             omni_stop_chat,
@@ -353,5 +371,8 @@ pub fn run() {
             omni_write_clipboard,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Omni Bot");
+        .expect("error while running Omnibot");
 }
+
+#[cfg(test)]
+mod test_support;

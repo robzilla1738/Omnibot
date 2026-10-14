@@ -1,23 +1,28 @@
+import { NativeSelect } from "../ui/NativeSelect";
 import {
   Check,
   FolderGit2,
   MessageSquare,
-  Plus,
   Search,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   BotProfile,
+  CliHarnessInfo,
   ChatThread,
   LocalSkillItem,
   WorkspaceEntry,
 } from "../../lib/types";
+import { BotModelSelect } from "../bots/BotModelSelect";
 import { BotCharacterAvatar, SkillBrandIcon } from "../icons/BotCharacterAvatar";
 
 export interface SearchAndNewChatModalProps {
   open: boolean;
-  mode: "search" | "new-swarm";
+  projectRequired?: boolean;
+  mode: "search" | "new-chat" | "new-group";
+  harnesses: CliHarnessInfo[];
+  onUpsertBot: (bot: BotProfile) => Promise<void>;
   bots: BotProfile[];
   chats: ChatThread[];
   skills: LocalSkillItem[];
@@ -31,30 +36,18 @@ export interface SearchAndNewChatModalProps {
     title?: string;
     participantBotIds: string[];
     useWorktrees?: boolean;
+    workspacePath?: string;
     initialPrompt?: string;
     skillSlug?: string;
   }) => Promise<void>;
 }
 
-const SWARM_PRESETS = [
-  {
-    id: "preset-arch-build-review",
-    title: "Plan → Build → Review Swarm",
-    subtitle: "@Claude designs & implements, then hands off to @Codex & @Grok for review",
-    prompt:
-      "@Claude analyze our task and propose a clean implementation, then hand off to @Codex to verify edge cases.",
-  },
-  {
-    id: "preset-parallel-race",
-    title: "Parallel Multi-CLI Arena (@all)",
-    subtitle: "Run selected CLI Bots in parallel (with optional Git worktrees)",
-    prompt: "",
-  },
-];
-
 export function SearchAndNewChatModal({
   open,
+  projectRequired = false,
   mode,
+  harnesses,
+  onUpsertBot,
   bots,
   chats,
   skills,
@@ -71,26 +64,49 @@ export function SearchAndNewChatModal({
   const [useWorktrees, setUseWorktrees] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
+  const [projectPath, setProjectPath] = useState("");
+  const [folderPath, setFolderPath] = useState("");
+  const [groupChat, setGroupChat] = useState(false);
+  const [models, setModels] = useState<Record<string, string | null>>({});
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const initialized = useRef(false);
+  const submitting = useRef(false);
   useEffect(() => {
-    if (open) {
-      const nonPrimary = bots.filter((b) => !b.isPrimary).slice(0, 3);
-      setSelectedBotIds(nonPrimary.map((b) => b.id));
-      setTimeout(() => inputRef.current?.focus(), 40);
-    } else {
-      setQuery("");
-    }
-  }, [open, bots]);
+    if (!open) { initialized.current = false; return; }
+    if (initialized.current) return;
+    initialized.current = true;
+    setQuery("");
+    setGroupChat(mode === "new-group");
+    setSelectedBotIds(mode === "new-group" ? [] : bots.filter(b => b.isPrimary).slice(0, 1).map(b => b.id));
+    setModels(Object.fromEntries(bots.map(bot => [bot.id, bot.model ?? null])));
+    setUseWorktrees(false);
+    setProjectPath(""); setFolderPath("");
+    setError("");
+    const timer = setTimeout(() => inputRef.current?.focus(), 40);
+    return () => clearTimeout(timer);
+  }, [open, mode, bots]);
 
   const trimmedQuery = query.trim().toLowerCase();
-
   const toggleBotSelection = (id: string) => {
-    setSelectedBotIds((prev) =>
-      prev.includes(id)
-        ? prev.length > 1
-          ? prev.filter((x) => x !== id)
-          : prev
-        : [...prev, id]
-    );
+    setSelectedBotIds(prev => !groupChat ? [id] : prev.includes(id) ? prev.filter(value => value !== id) : [...prev, id]);
+  };
+  const workspacePath = projectPath === "__folder__" ? folderPath.trim() : projectPath;
+  const canCreate = selectedBotIds.length >= (groupChat ? 2 : 1) && (!projectRequired || !!workspacePath) && (projectPath !== "__folder__" || !!workspacePath);
+  const createChat = async () => {
+    if (!canCreate || submitting.current) return;
+    submitting.current = true;
+    setSaving(true);
+    setError("");
+    try {
+      for (const bot of bots.filter(bot => selectedBotIds.includes(bot.id))) {
+        const model = models[bot.id] ?? null;
+        if (model !== (bot.model ?? null)) await onUpsertBot({ ...bot, model });
+      }
+      await onCreateSwarmOrChat({ title: query.trim() || undefined, participantBotIds: selectedBotIds, useWorktrees: groupChat && !!workspacePath && useWorktrees, workspacePath: workspacePath || undefined });
+      onClose();
+    } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
+    finally { submitting.current = false; setSaving(false); }
   };
 
   const filteredBots = useMemo(
@@ -132,23 +148,27 @@ export function SearchAndNewChatModal({
   return (
     <div
       aria-hidden={!open}
-      className={`fixed inset-0 z-50 flex items-start justify-center pt-16 px-4 select-none transition-all duration-220 spring-transition ${
+      inert={!open}
+      className={`fixed inset-0 z-50 flex items-start justify-center pt-16 px-4 select-none transition-opacity duration-220 spring-transition ${
         open
           ? "bg-black/65 backdrop-blur-md opacity-100 pointer-events-auto"
-          : "bg-black/0 backdrop-blur-none opacity-0 pointer-events-none"
+          : "bg-black/65 backdrop-blur-md opacity-0 pointer-events-none"
       }`}
-      onClick={onClose}
+      onClick={() => { if (!saving) onClose(); }}
     >
       <div
-        className={`w-full max-w-[560px] h-[68vh] max-h-[580px] rounded-[22px] bg-[#121212] border border-white/[0.08] shadow-[0_28px_90px_rgba(0,0,0,0.85)] flex flex-col overflow-hidden transition-all duration-240 spring-transition ${
+        role="dialog"
+        aria-modal="true"
+        aria-label={mode === "search" ? "Search" : "New chat"}
+        className={`w-full max-w-[560px] h-[min(720px,calc(100dvh-128px))] rounded-[22px] bg-[#121212] border border-white/[0.08] shadow-[0_28px_90px_rgba(0,0,0,0.85)] flex flex-col overflow-hidden transition-[opacity,scale,translate] duration-240 spring-transition ${
           open
             ? "scale-100 opacity-100 translate-y-0"
-            : "scale-[0.96] opacity-0 -translate-y-2"
+            : "scale-[0.985] opacity-0 -translate-y-1"
         }`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Top Search / Input Bar */}
-        <div className="shrink-0 px-4 py-3.5 border-b border-white/[0.06] flex items-center gap-3">
+        <div className="shrink-0 px-4 py-3.5 flex items-center gap-3">
           <Search className="w-[18px] h-[18px] text-[#8e8d8a] shrink-0" />
           <input
             ref={inputRef}
@@ -157,25 +177,20 @@ export function SearchAndNewChatModal({
             onChange={(e) => setQuery(e.target.value)}
             placeholder={
               mode === "search"
-                ? "Search Bots, Swarm Rooms, Projects, and Skills..."
-                : "Swarm Room or Thread title (optional)..."
+                ? "Search Bots, Group chats, Projects, and Skills..."
+                : groupChat ? "Group chat title (optional)…" : "Chat title (optional)…"
             }
             onKeyDown={(e) => {
-              if (e.key === "Escape") onClose();
-              if (e.key === "Enter" && mode === "new-swarm") {
-                onCreateSwarmOrChat({
-                  title: query.trim() || undefined,
-                  participantBotIds: selectedBotIds,
-                  useWorktrees,
-                });
-                onClose();
-              }
+              if (e.key === "Escape" && !saving) onClose();
+              if (e.key === "Enter" && mode !== "search") void createChat();
             }}
             className="w-full bg-transparent text-[15px] text-zinc-100 placeholder:text-[#8e8d8a] focus:outline-none"
           />
           <button
             type="button"
-            onClick={onClose}
+            aria-label="Close dialog"
+            disabled={saving}
+            onClick={() => { if (!saving) onClose(); }}
             className="w-8 h-8 rounded-full bg-[#1f1f1f] hover:bg-[#272727] border border-white/[0.06] flex items-center justify-center text-zinc-300 hover:text-white shrink-0 transition-colors"
           >
             <X className="w-4 h-4" />
@@ -183,143 +198,42 @@ export function SearchAndNewChatModal({
         </div>
 
         {/* Body */}
-        <div className="flex-1 min-h-0 p-3.5 overflow-y-auto space-y-4">
-          {mode === "new-swarm" ? (
+        <div key={mode} className="motion-view stable-scroll flex-1 min-h-0 p-3.5 overflow-y-auto space-y-4">
+          {mode !== "search" ? (
             <>
-              {/* Select Bots for Swarm Room */}
-              <div className="space-y-2">
-                <div className="px-1 flex items-center justify-between text-xs text-[#8e8d8a]">
-                  <span>
-                    Select 1 Bot for a Thread or 2+ Bots for a Swarm Room (
-                    {selectedBotIds.length} selected)
-                  </span>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  {bots.map((b) => {
-                    const selected = selectedBotIds.includes(b.id);
-                    return (
-                      <button
-                        key={b.id}
-                        type="button"
-                        onClick={() => toggleBotSelection(b.id)}
-                        className={`p-2.5 rounded-2xl flex items-center justify-between gap-2.5 text-left transition-all ${
-                          selected
-                            ? "bg-[#222226] border border-white/15 text-white"
-                            : "bg-[#171719] border border-white/[0.05] text-zinc-400 hover:text-zinc-200"
-                        }`}
-                      >
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <BotCharacterAvatar
-                            bot={b}
-                            size={34}
-                            showCliBadge={!b.isPrimary}
-                            showStarBadge={b.isPrimary}
-                            useHeroMascot={b.isPrimary}
-                          />
-                          <div className="min-w-0">
-                            <div className="text-[13.5px] font-semibold truncate">
-                              {b.name}
-                            </div>
-                            <div className="text-[11px] font-mono text-zinc-400 truncate">
-                              {b.cliDriver}
-                            </div>
-                          </div>
-                        </div>
-                        {selected && (
-                          <Check className="w-4 h-4 text-[#8cf1fb] shrink-0" />
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
+              <div className="space-y-2 px-1">
+                <label className="text-sm text-zinc-300 block space-y-2"><span>Project</span><NativeSelect aria-label="Chat project" value={projectPath} disabled={saving} onChange={event => { setProjectPath(event.target.value); setUseWorktrees(false); }} className="w-full rounded-xl bg-[#202020] px-3 text-sm">
+                  <option value="">{projectRequired ? "Choose a project" : "No project · one-off task"}</option>
+                  {projects.map(project => <option key={project.id} value={project.path}>{project.name}</option>)}
+                  <option value="__folder__">Add a project folder…</option>
+                </NativeSelect></label>
+                {projectPath === "__folder__" && <input aria-label="Project folder path" placeholder="/Users/you/Projects/my-project" value={folderPath} onChange={event => setFolderPath(event.target.value)} className="w-full rounded-xl bg-[#202020] px-3 py-3 text-sm" />}
+                <p className="text-xs text-zinc-500">{workspacePath ? "This work chat uses the selected folder and its project memory. Your home stays separate." : "Start a focused task. Your bot keeps its memory; a project is optional."}</p>
               </div>
-
-              {/* Git Worktree Toggle */}
-              <div className="px-3.5 py-2.5 rounded-2xl bg-[#18181b] border border-white/[0.06] flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <FolderGit2 className="w-4 h-4 text-[#8cf1fb]" />
-                  <div>
-                    <div className="text-[13.5px] font-medium text-zinc-100">
-                      Isolate Bots in Git Worktrees
-                    </div>
-                    <div className="text-[11.5px] text-[#8e8d8a]">
-                      Each Bot edits its own branch without stepping on teammates
-                    </div>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={useWorktrees}
-                  onClick={() => setUseWorktrees((v) => !v)}
-                  className={`relative inline-flex h-6 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                    useWorktrees ? "bg-[#3b82f6]" : "bg-white/[0.14]"
-                  }`}
-                >
-                  <span
-                    className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition ${
-                      useWorktrees ? "translate-x-4" : "translate-x-0"
-                    }`}
-                  />
-                </button>
+              <div className="flex gap-1 rounded-full bg-white/[0.04] p-1" role="group" aria-label="Chat type">
+                {[false, true].map(group => <button key={String(group)} type="button" disabled={saving} aria-pressed={groupChat === group} onClick={() => { setGroupChat(group); setSelectedBotIds(group ? [] : bots.filter(b => b.isPrimary).slice(0, 1).map(b => b.id)); }} className={`flex-1 rounded-full py-2 text-sm ${groupChat === group ? "bg-white/10 text-white" : "text-zinc-400 hover:text-white"}`}>{group ? "Group chat" : "Individual bot"}</button>)}
               </div>
-
-              {/* Start Button */}
-              <button
-                type="button"
-                onClick={() => {
-                  onCreateSwarmOrChat({
-                    title: query.trim() || undefined,
-                    participantBotIds: selectedBotIds,
-                    useWorktrees,
-                  });
-                  onClose();
-                }}
-                className="w-full flex items-center justify-between gap-3.5 px-4 py-3 rounded-[16px] bg-white hover:bg-zinc-200 text-black text-left transition-colors"
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <Plus className="w-5 h-5 shrink-0" />
-                  <div className="min-w-0">
-                    <div className="text-[14.5px] font-semibold truncate">
-                      {selectedBotIds.length > 1
-                        ? `Launch Swarm Room (${selectedBotIds.length} Bots)`
-                        : "Start Focused 1:1 Thread"}
-                    </div>
-                  </div>
-                </div>
-                <span className="px-3 py-1 rounded-full bg-black text-white text-xs font-semibold shrink-0">
-                  Start
-                </span>
-              </button>
-
-              {/* Quick Swarm Presets */}
-              <div className="space-y-1.5">
-                <div className="px-1 text-xs text-[#8e8d8a]">Swarm Presets</div>
-                {SWARM_PRESETS.map((preset) => (
-                  <button
-                    key={preset.id}
-                    type="button"
-                    onClick={() => {
-                      onCreateSwarmOrChat({
-                        title: preset.title,
-                        participantBotIds: selectedBotIds,
-                        useWorktrees:
-                          preset.id === "preset-parallel-race" || useWorktrees,
-                        initialPrompt: preset.prompt || undefined,
-                      });
-                      onClose();
-                    }}
-                    className="w-full px-3.5 py-2.5 rounded-2xl bg-[#19191c] hover:bg-[#222226] text-left transition-colors"
-                  >
-                    <div className="text-[13.5px] font-semibold text-zinc-100">
-                      {preset.title}
-                    </div>
-                    <div className="text-xs text-[#8e8d8a] mt-0.5">
-                      {preset.subtitle}
-                    </div>
-                  </button>
-                ))}
+              <p className="px-1 text-sm text-zinc-400">{groupChat ? "Choose two or more bots to work together." : "Choose a bot and the model that powers it."}</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {bots.map(bot => {
+                  const selected = selectedBotIds.includes(bot.id);
+                  return <div key={bot.id} className={`rounded-2xl p-3 space-y-3 ${selected ? "bg-[#252525]" : "bg-[#191919]"}`}>
+                    <button type="button" disabled={saving} aria-pressed={selected} aria-label={`Select ${bot.name}`} onClick={() => toggleBotSelection(bot.id)} className="w-full flex items-center gap-3 text-left rounded-lg">
+                      <BotCharacterAvatar bot={bot} size={34} showCliBadge={!bot.isPrimary} showStarBadge={bot.isPrimary} />
+                      <span className="min-w-0 flex-1"><span className="block text-sm font-medium truncate">{bot.name}</span><span className="block text-xs text-zinc-400 truncate">{harnesses.find(h => h.kind === bot.cliDriver)?.name ?? bot.cliDriver}</span></span>
+                      {selected && <Check size={16} className="text-zinc-200 shrink-0" />}
+                    </button>
+                  </div>;
+                })}
               </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {bots.filter(bot => selectedBotIds.includes(bot.id)).map(bot => <BotModelSelect key={bot.id} label={`${bot.name} model`} value={models[bot.id] ?? null} harness={harnesses.find(h => h.kind === bot.cliDriver)} disabled={saving} onChange={model => setModels(previous => ({ ...previous, [bot.id]: model }))} />)}
+              </div>
+              {groupChat && !!workspacePath && <label className="rounded-2xl bg-[#191919] p-4 flex items-center gap-3 cursor-pointer">
+                <FolderGit2 size={18} className="text-zinc-400 shrink-0" />
+                <span className="flex-1"><span className="block text-sm">Separate working branches</span><span className="block text-xs text-zinc-400 mt-1">Give each bot its own Git worktree.</span></span>
+                <input type="checkbox" className="accent-white" checked={useWorktrees} disabled={saving} onChange={event => setUseWorktrees(event.target.checked)} />
+              </label>}
             </>
           ) : (
             <div className="space-y-3">
@@ -347,7 +261,7 @@ export function SearchAndNewChatModal({
                     <div className="min-w-0 flex-1">
                       <div className="text-[14.5px] font-medium text-[#f4f4f5] flex items-center gap-2">
                         <span>{b.name}</span>
-                        <span className="text-[11px] font-mono text-zinc-400">
+                        <span className="text-[11px]  text-zinc-400">
                           ({b.cliDriver})
                         </span>
                       </div>
@@ -359,11 +273,11 @@ export function SearchAndNewChatModal({
                 ))}
               </div>
 
-              {/* Threads & Swarm Rooms */}
+              {/* Threads & Group chats */}
               {filteredChats.length > 0 && (
                 <div className="space-y-1">
                   <div className="px-2 text-xs text-[#8e8d8a]">
-                    Swarm Rooms &amp; Threads
+                    Group chats &amp; Threads
                   </div>
                   {filteredChats.slice(0, 8).map((c) => (
                     <button
@@ -419,7 +333,7 @@ export function SearchAndNewChatModal({
                           <div className="text-[14.5px] font-medium text-[#f4f4f5] truncate">
                             {p.name}
                           </div>
-                          <div className="text-[12px] font-mono text-[#8e8d8a] truncate">
+                          <div className="text-[12px]  text-[#8e8d8a] truncate">
                             {p.path}
                           </div>
                         </div>
@@ -462,6 +376,12 @@ export function SearchAndNewChatModal({
             </div>
           )}
         </div>
+        {mode !== "search" && <div className="shrink-0 p-3.5 pt-2 space-y-3">
+              {error && <p role="alert" className="rounded-xl bg-red-500/10 p-3 text-sm text-red-300">{error}</p>}
+              <button type="button" disabled={!canCreate || saving} onClick={() => void createChat()} className="motion-cta w-full rounded-full bg-white text-black px-5 py-3 text-sm font-medium disabled:opacity-40">
+                {saving ? "Creating…" : groupChat ? `Create group chat${selectedBotIds.length ? ` (${selectedBotIds.length} bots)` : ""}` : "Start chat"}
+              </button>
+        </div>}
       </div>
     </div>
   );

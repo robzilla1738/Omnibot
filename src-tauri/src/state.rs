@@ -19,6 +19,8 @@ pub struct BotProfile {
     pub slug: String,
     pub role_title: String,
     pub description: String,
+    #[serde(default)]
+    pub avatar_image: Option<String>,
     pub shape: String,
     pub color: String,
     pub is_primary: bool,
@@ -78,6 +80,10 @@ pub struct ChatMessage {
     pub duration_ms: Option<u64>,
     pub cost_usd: Option<f64>,
     #[serde(default)]
+    pub usage_reported: bool,
+    #[serde(default)]
+    pub model_reported: bool,
+    #[serde(default)]
     pub input_tokens: Option<u64>,
     #[serde(default)]
     pub output_tokens: Option<u64>,
@@ -88,6 +94,8 @@ pub struct ChatMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatThread {
+    #[serde(default)]
+    pub is_bot_home: bool,
     pub id: String,
     pub title: String,
     pub subtitle: String,
@@ -109,6 +117,10 @@ pub struct ChatThread {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceEntry {
+    #[serde(default)]
+    pub approve_all_tools: bool,
+    #[serde(default)]
+    pub memories: Vec<String>,
     pub id: String,
     pub name: String,
     pub path: String,
@@ -127,7 +139,18 @@ pub struct WorkspaceEntry {
 pub struct RoutineEntry {
     pub id: String,
     pub name: String,
+    #[serde(default)]
     pub cron: String,
+    #[serde(default)]
+    pub schedule: Option<crate::routines::RoutineSchedule>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub chat_id: Option<String>,
+    #[serde(default)]
+    pub last_attempt_ms: Option<u64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
     pub prompt: String,
     pub bot_id: String,
     pub enabled: bool,
@@ -179,6 +202,10 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OmniPreferences {
+    #[serde(default)]
+    pub onboarding_completed: bool,
+    #[serde(default)]
+    pub pinned_bot_ids: Vec<String>,
     pub workspace_root: String,
     pub default_max_swarm_turns: u32,
     pub approve_all_tools: bool,
@@ -196,13 +223,15 @@ pub struct OmniPreferences {
     pub turn_timeout_secs: u64,
     #[serde(default = "default_true")]
     pub prevent_handoff_loops: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub only_explicit_handoffs: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedStore {
+    #[serde(default)]
+    pub home_layout_version: u32,
     pub preferences: OmniPreferences,
     pub bots: Vec<BotProfile>,
     pub chats: Vec<ChatThread>,
@@ -228,6 +257,7 @@ pub struct OmniSnapshot {
     pub git_status: GitRepoStatus,
     pub computer_activity: Vec<ComputerActivityEntry>,
     pub active_runs: Vec<ActiveBotRun>,
+    pub active_workflow_chat_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +313,8 @@ pub enum OmniStreamEvent {
 
 pub struct OmniRuntimeState {
     pub server_port: u16,
+    pub data_dir: PathBuf,
+    pub store_lock: Option<fs::File>,
     pub store: PersistedStore,
     pub harnesses: Vec<CliHarnessInfo>,
     pub skills: Vec<LocalSkillItem>,
@@ -290,6 +322,7 @@ pub struct OmniRuntimeState {
     pub computer_activity: Vec<ComputerActivityEntry>,
     pub active_runs: HashMap<String, ActiveBotRun>,
     pub cancelled_chats: HashSet<String>,
+    pub active_workflows: HashSet<String>,
     pub event_tx: broadcast::Sender<OmniStreamEvent>,
 }
 
@@ -329,26 +362,63 @@ fn default_workspace_root() -> String {
             return parent.to_string_lossy().into_owned();
         }
     }
-    dirs::home_dir()
-        .map(|h| h.join("Tests/omni-bot"))
-        .filter(|p| p.exists())
-        .or_else(dirs::desktop_dir)
+    dirs::desktop_dir()
+        .or_else(dirs::home_dir)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| ".".to_string())
 }
 
 impl OmniRuntimeState {
-    pub fn load(server_port: u16, event_tx: broadcast::Sender<OmniStreamEvent>) -> Self {
+    pub fn load(
+        server_port: u16,
+        event_tx: broadcast::Sender<OmniStreamEvent>,
+    ) -> Result<Self, String> {
+        let data_dir = omni_data_dir();
+        fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+        let store_lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(data_dir.join("store.lock"))
+            .map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            if unsafe { libc::flock(store_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                return Err("Another Omnibot instance is using this data directory. Close it before starting a second instance.".into());
+            }
+        }
         let harnesses = scan_local_cli_harnesses();
         let skills = scan_local_skills();
         let mcp_servers = scan_local_mcp_servers();
 
-        let mut store = load_or_initialize_store(&harnesses);
-        sync_detected_cli_bots(&mut store, &harnesses);
-        let _ = save_store(&store);
+        let mut store = load_or_initialize_store(&harnesses)?;
+        migrate_application_identity(&mut store);
+        normalize_preferences(&mut store);
+        remove_legacy_welcome(&mut store);
+        crate::homes::migrate(&mut store);
+        for chat in &mut store.chats {
+            if chat.id == "chat-swarm-core" && chat.title == "Core Coding Swarm" {
+                chat.title = "Core Coding Group".into();
+            }
+            for message in &mut chat.messages {
+                if message.status == "streaming" {
+                    message.status = "stopped".into();
+                    for tool in &mut message.tool_calls {
+                        if tool.status == "running" {
+                            tool.status = "stopped".into();
+                        }
+                    }
+                }
+            }
+        }
+        save_store(&store)?;
 
-        Self {
+        Ok(Self {
             server_port,
+            data_dir,
+            store_lock: Some(store_lock),
             store,
             harnesses,
             skills,
@@ -356,27 +426,26 @@ impl OmniRuntimeState {
             computer_activity: Vec::new(),
             active_runs: HashMap::new(),
             cancelled_chats: HashSet::new(),
+            active_workflows: HashSet::new(),
             event_tx,
-        }
-    }
-
-    pub fn rescan_environment(&mut self) {
-        self.harnesses = scan_local_cli_harnesses();
-        self.skills = scan_local_skills();
-        self.mcp_servers = scan_local_mcp_servers();
-        sync_detected_cli_bots(&mut self.store, &self.harnesses);
-        let _ = self.persist();
+        })
     }
 
     pub fn persist(&self) -> Result<(), String> {
-        save_store(&self.store)
+        save_store_at(&self.store, &self.data_dir)
     }
 
     pub fn emit(&self, event: OmniStreamEvent) {
         let _ = self.event_tx.send(event);
     }
 
-    pub fn record_activity(&mut self, tool_name: &str, summary: String, status: &str, duration_ms: u64) {
+    pub fn record_activity(
+        &mut self,
+        tool_name: &str,
+        summary: String,
+        status: &str,
+        duration_ms: u64,
+    ) {
         let timestamp_ms = now_ms();
         let entry = ComputerActivityEntry {
             id: format!("act_{timestamp_ms}_{}", self.computer_activity.len()),
@@ -411,20 +480,76 @@ impl OmniRuntimeState {
             git_status,
             computer_activity: self.computer_activity.clone(),
             active_runs,
+            active_workflow_chat_ids: self.active_workflows.iter().cloned().collect(),
         }
     }
 }
 
-fn load_or_initialize_store(harnesses: &[CliHarnessInfo]) -> PersistedStore {
-    let path = store_file_path();
-    if let Ok(raw) = fs::read_to_string(&path) {
-        if let Ok(parsed) = serde_json::from_str::<PersistedStore>(&raw) {
-            if !parsed.bots.is_empty() {
-                return parsed;
-            }
+// Change only application-identifying phrases in saved instructions, never bot names or history.
+fn migrate_application_identity(store: &mut PersistedStore) {
+    let mut changed = HashSet::new();
+    for bot in &mut store.bots {
+        if bot.avatar_image.as_deref() == Some("/botfinity-gauntlet.png") {
+            bot.avatar_image = Some("/omnibot-gauntlet.png".into());
+        }
+        let prompt = bot
+            .system_prompt
+            .replace("CLI inside Botfinity.", "CLI inside Omnibot.")
+            .replace("CLI inside Omni Bot.", "CLI inside Omnibot.")
+            .replace("Bot in Omni Bot on macOS.", "Bot in Omnibot on macOS.");
+        if prompt != bot.system_prompt {
+            bot.system_prompt = prompt;
+            changed.insert(bot.id.clone());
         }
     }
+    for chat in &mut store.chats {
+        chat.native_sessions.retain(|id, _| !changed.contains(id));
+        chat.last_synced_msg_index
+            .retain(|id, _| !changed.contains(id));
+    }
+}
 
+// Old releases seeded a synthetic reply with a fixed provider and CLI count.
+// Remove only that bundled message; real replies retain their original provenance.
+pub fn remove_legacy_welcome(store: &mut PersistedStore) {
+    for chat in &mut store.chats {
+        let count = chat.messages.len();
+        chat.messages.retain(|message| {
+            !(message.role == "assistant"
+                && ((message.id == "msg-welcome-omni"
+                    && message.text.starts_with("Welcome to **Omni Bot**."))
+                    || (message.id == "msg-swarm-intro"
+                        && message
+                            .text
+                            .starts_with("**Core Coding Swarm** is ready with **"))))
+        });
+        if chat.messages.len() != count {
+            // Removing a transcript entry invalidates native resume watermarks.
+            chat.native_sessions.clear();
+            chat.last_synced_msg_index.clear();
+        }
+    }
+}
+
+fn load_or_initialize_store(harnesses: &[CliHarnessInfo]) -> Result<PersistedStore, String> {
+    let path = store_file_path();
+    match fs::read_to_string(&path) {
+        Ok(raw) => {
+            return serde_json::from_str(&raw).map_err(|e| {
+                format!(
+                    "Could not read saved state at {}: {e}. The original file was preserved.",
+                    path.display()
+                )
+            })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("Could not read {}: {e}", path.display())),
+    }
+
+    initialize_store(harnesses)
+}
+
+fn initialize_store(harnesses: &[CliHarnessInfo]) -> Result<PersistedStore, String> {
     let workspace_root = default_workspace_root();
     let preferred_primary_driver = harnesses
         .iter()
@@ -437,8 +562,9 @@ fn load_or_initialize_store(harnesses: &[CliHarnessInfo]) -> PersistedStore {
         id: "bot-omni".to_string(),
         name: "Omni".to_string(),
         slug: "omni".to_string(),
-        role_title: "Lead Swarm Coordinator & Principal Engineer".to_string(),
-        description: "Your primary continuous point of contact. Coordinates work across your local CLI Bots (@Claude, @Codex, @OpenCode, @Cursor, @Grok, @Pi), reviews code, and executes tasks directly.".to_string(),
+        role_title: "Your personal assistant".to_string(),
+        description: "Your personal assistant for ideas, plans, memories, and working with your team.".to_string(),
+        avatar_image: Some("/omnibot-gauntlet.png".to_string()),
         shape: "blob".to_string(),
         color: "cyan".to_string(),
         is_primary: true,
@@ -446,116 +572,64 @@ fn load_or_initialize_store(harnesses: &[CliHarnessInfo]) -> PersistedStore {
         model: None,
         reasoning_effort: "high".to_string(),
         permission_mode: "auto".to_string(),
-        system_prompt: "You are Omni, the lead coordinator Bot in Omni Bot on macOS. You can solve engineering tasks directly using your local tools, or coordinate and delegate specialized work to your teammate Bots (@Claude, @Codex, @OpenCode, @Cursor, @Grok, @Pi) using @mentions or <handoff to=\"BotName\"> blocks.".to_string(),
-        memories: vec![
-            "GitHub account: robzilla1738".to_string(),
-            "Prefers clean, idiomatic code with zero tech debt".to_string(),
-        ],
+        system_prompt: "Help the user with any task supported by the available tools: thinking, research, writing, coding, files, and coordinating their team. Remember saved preferences. Projects provide optional workspace context. Follow the user’s explicit requests within configured permissions. Delegate only to available teammates using complete explicit handoff blocks.".to_string(),
+        memories: Vec::new(),
         auto_created_for_cli: false,
         custom_command: None,
         max_turn_budget_usd: None,
     };
 
     let primary_chat = ChatThread {
+        is_bot_home: true,
         id: "chat-omni-primary".to_string(),
         title: "Omni".to_string(),
         subtitle: "Primary Coordinator Bot".to_string(),
         is_primary: true,
         is_group: false,
         participant_bot_ids: vec!["bot-omni".to_string()],
-        workspace_id: Some("ws-omni-bot".to_string()),
-        workspace_path: Some(workspace_root.clone()),
+        workspace_id: None,
+        workspace_path: None,
         use_worktrees: false,
         max_swarm_turns: 4,
-        messages: vec![ChatMessage {
-            id: "msg-welcome-omni".to_string(),
-            role: "assistant".to_string(),
-            author_bot_id: Some("bot-omni".to_string()),
-            author_name: Some("Omni".to_string()),
-            author_shape: Some("blob".to_string()),
-            author_color: Some("cyan".to_string()),
-            cli_driver: Some(preferred_primary_driver),
-            model: None,
-            text: format!(
-                "Welcome to **Botfinity**. I auto-detected **{} local coding CLIs** on your Mac ({}).\n\nEach CLI is set up as its own persistent Bot in your roster, and we can collaborate directly in **Swarm Rooms** or via `@Bot` handoffs:\n- Mention `@Claude`, `@Codex`, `@Grok`, `@OpenCode`, `@Cursor`, or `@Pi` in any chat to bring them into the thread.\n- Use `@all` or `/swarm` to dispatch parallel or sequential multi-bot workflows across your local codebase.\n- Click any Bot in the left rail for a dedicated 1:1 session, or open the **Inspector (`Cmd+I`)** to customize a Bot's character shape, color, CLI harness, or inspect live Git diffs.",
-                harnesses.iter().filter(|h| h.installed).count(),
-                harnesses
-                    .iter()
-                    .filter(|h| h.installed)
-                    .map(|h| format!("`{}`", h.binary_name))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            thinking: String::new(),
-            tool_calls: Vec::new(),
-            handoffs: Vec::new(),
-            skill_slug: None,
-            mentioned_bot_ids: Vec::new(),
-            worktree_path: None,
-            duration_ms: Some(120),
-            cost_usd: None,
-            input_tokens: None,
-            output_tokens: None,
-            status: "complete".to_string(),
-            created_at_ms: now_ms(),
-        }],
+        messages: Vec::new(),
         native_sessions: HashMap::new(),
         last_synced_msg_index: HashMap::new(),
         updated_at_ms: now_ms(),
     };
 
-    let workspaces = vec![WorkspaceEntry {
-        id: "ws-omni-bot".to_string(),
-        name: "omni-bot".to_string(),
-        path: workspace_root.clone(),
-        description: "Active local project repository".to_string(),
-        instructions: "Keep code clean, concise, and idiomatic. Coordinate across bots before large refactors.".to_string(),
-        assigned_bot_ids: Vec::new(),
-        lead_bot_id: Some("bot-omni".to_string()),
-        use_worktrees_default: false,
-    }];
+    let workspaces = Vec::new();
 
-    let routines = vec![
-        RoutineEntry {
-            id: "routine-daily-audit".to_string(),
-            name: "Morning Git & Tech Debt Audit".to_string(),
-            cron: "0 9 * * 1-5".to_string(),
-            prompt: "Inspect recent commits and uncommitted diffs in the active workspace, check for bugs or lint issues, and have @Codex verify @Claude's findings.".to_string(),
-            bot_id: "bot-omni".to_string(),
-            enabled: false,
-            last_run_ms: None,
-        },
-    ];
+    let routines = Vec::new();
 
-    PersistedStore {
+    Ok(PersistedStore {
+        home_layout_version: 3,
         preferences: OmniPreferences {
+            onboarding_completed: false,
+            pinned_bot_ids: Vec::new(),
             workspace_root,
             default_max_swarm_turns: 4,
-            approve_all_tools: true,
-            global_instructions: "Work directly on the local workspace. When another Bot's specialty is helpful or requested, hand off clearly with @BotName.".to_string(),
-            shared_memories: vec![
-                "Primary GitHub account: robzilla1738".to_string(),
-                "Local coding swarm running on macOS".to_string(),
-            ],
+            approve_all_tools: false,
+            global_instructions:
+                "Delegate only to available teammates using complete, explicit handoff blocks."
+                    .to_string(),
+            shared_memories: Vec::new(),
             max_context_messages: 6,
             max_message_chars: 1400,
             max_turn_budget_usd: 1.50,
             max_parallel_bots: 3,
             turn_timeout_secs: 300,
             prevent_handoff_loops: true,
-            only_explicit_handoffs: false,
+            only_explicit_handoffs: true,
         },
         bots: vec![omni_bot],
         chats: vec![primary_chat],
         workspaces,
         routines,
         dismissed_bot_ids: Vec::new(),
-    }
+    })
 }
 
-fn sync_detected_cli_bots(store: &mut PersistedStore, harnesses: &[CliHarnessInfo]) {
-    let mut added_bot_ids = Vec::new();
-
+fn normalize_preferences(store: &mut PersistedStore) {
     // Ensure guardrail defaults are within sane bounds
     store.preferences.max_context_messages = store.preferences.max_context_messages.clamp(2, 24);
     store.preferences.max_message_chars = store.preferences.max_message_chars.clamp(400, 6000);
@@ -565,34 +639,30 @@ fn sync_detected_cli_bots(store: &mut PersistedStore, harnesses: &[CliHarnessInf
     store.preferences.max_parallel_bots = store.preferences.max_parallel_bots.clamp(1, 6);
     store.preferences.turn_timeout_secs = store.preferences.turn_timeout_secs.clamp(30, 1800);
 
-    // Upgrade legacy default shapes and verbose role titles
-    for bot in &mut store.bots {
-        if bot.is_primary {
-            if bot.shape == "omni-prism" || (bot.shape == "star" && bot.color == "black") {
-                bot.shape = "blob".to_string();
-                bot.color = "cyan".to_string();
-            }
-            bot.role_title = "Lead Swarm Coordinator".to_string();
-        } else if bot.auto_created_for_cli {
-            if matches!(
-                bot.shape.as_str(),
-                "squircle" | "hex" | "blob" | "gem" | "star" | "pebble" | "sparkle" | "shield" | "cloud"
-            ) {
-                bot.shape = bot.cli_driver.default_shape().to_string();
-            }
-            bot.role_title = bot.cli_driver.default_role_title().to_string();
-        }
-    }
+    store
+        .preferences
+        .pinned_bot_ids
+        .retain(|id| store.bots.iter().any(|b| &b.id == id && !b.is_primary));
+}
 
+pub(crate) fn import_cli_bots(store: &mut PersistedStore, harnesses: &[CliHarnessInfo]) {
     for h in harnesses.iter().filter(|h| h.installed) {
         let bot_id = format!("bot-{}", h.kind.as_str());
-        if store.dismissed_bot_ids.contains(&bot_id) {
-            continue;
-        }
+        store.dismissed_bot_ids.retain(|id| id != &bot_id);
         let already_exists = store.bots.iter().any(|b| b.id == bot_id);
         if !already_exists {
             let slug = h.kind.as_str().to_string();
-            let name = h.kind.default_bot_name().to_string();
+            let base_name = h.kind.default_bot_name();
+            let mut name = base_name.to_string();
+            let mut suffix = 2;
+            while store
+                .bots
+                .iter()
+                .any(|b| b.name.eq_ignore_ascii_case(&name))
+            {
+                name = format!("{base_name} {suffix}");
+                suffix += 1;
+            }
             let role_title = h.kind.default_role_title().to_string();
             let shape = h.kind.default_shape().to_string();
             let color = h.kind.default_color().to_string();
@@ -603,15 +673,16 @@ fn sync_detected_cli_bots(store: &mut PersistedStore, harnesses: &[CliHarnessInf
                 slug: slug.clone(),
                 role_title: role_title.clone(),
                 description: h.description.clone(),
+                avatar_image: None,
                 shape: shape.clone(),
                 color: color.clone(),
                 is_primary: false,
                 cli_driver: h.kind,
-                model: h.models.first().cloned(),
-                reasoning_effort: "high".to_string(),
+                model: None,
+                reasoning_effort: "medium".to_string(),
                 permission_mode: "auto".to_string(),
                 system_prompt: format!(
-                    "You are {name} ({role_title}), powered by the local `{}` CLI inside Botfinity. Collaborate with the user and your fellow Bots (@Omni, @Claude, @Codex, @OpenCode, @Cursor, @Grok, @Pi). Be concise, accurate, and write clean code.",
+                    "You are {name} ({role_title}), powered by the local `{}` CLI inside Omnibot. Collaborate with the user and available teammates in the current roster. Delegate with complete, explicit handoff blocks. Be concise, accurate, and write clean code.",
                     h.binary_name
                 ),
                 memories: Vec::new(),
@@ -624,14 +695,19 @@ fn sync_detected_cli_bots(store: &mut PersistedStore, harnesses: &[CliHarnessInf
             let direct_chat_id = format!("chat-direct-{slug}");
             if !store.chats.iter().any(|c| c.id == direct_chat_id) {
                 store.chats.push(ChatThread {
+                    is_bot_home: true,
                     id: direct_chat_id,
                     title: name.clone(),
-                    subtitle: format!("{} · {}", h.name, h.version.as_deref().unwrap_or("installed")),
+                    subtitle: format!(
+                        "{} · {}",
+                        h.name,
+                        h.version.as_deref().unwrap_or("installed")
+                    ),
                     is_primary: false,
                     is_group: false,
                     participant_bot_ids: vec![bot_id.clone()],
-                    workspace_id: store.workspaces.first().map(|w| w.id.clone()),
-                    workspace_path: Some(store.preferences.workspace_root.clone()),
+                    workspace_id: None,
+                    workspace_path: None,
                     use_worktrees: false,
                     max_swarm_turns: 4,
                     messages: Vec::new(),
@@ -641,78 +717,168 @@ fn sync_detected_cli_bots(store: &mut PersistedStore, harnesses: &[CliHarnessInf
                 });
             }
         }
-        added_bot_ids.push(bot_id);
-    }
-
-    // Seed a default Multi-Bot Swarm Room if no group chat exists yet
-    let has_group_chat = store.chats.iter().any(|c| c.is_group);
-    if !has_group_chat && added_bot_ids.len() >= 2 {
-        let swarm_participants: Vec<String> = store
-            .bots
-            .iter()
-            .filter(|b| !b.is_primary)
-            .take(4)
-            .map(|b| b.id.clone())
-            .collect();
-        if swarm_participants.len() >= 2 {
-            let names: Vec<String> = store
-                .bots
-                .iter()
-                .filter(|b| swarm_participants.contains(&b.id))
-                .map(|b| b.name.clone())
-                .collect();
-            store.chats.insert(
-                1,
-                ChatThread {
-                    id: "chat-swarm-core".to_string(),
-                    title: "Core Coding Swarm".to_string(),
-                    subtitle: format!("Swarm Room · {}", names.join(", ")),
-                    is_primary: false,
-                    is_group: true,
-                    participant_bot_ids: swarm_participants,
-                    workspace_id: store.workspaces.first().map(|w| w.id.clone()),
-                    workspace_path: Some(store.preferences.workspace_root.clone()),
-                    use_worktrees: false,
-                    max_swarm_turns: 4,
-                    messages: vec![ChatMessage {
-                        id: "msg-swarm-intro".to_string(),
-                        role: "assistant".to_string(),
-                        author_bot_id: Some("bot-omni".to_string()),
-                        author_name: Some("Omni".to_string()),
-                        author_shape: Some("blob".to_string()),
-                        author_color: Some("cyan".to_string()),
-                        cli_driver: Some(CliDriverKind::Claude),
-                        model: None,
-                        text: format!(
-                            "**Core Coding Swarm** is ready with **{}**.\n\n- Address a specific Bot with `@Claude`, `@Codex`, `@Grok`, `@OpenCode`, `@Cursor`, or `@Pi`.\n- Address `@all` to have every Bot in this room weigh in or run in parallel.\n- When one Bot `@mentions` another Bot in its response, the next Bot automatically picks up the baton and continues the work.",
-                            names.join(" + ")
-                        ),
-                        thinking: String::new(),
-                        tool_calls: Vec::new(),
-                        handoffs: Vec::new(),
-                        skill_slug: None,
-                        mentioned_bot_ids: Vec::new(),
-                        worktree_path: None,
-                        duration_ms: None,
-                        cost_usd: None,
-                        input_tokens: None,
-                        output_tokens: None,
-                        status: "complete".to_string(),
-                        created_at_ms: now_ms(),
-                    }],
-                    native_sessions: HashMap::new(),
-                    last_synced_msg_index: HashMap::new(),
-                    updated_at_ms: now_ms(),
-                },
-            );
-        }
     }
 }
 
 fn save_store(store: &PersistedStore) -> Result<(), String> {
-    let dir = omni_data_dir();
-    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
+    save_store_at(store, &omni_data_dir())
+}
+
+fn save_store_at(store: &PersistedStore, dir: &std::path::Path) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
     let json = serde_json::to_string_pretty(store)
         .map_err(|e| format!("Failed to serialize store: {e}"))?;
-    fs::write(store_file_path(), json).map_err(|e| format!("Failed to write store: {e}"))
+    // Replace atomically so a crash cannot leave a half-written transcript.
+    let temp = dir.join(format!("store-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temp, dir.join("store.json"))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result.map_err(|e| format!("Failed to write store: {e}"))?;
+    if let Err(error) = crate::homes::sync_memory_folders(dir, store) {
+        eprintln!("Memory folder export: {error}");
+    }
+    Ok(())
+}
+
+/// Only bundled artwork and bounded raster data are accepted; never remote URLs or SVG.
+pub fn validate_avatar_image(image: Option<&str>) -> Result<(), String> {
+    let Some(image) = image else {
+        return Ok(());
+    };
+    if matches!(image, "/omnibot-gauntlet.png" | "/botfinity-gauntlet.png") {
+        return Ok(());
+    }
+    if image.len() <= 800_000 {
+        if let Some(data) = image.strip_prefix("data:image/png;base64,") {
+            let content = data.trim_end_matches('=');
+            if content.starts_with("iVBORw0KGgo")
+                && data.len() % 4 == 0
+                && data.len() - content.len() <= 2
+                && content
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'+' || c == b'/')
+            {
+                return Ok(());
+            }
+        }
+    }
+    Err("Choose a local PNG profile picture or the bundled gauntlet.".into())
+}
+
+/// Slow CLI discovery runs off the UI/runtime thread and outside the shared state lock.
+pub async fn rescan_environment(state: SharedOmniState) -> Result<OmniSnapshot, String> {
+    let refresh_state = state.clone();
+    let snapshot = tokio::task::spawn_blocking(move || {
+        let harnesses = scan_local_cli_harnesses();
+        let skills = scan_local_skills();
+        let mcp_servers = scan_local_mcp_servers();
+        let mut guard = state
+            .write()
+            .map_err(|_| "State lock poisoned".to_string())?;
+        guard.harnesses = harnesses;
+        guard.skills = skills;
+        guard.mcp_servers = mcp_servers;
+        Ok::<OmniSnapshot, String>(guard.snapshot())
+    })
+    .await
+    .map_err(|error| format!("Tool discovery failed: {error}"))??;
+    tokio::spawn(crate::models::refresh(refresh_state));
+    Ok(snapshot)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn application_rename_preserves_profiles_and_refreshes_affected_sessions_once() {
+        let mut store = initialize_store(&[]).unwrap();
+        let bot = &mut store.bots[0];
+        bot.name = "My assistant".into();
+        bot.avatar_image = Some("/botfinity-gauntlet.png".into());
+        bot.system_prompt = "You are Omni, the lead coordinator Bot in Omni Bot on macOS. Keep my custom instructions.".into();
+        let id = bot.id.clone();
+        store.chats[0]
+            .native_sessions
+            .insert(id.clone(), "old-session".into());
+        store.chats[0].last_synced_msg_index.insert(id.clone(), 4);
+        migrate_application_identity(&mut store);
+        assert_eq!(store.bots[0].name, "My assistant");
+        assert_eq!(
+            store.bots[0].avatar_image.as_deref(),
+            Some("/omnibot-gauntlet.png")
+        );
+        assert_eq!(store.bots[0].system_prompt, "You are Omni, the lead coordinator Bot in Omnibot on macOS. Keep my custom instructions.");
+        assert!(!store.chats[0].native_sessions.contains_key(&id));
+        assert!(!store.chats[0].last_synced_msg_index.contains_key(&id));
+        store.chats[0]
+            .native_sessions
+            .insert(id.clone(), "new-session".into());
+        migrate_application_identity(&mut store);
+        assert_eq!(
+            store.chats[0].native_sessions.get(&id).map(String::as_str),
+            Some("new-session")
+        );
+    }
+
+    #[test]
+    fn fresh_store_has_only_main_bot_and_requires_setup() {
+        let store = initialize_store(&[]).unwrap();
+        assert_eq!(store.bots.len(), 1);
+        assert!(store.bots[0].is_primary);
+        assert_eq!(
+            store.bots[0].avatar_image.as_deref(),
+            Some("/omnibot-gauntlet.png")
+        );
+        assert_eq!(store.chats.len(), 1);
+        assert!(store.chats[0].messages.is_empty());
+        assert!(store.preferences.pinned_bot_ids.is_empty());
+        assert!(!store.preferences.onboarding_completed);
+        assert!(!store.preferences.approve_all_tools);
+        assert!(store.preferences.shared_memories.is_empty());
+        assert!(store.routines.is_empty());
+    }
+
+    use crate::test_support::Fixture;
+
+    #[test]
+    fn atomic_store_roundtrips_and_leaves_no_partial_files() {
+        let f = Fixture::new(&["A"]);
+        let g = f.state.read().unwrap();
+        g.persist().unwrap();
+        let stored: PersistedStore =
+            serde_json::from_str(&fs::read_to_string(g.data_dir.join("store.json")).unwrap())
+                .unwrap();
+        assert_eq!(stored.bots[0].name, "A");
+        assert!(!fs::read_dir(&g.data_dir).unwrap().any(|entry| entry
+            .unwrap()
+            .path()
+            .extension()
+            .is_some_and(|ext| ext == "tmp")));
+        assert!(g.data_dir.join("bots").is_dir());
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(g.data_dir.join("store.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
 }

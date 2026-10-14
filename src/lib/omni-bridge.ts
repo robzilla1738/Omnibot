@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   BotProfile,
+  GitRepoStatus,
   ChatThread,
   CliDriverKind,
   CliHarnessTestResult,
@@ -44,10 +45,10 @@ export async function getOmniSnapshot(): Promise<OmniSnapshot> {
     if (snap.serverBaseUrl) cachedServerBaseUrl = snap.serverBaseUrl;
     return snap;
   }
-  for (const port of [4321, 4322, 4323, 4324, 4325]) {
+  for (const port of Array.from({ length: 15 }, (_, index) => 4321 + index)) {
     try {
       const candidate = `http://127.0.0.1:${port}`;
-      const res = await fetch(`${candidate}/api/snapshot`);
+      const res = await fetch(`${candidate}/api/snapshot`, { signal: AbortSignal.timeout(2000) });
       if (res.ok) {
         const snap = (await res.json()) as OmniSnapshot;
         cachedServerBaseUrl = snap.serverBaseUrl || candidate;
@@ -101,6 +102,7 @@ export async function stopOmniChat(chatId: string): Promise<OmniSnapshot> {
 }
 
 export interface CreateChatParams {
+  botHome?: boolean;
   title?: string;
   subtitle?: string;
   participantBotIds: string[];
@@ -292,34 +294,18 @@ export async function openLocalItem(
   return res.message;
 }
 
-export async function getGitFileDiff(filePath: string): Promise<string> {
-  if (isTauriRuntime()) {
-    return invoke<string>("omni_git_diff", { filePath });
-  }
-  const res = await httpJson<{ diff: string }>(
-    `/api/git/diff?path=${encodeURIComponent(filePath)}`
-  );
+export async function getChatGitStatus(chatId: string): Promise<GitRepoStatus> {
+  return httpJson<GitRepoStatus>(`/api/git/status?chatId=${encodeURIComponent(chatId)}`);
+}
+export async function getGitFileDiff(filePath: string, chatId: string): Promise<string> {
+  const res = await httpJson<{ diff: string }>(`/api/git/diff?path=${encodeURIComponent(filePath)}&chatId=${encodeURIComponent(chatId)}`);
   return res.diff;
 }
-
-export async function commitGitChanges(message: string): Promise<OmniSnapshot> {
-  if (isTauriRuntime()) {
-    return invoke<OmniSnapshot>("omni_git_commit", { message });
-  }
-  return httpJson<OmniSnapshot>("/api/git/commit", {
-    method: "POST",
-    body: JSON.stringify({ message }),
-  });
+export async function commitGitChanges(message: string, chatId: string): Promise<OmniSnapshot> {
+  return httpJson<OmniSnapshot>("/api/git/commit", { method: "POST", body: JSON.stringify({ message, chatId }) });
 }
-
-export async function discardGitFile(filePath: string): Promise<OmniSnapshot> {
-  if (isTauriRuntime()) {
-    return invoke<OmniSnapshot>("omni_git_discard", { filePath });
-  }
-  return httpJson<OmniSnapshot>("/api/git/discard", {
-    method: "POST",
-    body: JSON.stringify({ filePath }),
-  });
+export async function discardGitFile(filePath: string, chatId: string): Promise<OmniSnapshot> {
+  return httpJson<OmniSnapshot>("/api/git/discard", { method: "POST", body: JSON.stringify({ filePath, chatId }) });
 }
 
 export async function testCliHarness(
@@ -337,6 +323,7 @@ export async function testCliHarness(
 export function subscribeOmniEvents(
   onEvent: (event: OmniStreamEvent) => void
 ): () => void {
+  let disposed = false;
   let unlistenTauri: (() => void) | null = null;
   let sse: EventSource | null = null;
 
@@ -345,11 +332,13 @@ export function subscribeOmniEvents(
       onEvent(ev.payload);
     })
       .then((unsub) => {
-        unlistenTauri = unsub;
+        if (disposed) unsub();
+        else unlistenTauri = unsub;
       })
       .catch(() => undefined);
   } else if (typeof EventSource !== "undefined") {
     sse = new EventSource(`${cachedServerBaseUrl}/api/events`);
+    sse.onopen = () => onEvent({ type: "state-updated", chatId: null });
     sse.onmessage = (msg) => {
       try {
         const parsed = JSON.parse(msg.data) as OmniStreamEvent;
@@ -361,7 +350,32 @@ export function subscribeOmniEvents(
   }
 
   return () => {
+    disposed = true;
     unlistenTauri?.();
     sse?.close();
   };
+}
+
+export interface SetupInput {
+  cliDrivers: CliDriverKind[];
+  primaryDriver?: CliDriverKind;
+  primaryName: string;
+  primaryProfile?: Pick<BotProfile, "shape" | "color" | "avatarImage" | "roleTitle" | "description">;
+  workspacePath: string;
+  approveAllTools: boolean;
+}
+
+export async function completeOmniSetup(input: SetupInput): Promise<OmniSnapshot> {
+  if (isTauriRuntime()) return invoke<OmniSnapshot>("omni_complete_setup", { input });
+  return httpJson<OmniSnapshot>("/api/setup", { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function pinOmniBot(botId: string, pinned: boolean): Promise<OmniSnapshot> {
+  const input = { botId, pinned };
+  if (isTauriRuntime()) return invoke<OmniSnapshot>("omni_pin_bot", { input });
+  return httpJson<OmniSnapshot>("/api/bot/pin", { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function runOmniRoutine(id: string, chatId: string): Promise<void> {
+  await httpJson("/api/routine/run", { method: "POST", body: JSON.stringify({ id, chatId }) });
 }

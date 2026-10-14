@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Botfinity",
+  "productName": "Omnibot",
   "version": "0.1.0",
   "identifier": "com.robzilla1738.botfinity",
   "build": {
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Botfinity",
+        "title": "Omnibot",
         "width": 1280,
         "height": 840,
         "minWidth": 900,
@@ -44,6 +44,13 @@
     ],
     "macOS": {
       "signingIdentity": "-"
+    },
+    "resources": {
+      "../LICENSE": "licenses/Omnibot-MIT.txt",
+      "../licenses/T3-Code-MIT.txt": "licenses/T3-Code-MIT.txt",
+      "../licenses/Lucide-ISC.txt": "licenses/Lucide-ISC.txt",
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
     }
-  }
+  },
+  "mainBinaryName": "Omnibot"
 }

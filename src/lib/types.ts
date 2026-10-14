@@ -69,6 +69,7 @@ export interface BotProfile {
   slug: string;
   roleTitle: string;
   description: string;
+  avatarImage?: string | null;
   shape: BotShape | string;
   color: BotColor | string;
   isPrimary: boolean;
@@ -102,6 +103,8 @@ export interface HandoffEvent {
 }
 
 export interface ChatMessage {
+  usageReported?: boolean;
+  modelReported?: boolean;
   id: string;
   role: "user" | "assistant" | "system";
   authorBotId?: string | null;
@@ -126,6 +129,7 @@ export interface ChatMessage {
 }
 
 export interface ChatThread {
+  isBotHome?: boolean;
   id: string;
   title: string;
   subtitle: string;
@@ -143,6 +147,8 @@ export interface ChatThread {
 }
 
 export interface WorkspaceEntry {
+  memories?: string[];
+  approveAllTools?: boolean;
   id: string;
   name: string;
   path: string;
@@ -156,7 +162,12 @@ export interface WorkspaceEntry {
 export interface RoutineEntry {
   id: string;
   name: string;
-  cron: string;
+  cron?: string;
+  schedule?: { frequency: "manual" | "daily" | "weekdays" | "weekly"; time: string; weekday: number } | null;
+  model?: string | null;
+  chatId?: string | null;
+  lastAttemptMs?: number | null;
+  lastError?: string | null;
   prompt: string;
   botId: string;
   enabled: boolean;
@@ -175,6 +186,9 @@ export interface CliHarnessInfo {
   installHint: string;
   authHint: string;
   models: string[];
+  modelLabels?: Record<string, string>;
+  modelsStatus?: "loading" | "ready" | "unavailable" | "unsupported";
+  modelsSource?: string | null;
   supportsJsonStream: boolean;
   supportsSessionResume: boolean;
 }
@@ -250,6 +264,8 @@ export interface ActiveBotRun {
 }
 
 export interface OmniPreferences {
+  onboardingCompleted?: boolean;
+  pinnedBotIds?: string[];
   workspaceRoot: string;
   defaultMaxSwarmTurns: number;
   approveAllTools: boolean;
@@ -278,6 +294,7 @@ export interface OmniSnapshot {
   gitStatus: GitRepoStatus;
   computerActivity: ComputerActivityEntry[];
   activeRuns: ActiveBotRun[];
+  activeWorkflowChatIds: string[];
 }
 
 export interface LocalFileEntry {

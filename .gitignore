@@ -5,3 +5,16 @@ src-tauri/target/
 *.log
 .env
 .env.*
+test-results/
+playwright-report/
+
+# Local state, credentials, and developer artifacts
+.omni-bot/
+.omnibot/
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+coverage/
+src-tauri/gen/
