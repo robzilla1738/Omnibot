@@ -9,6 +9,7 @@ pub mod scanner;
 pub mod server;
 pub mod setup;
 pub mod state;
+pub mod updates;
 
 use computer::{
     get_system_overview, list_workspace_directory, open_on_desktop, read_workspace_file,
@@ -318,10 +319,14 @@ pub fn run() {
 
     tauri::async_runtime::set(runtime.handle().clone());
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_plugin_sparkle_updater::init());
+    builder
         .setup(move |app| {
             let _icon_bytes = include_bytes!("../icons/icon.icns");
             app.manage(ManagedOmniState(shared_state.clone()));
+            updates::configure(app.handle())?;
 
             // Forward broadcast stream events to Tauri window events as well
             let app_handle = app.handle().clone();
@@ -335,6 +340,9 @@ pub fn run() {
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     };
+                    if matches!(event, state::OmniStreamEvent::StateUpdated { .. }) {
+                        updates::refresh_install_permission(&app_handle);
+                    }
                     let _ = app_handle.emit("omni-stream-event", &event);
                 }
             });
@@ -342,6 +350,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            updates::omni_update_status,
+            updates::omni_check_for_updates,
+            updates::omni_set_automatic_updates,
             omni_snapshot,
             omni_complete_setup,
             omni_pin_bot,

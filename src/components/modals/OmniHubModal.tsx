@@ -1,3 +1,4 @@
+import { AppUpdates } from "../settings/AppUpdates";
 import { MemoryManager } from "../memory/MemoryManager";
 import { routineScheduleLabel } from "../routines/RoutineEditor";
 import { BotModelSelect } from "../bots/BotModelSelect";
@@ -46,7 +47,8 @@ export type OmniHubSection =
   | "memories"
   | "skills"
   | "routines"
-  | "instructions";
+  | "instructions"
+  | "updates";
 
 export interface OmniHubModalProps {
   open: boolean;
@@ -108,6 +110,7 @@ const HUB_SECTIONS: Array<{
     label: "Team Rules & Trust",
     subtitle: "Global instructions, handoff limits, and CLI permission defaults",
   },
+  { id: "updates", label: "App updates", subtitle: "Keep Omnibot up to date" },
 ];
 
 export function OmniHubModal({
@@ -348,6 +351,7 @@ export function OmniHubModal({
         return <Sparkles className="w-4 h-4 shrink-0" />;
       case "routines":
         return <Clock className="w-4 h-4 shrink-0" />;
+      case "updates":
       case "instructions":
         return <Settings className="w-4 h-4 shrink-0" />;
     }
@@ -365,6 +369,7 @@ export function OmniHubModal({
         return skills.length;
       case "routines":
         return routines.length;
+      case "updates":
       case "instructions":
         return null;
     }
@@ -465,6 +470,7 @@ export function OmniHubModal({
           </div>
 
           <div key={section} className="motion-view stable-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-7 space-y-5">
+            {section === "updates" && <AppUpdates />}
             {section === "bots" && (
               <div className="space-y-4">
                 <div className="flex items-center justify-between">

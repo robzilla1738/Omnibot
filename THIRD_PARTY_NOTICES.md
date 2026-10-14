@@ -15,3 +15,7 @@ Interface icons use [Lucide](https://lucide.dev/), distributed under the ISC lic
 Provider names and logos identify integrations and remain the property of their respective owners. The project license does not grant trademark rights or imply provider endorsement. Omnibot is an independent project.
 
 The interface uses system fonts, including SF Pro on macOS. No Apple font files are redistributed in this repository.
+
+## Sparkle
+
+macOS updates use [Sparkle](https://sparkle-project.org/), distributed under its BSD-style license and included third-party notices. The full distribution notice is in [licenses/Sparkle.txt](licenses/Sparkle.txt) and bundled with the app. The Rust integration uses the MIT-licensed [tauri-plugin-sparkle-updater](https://github.com/ahonn/tauri-plugin-sparkle-updater) and `sparkle-updater` crates.

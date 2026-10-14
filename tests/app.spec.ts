@@ -673,3 +673,12 @@ test("sidebar views stay outside the fade, rows fit, and sections drag without c
   await expect(sidebar.locator("[data-sidebar-section]").first()).toHaveAttribute("data-sidebar-section", "projects");
   await page.screenshot({ path: "test-results/sidebar-restored.png" });
 });
+
+test("app updates explain availability in the browser without offering an unusable check", async ({ page }) => {
+  await mockBackend(page, snapshot());
+  await page.getByRole("complementary", { name: "Sidebar" }).getByRole("button", { name: "Bot library", exact: true }).click();
+  await page.getByRole("button", { name: "App updates", exact: true }).click();
+  await expect(page.getByText("Update checks are available in the installed macOS app.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Check for updates", exact: true })).toBeDisabled();
+  await expect(page.getByRole("checkbox", { name: "Automatically check for updates" })).toHaveCount(0);
+});

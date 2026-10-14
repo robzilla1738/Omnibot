@@ -17,7 +17,7 @@ import type {
 
 let cachedServerBaseUrl = "http://127.0.0.1:4321";
 
-function isTauriRuntime(): boolean {
+export function isTauriRuntime(): boolean {
   return (
     typeof window !== "undefined" &&
     ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)

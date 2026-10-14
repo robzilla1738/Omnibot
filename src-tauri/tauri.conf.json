@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Omnibot",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.robzilla1738.botfinity",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -43,13 +43,18 @@
       "icons/icon.icns"
     ],
     "macOS": {
-      "signingIdentity": "-"
+      "signingIdentity": "-",
+      "frameworks": [
+        "./Sparkle.framework"
+      ],
+      "minimumSystemVersion": "11.0"
     },
     "resources": {
       "../LICENSE": "licenses/Omnibot-MIT.txt",
       "../licenses/T3-Code-MIT.txt": "licenses/T3-Code-MIT.txt",
       "../licenses/Lucide-ISC.txt": "licenses/Lucide-ISC.txt",
-      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "../licenses/Sparkle.txt": "licenses/Sparkle.txt"
     }
   },
   "mainBinaryName": "Omnibot"

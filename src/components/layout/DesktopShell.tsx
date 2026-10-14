@@ -1,3 +1,5 @@
+import { listen } from "@tauri-apps/api/event";
+import { isTauriRuntime } from "../../lib/omni-bridge";
 import { getChatGitStatus } from "../../lib/omni-bridge";
 import { runOmniRoutine } from "../../lib/omni-bridge";
 import type React from "react";
@@ -60,6 +62,12 @@ export function DesktopShell({
   const [setupOpen, setSetupOpen] = useState(!initialSnapshot.preferences.onboardingCompleted);
   const [actionError, setActionError] = useState("");
   const setupActive = setupOpen || !snapshot.preferences.onboardingCompleted;
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    const unlisten = listen<string>("app-update-error", event => setActionError(event.payload));
+    return () => { void unlisten.then(stop => stop()); };
+  }, []);
+
 
   // Panels & Modals
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);

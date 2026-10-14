@@ -27,6 +27,7 @@ jobs:
         with:
           workspaces: src-tauri
       - run: pnpm install --frozen-lockfile
+      - run: pnpm setup:sparkle
       - run: pnpm build
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: pnpm test:rust

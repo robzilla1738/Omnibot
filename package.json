@@ -1,7 +1,7 @@
 {
   "name": "omnibot",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Omnibot \u2014 Local AI bots, projects, and group chats powered by your coding CLIs",
   "type": "module",
   "scripts": {
@@ -9,11 +9,12 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "tauri:dev": "PATH=\"/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH\" tauri dev",
-    "tauri:build": "PATH=\"/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH\" tauri build",
+    "tauri:dev": "pnpm setup:sparkle && PATH=\"/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH\" tauri dev",
+    "tauri:build": "pnpm setup:sparkle && PATH=\"/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH\" tauri build",
     "test": "playwright test",
     "test:rust": "PATH=\"/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH\" cargo test --manifest-path src-tauri/Cargo.toml --locked",
-    "check:rust": "PATH=\"/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH\" cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings"
+    "check:rust": "PATH=\"/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH\" cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings",
+    "setup:sparkle": "python3 scripts/setup-sparkle.py"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.2.0",

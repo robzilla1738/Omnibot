@@ -18,3 +18,8 @@ playwright-report/
 *.mobileprovision
 coverage/
 src-tauri/gen/
+.cache/
+release-artifacts/
+src-tauri/Sparkle.framework/
+
+__pycache__/

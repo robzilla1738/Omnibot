@@ -77,6 +77,7 @@ Token counts and cost come from CLI reports. Missing metrics remain unavailable,
 
 ```bash
 pnpm build
+pnpm setup:sparkle
 pnpm test:rust
 pnpm check:rust
 pnpm exec playwright install chromium
@@ -84,7 +85,7 @@ pnpm test
 pnpm tauri:build
 ```
 
-The native build produces `Omnibot.app` and a `.dmg` under `src-tauri/target/release/bundle/`. Builds use ad-hoc signing and are not Apple-notarized. CI checks frontend compilation, Rust tests and Clippy, browser tests, and native app packaging. Tagged releases additionally build a DMG.
+The native development build produces `Omnibot.app` and a `.dmg` under `src-tauri/target/release/bundle/` using ad-hoc signing. Public release builds use Developer ID signing, Apple notarization, and Sparkle updates. Download a signed universal build from [Releases](https://github.com/robzilla1738/Omnibot/releases). CI checks frontend compilation, Rust tests and Clippy, browser tests, and native app packaging. See [release instructions](docs/releasing.md) for the verified signing and publication process.
 
 Tests use temporary repositories, fake CLI processes, and mocked API responses. They do not load your conversations or call model providers. Browser tests start Vite automatically; set `PLAYWRIGHT_CHANNEL=chrome` to use an installed Google Chrome instead of Playwright Chromium.
 
