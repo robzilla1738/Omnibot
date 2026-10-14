@@ -1013,22 +1013,8 @@ function MessageCard({
   );
 
   return (
-    <div className="group group/message flex items-start gap-3 min-w-0">
-      <button type="button" disabled={!authorBot} aria-label={`Open ${message.authorName || authorBot?.name || "bot"} profile settings`} onClick={() => authorBot && onOpenBotSettings(authorBot)} className="pt-0.5 shrink-0 rounded-xl">
-        <BotCharacterAvatar
-          bot={authorBot}
-          shape={message.authorShape ?? authorBot?.shape ?? "blob"}
-          color={message.authorColor ?? authorBot?.color ?? "cyan"}
-          cliDriver={message.cliDriver ?? authorBot?.cliDriver}
-          isPrimary={authorBot?.isPrimary}
-          size={36}
-          isStreaming={message.status === "streaming"}
-          showStarBadge={authorBot?.isPrimary}
-          showCliBadge={false}
-        />
-      </button>
-
-      <div className="flex-1 max-w-[620px] min-w-0 space-y-2">
+    <div className="group group/message min-w-0">
+      <div className="w-full max-w-[620px] min-w-0 space-y-2">
         <div className="w-full overflow-hidden rounded-2xl liquid-glass-card px-5 py-4 min-h-[100px] text-[15px] text-zinc-100 space-y-3 break-words">
           {/* Bot Identity & CLI Harness Header Bar */}
           <div className="flex items-center justify-between gap-2 pb-1 ">

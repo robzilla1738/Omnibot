@@ -364,8 +364,7 @@ test("author hover reveals the provider logo and opens that bot's settings in pl
   await author.click();
   await expect(page.getByText("Teammate · Character & CLI", { exact: true })).toBeVisible();
   await expect(page.getByText("Reply from teammate", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Open Teammate profile settings", exact: true }).click();
-  await expect(page.getByText("Teammate · Character & CLI", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Teammate profile settings", exact: true })).toHaveCount(0);
 });
 
 test("routines keep drafts, save readable schedules and model choices, and run the saved configuration", async ({ page }) => {
@@ -439,10 +438,11 @@ test("thinking transitions into streamed text with one stop control and reduced 
   await page.screenshot({ path: test.info().outputPath("thinking.png") });
   await page.getByRole("button", { name: "View thinking", exact: true }).click();
   await expect(page.getByText("Considering the request.", { exact: true })).toBeVisible();
-  const avatar = page.getByRole("button", { name: "Open Test Bot profile settings", exact: true }).locator(".bot-avatar-working > svg");
-  await expect(avatar).toHaveCSS("animation-name", "bot-thinking");
+  await expect(page.getByRole("button", { name: "Open Test Bot profile settings", exact: true })).toHaveCount(0);
+  const dot = page.getByRole("status", { name: "Test Bot is thinking", exact: true }).locator(".thinking-dots i").first();
+  await expect(dot).toHaveCSS("animation-name", "thinking-dot");
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await expect(avatar).toHaveCSS("animation-name", "none");
+  await expect(dot).toHaveCSS("animation-name", "none");
   state.chats[0].messages[0].text = "Hello, I’m";
   await page.evaluate(() => window.dispatchEvent(new Event("fixture-stream-event")));
   await expect(page.locator(".omni-prose")).toHaveText("Hello, I’m");
