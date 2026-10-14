@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { BotCharacterAvatar } from "./components/icons/BotCharacterAvatar";
 import { DesktopShell } from "./components/layout/DesktopShell";
 import { getOmniSnapshot } from "./lib/omni-bridge";
 import type { OmniSnapshot } from "./lib/types";
@@ -61,9 +60,13 @@ export function App() {
   if (bootError) {
     return (
       <div className="h-screen w-screen bg-[#121212] text-zinc-200 flex flex-col items-center justify-center p-6 text-center">
-        <BotCharacterAvatar shape="omni-prism" color="cyan" size={64} useHeroMascot />
+        <img
+          src="/botfinity-gauntlet.png"
+          alt="Botfinity"
+          className="w-16 h-16 object-contain"
+        />
         <h2 className="mt-4 text-base font-semibold text-white">
-          Omni Bot Local Daemon Offline
+          Botfinity Local Daemon Offline
         </h2>
         <p className="mt-1.5 text-xs text-zinc-400 max-w-md">{bootError}</p>
       </div>
@@ -73,15 +76,13 @@ export function App() {
   if (!snapshot) {
     return (
       <div className="h-screen w-screen bg-[#121212] flex flex-col items-center justify-center gap-3">
-        <BotCharacterAvatar
-          shape="omni-prism"
-          color="cyan"
-          size={58}
-          showStarBadge
-          useHeroMascot
+        <img
+          src="/botfinity-gauntlet.png"
+          alt="Botfinity"
+          className="w-14 h-14 object-contain animate-pulse"
         />
         <span className="text-xs text-zinc-500">
-          Scanning local coding CLIs &amp; starting Omni Bot...
+          Starting Botfinity...
         </span>
       </div>
     );

@@ -146,6 +146,16 @@ export async function updateOmniChat(
   });
 }
 
+export async function clearOmniChat(id: string): Promise<OmniSnapshot> {
+  if (isTauriRuntime()) {
+    return invoke<OmniSnapshot>("omni_clear_chat", { id });
+  }
+  return httpJson<OmniSnapshot>("/api/chat/clear", {
+    method: "POST",
+    body: JSON.stringify({ id }),
+  });
+}
+
 export async function deleteOmniChat(id: string): Promise<OmniSnapshot> {
   if (isTauriRuntime()) {
     return invoke<OmniSnapshot>("omni_delete_chat", { id });

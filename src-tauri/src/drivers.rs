@@ -37,6 +37,9 @@ fn resolve_driver_binary(kind: CliDriverKind) -> Option<String> {
         CliDriverKind::Cursor => find_binary(&["agent", "cursor-agent"]),
         CliDriverKind::Grok => find_binary(&["grok"]),
         CliDriverKind::Pi => find_binary(&["pi"]),
+        CliDriverKind::Antigravity => find_binary(&["antigravity", "agy"]),
+        CliDriverKind::Muse => find_binary(&["muse"]),
+        CliDriverKind::Acp => find_binary(&["acp"]),
         CliDriverKind::Gemini => find_binary(&["gemini"]),
         CliDriverKind::Aider => find_binary(&["aider"]),
         CliDriverKind::Ollama => find_binary(&["ollama"]),
@@ -236,7 +239,7 @@ pub async fn execute_bot_turn(
             }
             cmd.arg(&req.prompt);
         }
-        CliDriverKind::Gemini => {
+        CliDriverKind::Gemini | CliDriverKind::Antigravity | CliDriverKind::Muse => {
             cmd.args(["-p", &combined_prompt]);
         }
         CliDriverKind::Aider => {
@@ -250,7 +253,7 @@ pub async fn execute_bot_turn(
                 .unwrap_or_else(|| "qwen2.5-coder:32b".to_string());
             cmd.args(["run", &model, &combined_prompt]);
         }
-        CliDriverKind::Custom => {
+        CliDriverKind::Acp | CliDriverKind::Custom => {
             cmd.arg(&combined_prompt);
         }
     }

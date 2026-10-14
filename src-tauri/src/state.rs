@@ -388,7 +388,7 @@ fn load_or_initialize_store(harnesses: &[CliHarnessInfo]) -> PersistedStore {
         slug: "omni".to_string(),
         role_title: "Lead Swarm Coordinator & Principal Engineer".to_string(),
         description: "Your primary continuous point of contact. Coordinates work across your local CLI Bots (@Claude, @Codex, @OpenCode, @Cursor, @Grok, @Pi), reviews code, and executes tasks directly.".to_string(),
-        shape: "omni-prism".to_string(),
+        shape: "blob".to_string(),
         color: "cyan".to_string(),
         is_primary: true,
         cli_driver: preferred_primary_driver,
@@ -489,17 +489,22 @@ fn load_or_initialize_store(harnesses: &[CliHarnessInfo]) -> PersistedStore {
 fn sync_detected_cli_bots(store: &mut PersistedStore, harnesses: &[CliHarnessInfo]) {
     let mut added_bot_ids = Vec::new();
 
-    // Upgrade legacy default shapes to bespoke provider-logo Bot PFPs
+    // Upgrade legacy default shapes and verbose role titles
     for bot in &mut store.bots {
-        if bot.is_primary && bot.shape == "blob" {
-            bot.shape = "omni-prism".to_string();
-        } else if bot.auto_created_for_cli
-            && matches!(
+        if bot.is_primary {
+            if bot.shape == "omni-prism" || (bot.shape == "star" && bot.color == "black") {
+                bot.shape = "blob".to_string();
+                bot.color = "cyan".to_string();
+            }
+            bot.role_title = "Lead Swarm Coordinator".to_string();
+        } else if bot.auto_created_for_cli {
+            if matches!(
                 bot.shape.as_str(),
                 "squircle" | "hex" | "blob" | "gem" | "star" | "pebble" | "sparkle" | "shield" | "cloud"
-            )
-        {
-            bot.shape = bot.cli_driver.default_shape().to_string();
+            ) {
+                bot.shape = bot.cli_driver.default_shape().to_string();
+            }
+            bot.role_title = bot.cli_driver.default_role_title().to_string();
         }
     }
 

@@ -1,6 +1,7 @@
 import type React from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  clearOmniChat,
   commitGitChanges,
   createOmniChat,
   deleteOmniBot,
@@ -79,6 +80,7 @@ export function DesktopShell({
           const filtered = prev.activeRuns.filter(
             (r) => r.messageId !== ev.messageId
           );
+          const speakingBot = prev.bots.find((b) => b.id === ev.botId);
           return {
             ...prev,
             activeRuns: [
@@ -93,6 +95,34 @@ export function DesktopShell({
                 startedAtMs: Date.now(),
               },
             ],
+            chats: prev.chats.map((c) => {
+              if (c.id !== ev.chatId) return c;
+              const hasMsg = c.messages.some((m) => m.id === ev.messageId);
+              if (hasMsg) return c;
+              return {
+                ...c,
+                messages: [
+                  ...c.messages,
+                  {
+                    id: ev.messageId,
+                    role: "assistant",
+                    authorBotId: ev.botId,
+                    authorName: ev.botName,
+                    authorShape: speakingBot?.shape ?? "blob",
+                    authorColor: speakingBot?.color ?? "cyan",
+                    cliDriver: ev.cliDriver,
+                    model: ev.model,
+                    text: "",
+                    thinking: "",
+                    toolCalls: [],
+                    handoffs: [],
+                    mentionedBotIds: [],
+                    status: "streaming",
+                    createdAtMs: Date.now(),
+                  },
+                ],
+              };
+            }),
           };
         }
 
@@ -216,11 +246,11 @@ export function DesktopShell({
       snapshot.bots.find((b) => b.isPrimary) ??
       snapshot.bots[0] ?? {
         id: "bot-omni",
-        name: "Omni",
-        slug: "omni",
+        name: "Botfinity",
+        slug: "botfinity",
         roleTitle: "Lead Swarm Coordinator",
         description: "",
-        shape: "omni-prism",
+        shape: "blob",
         color: "cyan",
         isPrimary: true,
         cliDriver: "claude",
@@ -385,9 +415,6 @@ export function DesktopShell({
         bots={snapshot.bots}
         harnesses={snapshot.harnesses}
         skills={snapshot.skills}
-        projects={snapshot.workspaces}
-        activeProjectPath={snapshot.preferences.workspaceRoot}
-        gitStatus={snapshot.gitStatus}
         activeRuns={snapshot.activeRuns}
         inspectorOpen={inspectorOpen}
         onToggleInspector={() =>
@@ -396,15 +423,6 @@ export function DesktopShell({
             setSidebarCollapsed(next);
             return next;
           })
-        }
-        onOpenGitInspector={() => {
-          setInspectorTab("git");
-          setInspectorOpen(true);
-          setSidebarCollapsed(true);
-        }}
-        onSelectProject={handleSelectProject}
-        onOpenProjectsHub={() =>
-          setOmniHubState({ open: true, section: "projects" })
         }
         onSendMessage={async (params) => {
           await sendOmniMessage({
@@ -418,10 +436,9 @@ export function DesktopShell({
           const next = await stopOmniChat(activeChat.id);
           setSnapshot(next);
         }}
-        onToggleBotInChat={handleToggleBotInChat}
       />
 
-      {/* Right-Hand Inspector Drawer */}
+      {/* Right-Hand Inspector Drawer (Opened by Clicking Bot Name Pill or Cmd+I) */}
       <InspectorDrawer
         open={inspectorOpen}
         activeTab={inspectorTab}
@@ -434,6 +451,7 @@ export function DesktopShell({
         activeBot={activeBot}
         bots={snapshot.bots}
         harnesses={snapshot.harnesses}
+        projects={snapshot.workspaces}
         routines={snapshot.routines}
         gitStatus={snapshot.gitStatus}
         preferences={snapshot.preferences}
@@ -442,6 +460,11 @@ export function DesktopShell({
           const next = await updateOmniChat(params);
           setSnapshot(next);
         }}
+        onClearChat={async (chatId) => {
+          const next = await clearOmniChat(chatId);
+          setSnapshot(next);
+        }}
+        onToggleBotInChat={handleToggleBotInChat}
         onUpsertBot={async (bot) => {
           const next = await upsertOmniBot(bot);
           setSnapshot(next);
@@ -521,7 +544,7 @@ export function DesktopShell({
         }}
       />
 
-      {/* Omni Hub Modal */}
+      {/* Botfinity Hub Modal */}
       <OmniHubModal
         open={omniHubState.open}
         initialSection={omniHubState.section}

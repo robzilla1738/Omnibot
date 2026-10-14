@@ -17,8 +17,8 @@ import type {
 import { BotCharacterAvatar, CliProviderGlyph } from "../icons/BotCharacterAvatar";
 
 const COLLAPSED_WIDTH = 92;
-const DEFAULT_EXPANDED_WIDTH = 296;
-const MIN_EXPANDED_WIDTH = 252;
+const DEFAULT_EXPANDED_WIDTH = 290;
+const MIN_EXPANDED_WIDTH = 248;
 const MAX_EXPANDED_WIDTH = 420;
 const SNAP_THRESHOLD = 165;
 
@@ -134,12 +134,10 @@ export function AppSidebar({
   const rosterBots = bots.filter((b) => !b.isPrimary);
   const installedHarnesses = harnesses.filter((h) => h.installed);
 
-  const swarmAndSidechats = chats.filter((c) => {
-    if (c.isPrimary) return false;
-    if (c.isGroup) return true;
-    const isDirectBotChat = c.id.startsWith("chat-direct-");
-    return !isDirectBotChat || c.messages.length > 0;
-  });
+  // Only show Multi-Bot Swarm Rooms and custom Sidechats (never duplicate 1:1 Bot threads)
+  const swarmAndSidechats = chats.filter(
+    (c) => !c.isPrimary && !c.id.startsWith("chat-direct-")
+  );
 
   const isPrimaryStreaming = activeRuns.some((r) => r.botId === primaryBot.id);
 
@@ -150,7 +148,7 @@ export function AppSidebar({
         isDragging ? "" : "transition-[width] duration-300 spring-transition"
       }`}
     >
-      {/* Top Drag Bar + Primary Omni Hero Card */}
+      {/* Top Drag Bar + Primary Botfinity Hero Card */}
       <div>
         <div
           data-tauri-drag-region
@@ -182,7 +180,7 @@ export function AppSidebar({
           </div>
         </div>
 
-        {/* Featured Primary Coordinator Card: Omni */}
+        {/* Featured Primary Coordinator Card */}
         <div
           className={`flex flex-col items-center transition-all duration-300 spring-transition ${
             collapsed ? "px-3 pt-1 pb-3" : "px-4 pt-1 pb-4"
@@ -191,18 +189,17 @@ export function AppSidebar({
           <button
             type="button"
             onClick={onSelectPrimary}
-            title="Omni (Lead Coordinator Bot)"
+            title={`${primaryBot.name} (Primary Coordinator)`}
             className="group flex flex-col items-center justify-center transition-all duration-300 spring-transition active:scale-[0.97] bg-transparent"
           >
             <BotCharacterAvatar
               bot={primaryBot}
-              size={collapsed ? 48 : 74}
+              size={collapsed ? 48 : 72}
               isStreaming={isPrimaryStreaming}
               showStarBadge
-              useHeroMascot
             />
             <span
-              className={`text-[15px] font-semibold tracking-tight transition-all duration-200 overflow-hidden ${
+              className={`text-[15px] font-medium tracking-tight transition-all duration-200 overflow-hidden ${
                 isPrimarySelected
                   ? "text-white"
                   : "text-zinc-300 group-hover:text-white"
@@ -241,7 +238,6 @@ export function AppSidebar({
                   bot={bot}
                   size={38}
                   isStreaming={running}
-                  showCliBadge
                 />
               </button>
             );
@@ -261,7 +257,7 @@ export function AppSidebar({
         <div className="space-y-1">
           <div className="px-2.5 pb-1.5 flex items-center justify-between">
             <span className="text-[13.5px] font-normal text-[#8e8d8a]">
-              Bots ({rosterBots.length})
+              Bots
             </span>
             <button
               type="button"
@@ -269,7 +265,7 @@ export function AppSidebar({
               className="text-[12.5px] text-zinc-400 hover:text-white flex items-center gap-1 transition-colors"
             >
               <Plus className="w-3.5 h-3.5" />
-              <span>New Bot</span>
+              <span>New</span>
             </button>
           </div>
 
@@ -279,6 +275,8 @@ export function AppSidebar({
             const selected =
               activeChatId === directId || activeChatId === altDirectId;
             const run = activeRuns.find((r) => r.botId === bot.id);
+            const showDriverPill =
+              bot.name.toLowerCase() !== bot.cliDriver.toLowerCase();
 
             return (
               <button
@@ -293,18 +291,19 @@ export function AppSidebar({
               >
                 <BotCharacterAvatar
                   bot={bot}
-                  size={40}
+                  size={38}
                   isStreaming={Boolean(run)}
-                  showCliBadge
                 />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <span className="text-[15px] font-medium text-[#f4f4f5] truncate leading-[1.3]">
                       {bot.name}
                     </span>
-                    <span className="text-[11px] font-mono px-1.5 py-0.2 rounded-md bg-white/[0.05] text-zinc-400 shrink-0">
-                      {bot.cliDriver}
-                    </span>
+                    {showDriverPill && (
+                      <span className="text-[11px] font-mono px-1.5 py-0.2 rounded-md bg-white/[0.05] text-zinc-400 shrink-0">
+                        {bot.cliDriver}
+                      </span>
+                    )}
                   </div>
                   <div className="text-[13px] text-[#8e8d8a] truncate mt-0.5 leading-[1.3]">
                     {run ? (
@@ -313,7 +312,7 @@ export function AppSidebar({
                           ? "Thinking..."
                           : run.activity.startsWith("tool:")
                             ? `Running ${run.activity.slice(5)}...`
-                            : "Writing response..."}
+                            : "Writing..."}
                       </span>
                     ) : (
                       bot.roleTitle
@@ -329,79 +328,81 @@ export function AppSidebar({
         </div>
 
         {/* Swarm Rooms & Threads */}
-        <div className="space-y-1">
-          <div className="px-2.5 pb-1.5 flex items-center justify-between">
-            <span className="text-[13.5px] font-normal text-[#8e8d8a]">
-              Swarm Rooms &amp; Threads
-            </span>
-            <button
-              type="button"
-              onClick={onNewChatOrSwarm}
-              className="text-[12.5px] text-zinc-400 hover:text-white flex items-center gap-1 transition-colors"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Swarm</span>
-            </button>
-          </div>
-
-          {swarmAndSidechats.map((chat) => {
-            const selected = chat.id === activeChatId;
-            const chatBots = chat.participantBotIds
-              .map((id) => bots.find((b) => b.id === id))
-              .filter((b): b is BotProfile => Boolean(b));
-            const isBusy = activeRuns.some((r) => r.chatId === chat.id);
-
-            return (
-              <div
-                key={chat.id}
-                onClick={() => onSelectChat(chat.id)}
-                className={`group relative flex items-center gap-3 px-3 py-2.5 rounded-[16px] cursor-pointer transition-colors ${
-                  selected
-                    ? "bg-[#1b1b1b] text-white"
-                    : "hover:bg-[#161616] text-zinc-300"
-                }`}
+        {swarmAndSidechats.length > 0 && (
+          <div className="space-y-1">
+            <div className="px-2.5 pb-1.5 flex items-center justify-between">
+              <span className="text-[13.5px] font-normal text-[#8e8d8a]">
+                Swarm Rooms
+              </span>
+              <button
+                type="button"
+                onClick={onNewChatOrSwarm}
+                className="text-[12.5px] text-zinc-400 hover:text-white flex items-center gap-1 transition-colors"
               >
-                {chat.isGroup && chatBots.length >= 2 ? (
-                  <div className="w-[38px] h-[38px] rounded-[11px] bg-[#19191c] border border-white/[0.07] flex items-center justify-center -space-x-2 shrink-0 px-1">
-                    {chatBots.slice(0, 2).map((b) => (
-                      <BotCharacterAvatar key={b.id} bot={b} size={22} />
-                    ))}
-                  </div>
-                ) : chatBots[0] ? (
-                  <BotCharacterAvatar bot={chatBots[0]} size={38} showCliBadge />
-                ) : (
-                  <div className="w-[38px] h-[38px] rounded-[11px] bg-[#1b1b1b] border border-white/[0.06] text-zinc-400 flex items-center justify-center shrink-0">
-                    <MessageSquare className="w-[18px] h-[18px]" />
-                  </div>
-                )}
+                <Plus className="w-3.5 h-3.5" />
+                <span>New</span>
+              </button>
+            </div>
 
-                <div className="min-w-0 flex-1">
-                  <div className="text-[15px] font-medium text-[#f4f4f5] truncate leading-[1.3]">
-                    {chat.title}
-                  </div>
-                  <p className="text-[13px] text-[#8e8d8a] truncate mt-0.5 leading-[1.3]">
-                    {chat.isGroup
-                      ? `${chatBots.map((b) => `@${b.name}`).join(" · ")}`
-                      : formatRelativeUpdated(chat.updatedAtMs)}
-                  </p>
-                </div>
+            {swarmAndSidechats.map((chat) => {
+              const selected = chat.id === activeChatId;
+              const chatBots = chat.participantBotIds
+                .map((id) => bots.find((b) => b.id === id))
+                .filter((b): b is BotProfile => Boolean(b));
+              const isBusy = activeRuns.some((r) => r.chatId === chat.id);
 
-                {isBusy && (
-                  <span className="w-2.5 h-2.5 rounded-full bg-[#2f7cf6] animate-pulse shrink-0 group-hover:hidden" />
-                )}
-
-                <button
-                  type="button"
-                  onClick={(e) => onDeleteChat(chat.id, e)}
-                  title="Delete thread"
-                  className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-white/[0.06] transition-all shrink-0"
+              return (
+                <div
+                  key={chat.id}
+                  onClick={() => onSelectChat(chat.id)}
+                  className={`group relative flex items-center gap-3 px-3 py-2.5 rounded-[16px] cursor-pointer transition-colors ${
+                    selected
+                      ? "bg-[#1b1b1b] text-white"
+                      : "hover:bg-[#161616] text-zinc-300"
+                  }`}
                 >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
-            );
-          })}
-        </div>
+                  {chat.isGroup && chatBots.length >= 2 ? (
+                    <div className="w-[38px] h-[38px] rounded-[11px] bg-[#19191c] border border-white/[0.07] flex items-center justify-center -space-x-2 shrink-0 px-1">
+                      {chatBots.slice(0, 2).map((b) => (
+                        <BotCharacterAvatar key={b.id} bot={b} size={22} />
+                      ))}
+                    </div>
+                  ) : chatBots[0] ? (
+                    <BotCharacterAvatar bot={chatBots[0]} size={38} />
+                  ) : (
+                    <div className="w-[38px] h-[38px] rounded-[11px] bg-[#1b1b1b] border border-white/[0.06] text-zinc-400 flex items-center justify-center shrink-0">
+                      <MessageSquare className="w-[18px] h-[18px]" />
+                    </div>
+                  )}
+
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[15px] font-medium text-[#f4f4f5] truncate leading-[1.3]">
+                      {chat.title}
+                    </div>
+                    <p className="text-[13px] text-[#8e8d8a] truncate mt-0.5 leading-[1.3]">
+                      {chat.isGroup
+                        ? chatBots.map((b) => `@${b.name}`).join(" · ")
+                        : formatRelativeUpdated(chat.updatedAtMs)}
+                    </p>
+                  </div>
+
+                  {isBusy && (
+                    <span className="w-2.5 h-2.5 rounded-full bg-[#2f7cf6] animate-pulse shrink-0 group-hover:hidden" />
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={(e) => onDeleteChat(chat.id, e)}
+                    title="Delete thread"
+                    className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-white/[0.06] transition-all shrink-0"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Bottom Progressive Blur & Soft Vignette Feather */}
@@ -410,7 +411,7 @@ export function AppSidebar({
         className="pointer-events-none absolute bottom-0 inset-x-0 h-24 sidebar-bottom-feather z-10"
       />
 
-      {/* Bottom Dock: Omni Hub + CLI Harnesses Pill */}
+      {/* Bottom Dock: Botfinity Hub + CLI Harnesses Pill */}
       {collapsed ? (
         <div className="relative z-20 flex flex-col items-center gap-3 pb-4 pt-2">
           <button
@@ -424,7 +425,7 @@ export function AppSidebar({
           <button
             type="button"
             onClick={onOpenOmniHub}
-            title="Omni Hub (Bots, Projects, Memories, Skills & Routines)"
+            title="Botfinity Hub (Bots, Projects, Memories, Skills & Routines)"
             className="w-11 h-11 rounded-full bg-[#1f1f1f] hover:bg-[#282828] border border-white/[0.05] flex items-center justify-center text-zinc-300 hover:text-white active:scale-95 transition-colors"
           >
             <LayoutGrid className="w-[18px] h-[18px]" />
@@ -443,7 +444,7 @@ export function AppSidebar({
           <button
             type="button"
             onClick={onOpenOmniHub}
-            title="Omni Hub (Bots, Projects, Memories, Skills & Routines)"
+            title="Botfinity Hub (Bots, Projects, Memories, Skills & Routines)"
             className="pointer-events-auto w-11 h-11 rounded-full bg-[#1f1f1f] hover:bg-[#282828] text-zinc-200 border border-white/[0.06] flex items-center justify-center shrink-0 transition-colors active:scale-95"
           >
             <LayoutGrid className="w-[18px] h-[18px]" />

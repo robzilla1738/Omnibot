@@ -140,7 +140,7 @@ export function SearchAndNewChatModal({
       onClick={onClose}
     >
       <div
-        className={`w-full max-w-[560px] max-h-[80vh] rounded-[22px] bg-[#121212] border border-white/[0.08] shadow-[0_28px_90px_rgba(0,0,0,0.85)] flex flex-col overflow-hidden transition-all duration-240 spring-transition ${
+        className={`w-full max-w-[560px] h-[68vh] max-h-[580px] rounded-[22px] bg-[#121212] border border-white/[0.08] shadow-[0_28px_90px_rgba(0,0,0,0.85)] flex flex-col overflow-hidden transition-all duration-240 spring-transition ${
           open
             ? "scale-100 opacity-100 translate-y-0"
             : "scale-[0.96] opacity-0 -translate-y-2"

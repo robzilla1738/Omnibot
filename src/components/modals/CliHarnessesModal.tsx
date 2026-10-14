@@ -216,7 +216,7 @@ export function CliHarnessesModal({
       onClick={onClose}
     >
       <div
-        className={`w-full max-w-[860px] max-h-[85vh] rounded-[24px] bg-[#121212] border border-white/[0.08] shadow-[0_28px_90px_rgba(0,0,0,0.85)] flex flex-col overflow-hidden transition-all duration-250 spring-transition ${
+        className={`w-full max-w-[860px] h-[78vh] max-h-[680px] rounded-[24px] bg-[#121212] border border-white/[0.08] shadow-[0_28px_90px_rgba(0,0,0,0.85)] flex flex-col overflow-hidden transition-all duration-250 spring-transition ${
           open
             ? "scale-100 opacity-100 translate-y-0"
             : "scale-[0.96] opacity-0 translate-y-2"
@@ -326,15 +326,7 @@ export function CliHarnessesModal({
                       className="flex items-center justify-between gap-3.5 py-1"
                     >
                       <div className="flex items-center gap-3.5 min-w-0 flex-1">
-                        {matchingBot ? (
-                          <BotCharacterAvatar
-                            bot={matchingBot}
-                            size={44}
-                            showCliBadge
-                          />
-                        ) : (
-                          <CliBrandBadge driver={h.kind} size={44} />
-                        )}
+                        <CliBrandBadge driver={h.kind} size={44} />
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
                             <span className="text-[14px] font-semibold text-zinc-100 truncate">
@@ -490,7 +482,7 @@ export function CliHarnessesModal({
                     className="flex items-center justify-between gap-3.5 py-1"
                   >
                     <div className="flex items-center gap-3.5 min-w-0 flex-1">
-                      <CliBrandBadge driver="custom" size={40} />
+                      <CliBrandBadge driver="acp" size={40} />
                       <div className="min-w-0 flex-1">
                         <div className="text-[14px] font-semibold text-zinc-100 truncate">
                           {mcp.name}

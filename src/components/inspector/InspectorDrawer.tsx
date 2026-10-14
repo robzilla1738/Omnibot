@@ -6,6 +6,8 @@ import {
   ExternalLink,
   FileCode2,
   Folder,
+  FolderGit2,
+  GitBranch,
   GitCommitHorizontal,
   HardDrive,
   Laptop,
@@ -15,6 +17,8 @@ import {
   RefreshCw,
   RotateCcw,
   Share2,
+  Trash2,
+  Users,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
@@ -37,6 +41,7 @@ import type {
   OmniPreferences,
   RoutineEntry,
   SystemOverview,
+  WorkspaceEntry,
 } from "../../lib/types";
 import {
   BOT_COLORS,
@@ -56,6 +61,7 @@ export interface InspectorDrawerProps {
   activeBot: BotProfile;
   bots: BotProfile[];
   harnesses: CliHarnessInfo[];
+  projects: WorkspaceEntry[];
   routines: RoutineEntry[];
   gitStatus: GitRepoStatus;
   preferences: OmniPreferences;
@@ -67,6 +73,8 @@ export interface InspectorDrawerProps {
     useWorktrees?: boolean;
     maxSwarmTurns?: number;
   }) => Promise<void>;
+  onClearChat: (chatId: string) => Promise<void>;
+  onToggleBotInChat: (botId: string) => Promise<void>;
   onUpsertBot: (bot: BotProfile) => Promise<void>;
   onUpdatePreferences: (next: OmniPreferences) => Promise<void>;
   onUpsertRoutine: (routine: RoutineEntry) => Promise<void>;
@@ -86,11 +94,14 @@ export function InspectorDrawer({
   activeBot,
   bots,
   harnesses,
+  projects,
   routines,
   gitStatus,
   preferences,
   computerActivity,
   onUpdateChat,
+  onClearChat,
+  onToggleBotInChat,
   onUpsertBot,
   onUpdatePreferences,
   onUpsertRoutine,
@@ -103,6 +114,7 @@ export function InspectorDrawer({
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(chat.title);
   const [customizeAvatarOpen, setCustomizeAvatarOpen] = useState(false);
+  const [swarmMembersOpen, setSwarmMembersOpen] = useState(false);
 
   const [showNewRoutineForm, setShowNewRoutineForm] = useState(false);
   const [newRoutineName, setNewRoutineName] = useState("");
@@ -204,6 +216,10 @@ export function InspectorDrawer({
   };
 
   const installedHarnesses = harnesses.filter((h) => h.installed);
+  const activeProjectName =
+    projects.find((p) => p.path === preferences.workspaceRoot)?.name ||
+    preferences.workspaceRoot.split("/").filter(Boolean).pop() ||
+    "Project";
 
   return (
     <aside
@@ -259,7 +275,6 @@ export function InspectorDrawer({
               size={72}
               showStarBadge={activeBot.isPrimary}
               showCliBadge={!activeBot.isPrimary}
-              useHeroMascot={activeBot.isPrimary}
             />
           </button>
 
@@ -291,12 +306,16 @@ export function InspectorDrawer({
             />
           ) : (
             <div className="mt-1 flex items-center gap-2 text-[13px] text-[#8e8d8a]">
+              <span className="font-mono text-zinc-400">
+                {activeBot.cliDriver}
+              </span>
+              <span>·</span>
               <button
                 type="button"
                 onClick={() => setCustomizeAvatarOpen((v) => !v)}
                 className="hover:text-zinc-200 transition-colors"
               >
-                {customizeAvatarOpen ? "Close character studio" : "Edit character & CLI"}
+                {customizeAvatarOpen ? "Close studio" : "Edit Bot"}
               </button>
               {!chat.isPrimary && (
                 <>
@@ -313,7 +332,7 @@ export function InspectorDrawer({
             </div>
           )}
 
-          {/* Segmented Tabs: Details | Git & Diffs | Computer */}
+          {/* Segmented Tabs: Details | Project & Git | Computer */}
           <div className="mt-4 flex items-center gap-1.5">
             {(
               [
@@ -322,8 +341,8 @@ export function InspectorDrawer({
                   id: "git",
                   label:
                     gitStatus.changedFiles.length > 0
-                      ? `Git (${gitStatus.changedFiles.length})`
-                      : "Git & Diffs",
+                      ? `Project & Git (${gitStatus.changedFiles.length})`
+                      : "Project & Git",
                 },
                 { id: "computer", label: "Computer" },
               ] as const
@@ -351,7 +370,7 @@ export function InspectorDrawer({
         <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden sidebar-scroll-mask px-4 pt-1 pb-16 space-y-5">
           {activeTab === "details" && (
             <div className="space-y-5">
-              {/* Collapsible Grok Bot Character & CLI Studio */}
+              {/* Collapsible Character & CLI Studio */}
               {customizeAvatarOpen && (
                 <div className="liquid-glass-card rounded-2xl p-4 space-y-4">
                   <div className="flex items-center justify-between">
@@ -431,10 +450,10 @@ export function InspectorDrawer({
                     </div>
                   </div>
 
-                  {/* Shape Grid (Provider Logo Mascots + Grok Bot Shapes) */}
+                  {/* Shape Grid */}
                   <div className="space-y-1.5">
                     <label className="block text-xs text-[#8e8d8a]">
-                      Provider Mascots &amp; Bot Shapes ({BOT_SHAPES.length})
+                      Bot Shape ({BOT_SHAPES.length})
                     </label>
                     <div className="grid grid-cols-5 gap-1.5 max-h-52 overflow-y-auto p-1">
                       {BOT_SHAPES.map((s) => {
@@ -468,6 +487,97 @@ export function InspectorDrawer({
                   </div>
                 </div>
               )}
+
+              {/* Quick Project & Git Status Summary Row */}
+              <div className="liquid-glass-card rounded-2xl divide-y divide-white/[0.06] overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => onSelectTab("git")}
+                  className="w-full px-4 py-3 flex items-center justify-between gap-3 text-left hover:bg-white/[0.03] transition-colors"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span className="w-[34px] h-[34px] rounded-[10px] bg-[#8cf1fb]/15 text-[#8cf1fb] flex items-center justify-center shrink-0">
+                      <FolderGit2 className="w-[17px] h-[17px]" />
+                    </span>
+                    <div className="min-w-0">
+                      <div className="text-[14.5px] font-medium text-[#f4f4f5] truncate">
+                        {activeProjectName}
+                      </div>
+                      <div className="text-xs text-[#8e8d8a] font-mono truncate flex items-center gap-1.5">
+                        <GitBranch className="w-3 h-3 text-emerald-400 shrink-0" />
+                        <span>{gitStatus.branch || "main"}</span>
+                        {gitStatus.changedFiles.length > 0 && (
+                          <span className="text-amber-300">
+                            · {gitStatus.changedFiles.length} modified
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-zinc-500 shrink-0" />
+                </button>
+
+                {/* Bots in Conversation (Swarm Participants) */}
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setSwarmMembersOpen((v) => !v)}
+                    className="w-full px-4 py-3 flex items-center justify-between gap-3 text-left hover:bg-white/[0.03] transition-colors"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <span className="w-[34px] h-[34px] rounded-[10px] bg-purple-500/15 text-purple-300 flex items-center justify-center shrink-0">
+                        <Users className="w-[17px] h-[17px]" />
+                      </span>
+                      <div className="min-w-0">
+                        <div className="text-[14.5px] font-medium text-[#f4f4f5] truncate">
+                          Bots in Conversation ({chat.participantBotIds.length})
+                        </div>
+                        <div className="text-xs text-[#8e8d8a] truncate">
+                          Add or remove CLI Bots in this thread
+                        </div>
+                      </div>
+                    </div>
+                    <ChevronRight
+                      className={`w-4 h-4 text-zinc-500 transition-transform ${
+                        swarmMembersOpen ? "rotate-90" : ""
+                      }`}
+                    />
+                  </button>
+
+                  {swarmMembersOpen && (
+                    <div className="px-3 pb-3 pt-1 space-y-1 border-t border-white/[0.04]">
+                      {bots.map((b) => {
+                        const inChat = chat.participantBotIds.includes(b.id);
+                        return (
+                          <button
+                            key={b.id}
+                            type="button"
+                            onClick={() => onToggleBotInChat(b.id)}
+                            className={`w-full px-2.5 py-1.5 rounded-xl flex items-center justify-between text-xs transition-colors ${
+                              inChat
+                                ? "bg-white/[0.08] text-white"
+                                : "hover:bg-white/[0.04] text-zinc-400"
+                            }`}
+                          >
+                            <span className="flex items-center gap-2 min-w-0">
+                              <BotCharacterAvatar bot={b} size={22} />
+                              <span className="font-medium truncate">
+                                {b.name}
+                              </span>
+                              <span className="font-mono text-[10.5px] text-zinc-500">
+                                ({b.cliDriver})
+                              </span>
+                            </span>
+                            {inChat && (
+                              <Check className="w-3.5 h-3.5 text-[#8cf1fb]" />
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
 
               {/* Multi-Bot Swarm Room Controls */}
               <div className="space-y-2">
@@ -537,6 +647,17 @@ export function InspectorDrawer({
                       ))}
                     </div>
                   </div>
+
+                  {chat.messages.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => onClearChat(chat.id)}
+                      className="w-full px-4 py-2.5 flex items-center justify-between text-xs text-zinc-400 hover:text-red-300 hover:bg-white/[0.02] transition-colors"
+                    >
+                      <span>Clear conversation history</span>
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -656,10 +777,10 @@ export function InspectorDrawer({
                 </div>
               </div>
 
-              {/* Quick Launch into Omni Hub */}
+              {/* Quick Launch into Botfinity Hub */}
               <div className="space-y-2">
                 <span className="px-1.5 text-[13.5px] font-normal text-[#8e8d8a] block">
-                  Omni Platform
+                  Botfinity Hub
                 </span>
                 <div className="liquid-glass-card rounded-2xl divide-y divide-white/[0.06] overflow-hidden">
                   <button
@@ -699,6 +820,55 @@ export function InspectorDrawer({
 
           {activeTab === "git" && (
             <div className="space-y-5">
+              {/* Project Switcher Card */}
+              <div className="liquid-glass-card rounded-2xl p-4 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-medium text-[#8e8d8a]">
+                    Active Project
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onOpenOmniHub("projects")}
+                    className="text-xs text-cyan-300 hover:text-white"
+                  >
+                    Manage Projects
+                  </button>
+                </div>
+                <div className="space-y-1">
+                  {projects.map((p) => {
+                    const isCurrent = p.path === preferences.workspaceRoot;
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() =>
+                          onUpdatePreferences({
+                            ...preferences,
+                            workspaceRoot: p.path,
+                          })
+                        }
+                        className={`w-full px-3 py-2 rounded-xl flex items-center justify-between gap-2 text-left text-xs transition-colors ${
+                          isCurrent
+                            ? "bg-white/[0.08] text-white font-semibold"
+                            : "hover:bg-white/[0.04] text-zinc-300"
+                        }`}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate">{p.name}</div>
+                          <div className="text-[11px] font-mono text-zinc-400 truncate">
+                            {p.path}
+                          </div>
+                        </div>
+                        {isCurrent && (
+                          <Check className="w-4 h-4 text-[#8cf1fb] shrink-0" />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Git Branch & Commit Card */}
               <div className="liquid-glass-card rounded-2xl p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="min-w-0">

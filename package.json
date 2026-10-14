@@ -1,8 +1,8 @@
 {
-  "name": "omni-bot",
+  "name": "botfinity",
   "private": true,
   "version": "0.1.0",
-  "description": "Local multi-agent coding swarm & Grok Bot alternative for Claude Code, Codex, OpenCode, Cursor, Grok Build, and Pi",
+  "description": "Botfinity — Local multi-agent coding swarm & Grok Bot alternative for Claude Code, Codex, OpenCode, Cursor, Grok Build, and Pi",
   "type": "module",
   "scripts": {
     "dev": "vite",

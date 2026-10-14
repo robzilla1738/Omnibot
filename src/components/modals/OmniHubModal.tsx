@@ -305,15 +305,14 @@ export function OmniHubModal({
         <div className="w-[244px] shrink-0 bg-[#0e0e0e] border-r border-white/[0.07] p-4 flex flex-col justify-between">
           <div className="space-y-4">
             <div className="px-2 pt-1 flex items-center gap-2.5">
-              <BotCharacterAvatar
-                shape="omni-prism"
-                color="cyan"
-                size={30}
-                useHeroMascot
+              <img
+                src="/botfinity-gauntlet.png"
+                alt="Botfinity"
+                className="w-8 h-8 object-contain shrink-0"
               />
               <div className="min-w-0">
                 <div className="text-[15px] font-semibold text-white tracking-tight truncate">
-                  Omni Hub
+                  Botfinity Hub
                 </div>
                 <div className="text-[11.5px] text-zinc-400 truncate">
                   Bots, Projects &amp; Memory

@@ -14,10 +14,10 @@ use git_ops::{git_discard_file, git_stage_and_commit, read_file_diff};
 use orchestrator::{dispatch_chat_turn, SendMessageInput};
 use scanner::{test_cli_harness, CliDriverKind, CliHarnessTestResult};
 use server::{
-    create_chat_thread, delete_bot_profile, delete_chat_thread, delete_routine_entry,
-    delete_workspace_entry, spawn_local_server, stop_chat_runs, update_chat_thread,
-    update_omni_preferences, upsert_bot_profile, upsert_routine_entry, upsert_workspace_entry,
-    CreateChatInput, UpdateChatInput,
+    clear_chat_thread, create_chat_thread, delete_bot_profile, delete_chat_thread,
+    delete_routine_entry, delete_workspace_entry, spawn_local_server, stop_chat_runs,
+    update_chat_thread, update_omni_preferences, upsert_bot_profile, upsert_routine_entry,
+    upsert_workspace_entry, CreateChatInput, UpdateChatInput,
 };
 use state::{
     BotProfile, ChatThread, OmniPreferences, OmniSnapshot, RoutineEntry, SharedOmniState,
@@ -76,6 +76,14 @@ fn omni_update_chat(
     input: UpdateChatInput,
 ) -> Result<OmniSnapshot, String> {
     update_chat_thread(&state.0, input)
+}
+
+#[tauri::command]
+fn omni_clear_chat(
+    state: State<'_, ManagedOmniState>,
+    id: String,
+) -> Result<OmniSnapshot, String> {
+    clear_chat_thread(&state.0, &id)
 }
 
 #[tauri::command]
@@ -324,6 +332,7 @@ pub fn run() {
             omni_stop_chat,
             omni_create_chat,
             omni_update_chat,
+            omni_clear_chat,
             omni_delete_chat,
             omni_upsert_bot,
             omni_delete_bot,

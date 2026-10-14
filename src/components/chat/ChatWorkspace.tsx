@@ -6,14 +6,11 @@ import {
   ChevronDown,
   ChevronRight,
   Cpu,
-  FolderGit2,
-  GitBranch,
   Loader2,
   Plus,
   Sparkles,
   Square,
   Terminal,
-  Users,
   Wrench,
   X,
 } from "lucide-react";
@@ -25,9 +22,7 @@ import type {
   ChatMessage,
   ChatThread,
   CliHarnessInfo,
-  GitRepoStatus,
   LocalSkillItem,
-  WorkspaceEntry,
 } from "../../lib/types";
 import {
   BotCharacterAvatar,
@@ -40,15 +35,9 @@ export interface ChatWorkspaceProps {
   bots: BotProfile[];
   harnesses: CliHarnessInfo[];
   skills: LocalSkillItem[];
-  projects: WorkspaceEntry[];
-  activeProjectPath: string;
-  gitStatus: GitRepoStatus;
   activeRuns: ActiveBotRun[];
   inspectorOpen: boolean;
   onToggleInspector: () => void;
-  onOpenGitInspector: () => void;
-  onSelectProject: (path: string) => Promise<void>;
-  onOpenProjectsHub: () => void;
   onSendMessage: (params: {
     text: string;
     skillSlug?: string;
@@ -58,7 +47,6 @@ export interface ChatWorkspaceProps {
     parallelMode?: boolean;
   }) => Promise<void>;
   onStopChat: () => Promise<void>;
-  onToggleBotInChat: (botId: string) => Promise<void>;
 }
 
 const SWARM_SLASH_COMMANDS = [
@@ -88,23 +76,14 @@ export function ChatWorkspace({
   bots,
   harnesses,
   skills,
-  projects,
-  activeProjectPath,
-  gitStatus,
   activeRuns,
   inspectorOpen,
   onToggleInspector,
-  onOpenGitInspector,
-  onSelectProject,
-  onOpenProjectsHub,
   onSendMessage,
   onStopChat,
-  onToggleBotInChat,
 }: ChatWorkspaceProps) {
   const [input, setInput] = useState("");
   const [composerMenuOpen, setComposerMenuOpen] = useState(false);
-  const [addBotPopoverOpen, setAddBotPopoverOpen] = useState(false);
-  const [projectPopoverOpen, setProjectPopoverOpen] = useState(false);
   const [selectedSkill, setSelectedSkill] = useState<LocalSkillItem | null>(null);
   const [overrideBotId, setOverrideBotId] = useState<string | undefined>(undefined);
   const [overrideModel, setOverrideModel] = useState<string | undefined>(undefined);
@@ -132,12 +111,6 @@ export function ChatWorkspace({
     }
     return chatParticipants[0];
   }, [overrideBotId, bots, chatParticipants]);
-
-  const activeProjectName = useMemo(() => {
-    const match = projects.find((p) => p.path === activeProjectPath);
-    if (match) return match.name;
-    return activeProjectPath.split("/").filter(Boolean).pop() || "Project";
-  }, [projects, activeProjectPath]);
 
   const chatActiveRuns = useMemo(
     () => activeRuns.filter((r) => r.chatId === chat.id),
@@ -296,6 +269,8 @@ export function ChatWorkspace({
     [harnesses, activeSpeakerBot]
   );
 
+  const isEmpty = chat.messages.length === 0;
+
   return (
     <main className="relative flex-1 h-full bg-[#121212] overflow-hidden">
       {/* Top Progressive Blur & Soft Vignette Feather */}
@@ -304,265 +279,104 @@ export function ChatWorkspace({
         className="pointer-events-none absolute top-0 inset-x-0 h-24 chat-top-feather z-10"
       />
 
-      {/* Top Drag Region + Floating Liquid Glass Header Bar */}
+      {/* Minimal Top Drag Region — Single Centered Bot Name Pill */}
       <div
         data-tauri-drag-region
-        className="absolute top-0 inset-x-0 h-16 px-6 flex items-center justify-between z-20 pointer-events-auto"
+        className="absolute top-0 inset-x-0 h-16 flex items-center justify-center z-20 pointer-events-auto"
       >
-        {/* Left: Active Project Switcher + Git Branch Pill */}
-        <div className="flex items-center gap-2">
-          <div className="relative">
-            <button
-              type="button"
-              onClick={() => setProjectPopoverOpen((v) => !v)}
-              title="Switch active local Project repository"
-              className="h-8 px-3 rounded-full floating-header-pill flex items-center gap-2 text-xs text-zinc-200 hover:text-white active:scale-95"
-            >
-              <FolderGit2 className="w-3.5 h-3.5 text-[#8cf1fb]" />
-              <span className="font-medium truncate max-w-[130px]">
-                {activeProjectName}
-              </span>
-              <ChevronDown className="w-3 h-3 text-zinc-400" />
-            </button>
-
-            {projectPopoverOpen && (
-              <>
-                <div
-                  className="fixed inset-0 z-20"
-                  onClick={() => setProjectPopoverOpen(false)}
-                />
-                <div className="absolute left-0 mt-2 w-72 rounded-2xl liquid-glass-modal p-2.5 z-30 space-y-1.5 shadow-2xl">
-                  <div className="px-2 py-1 flex items-center justify-between text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
-                    <span>Local Projects</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setProjectPopoverOpen(false);
-                        onOpenProjectsHub();
-                      }}
-                      className="text-cyan-300 hover:text-white normal-case font-normal"
-                    >
-                      + Manage
-                    </button>
-                  </div>
-                  {projects.map((p) => {
-                    const isCurrent = p.path === activeProjectPath;
-                    return (
-                      <button
-                        key={p.id}
-                        type="button"
-                        onClick={async () => {
-                          setProjectPopoverOpen(false);
-                          await onSelectProject(p.path);
-                        }}
-                        className={`w-full px-2.5 py-2 rounded-xl flex items-center justify-between gap-2 text-left text-xs transition-colors ${
-                          isCurrent
-                            ? "liquid-glass-active text-white"
-                            : "hover:bg-white/[0.06] text-zinc-300"
-                        }`}
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="font-semibold truncate">{p.name}</div>
-                          <div className="text-[11px] font-mono text-zinc-400 truncate">
-                            {p.path}
-                          </div>
-                        </div>
-                        {isCurrent && (
-                          <Check className="w-4 h-4 text-[#8cf1fb] shrink-0" />
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              </>
-            )}
-          </div>
-
-          {gitStatus.isRepo && (
-            <button
-              type="button"
-              onClick={onOpenGitInspector}
-              title="Inspect Git branch, modified files & worktrees"
-              className="h-8 px-3 rounded-full floating-header-pill flex items-center gap-1.5 text-xs text-zinc-300 hover:text-white active:scale-95"
-            >
-              <GitBranch className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="font-mono font-medium truncate max-w-[110px]">
-                {gitStatus.branch}
-              </span>
-              {gitStatus.changedFiles.length > 0 && (
-                <span className="px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-300 text-[10.5px] font-semibold">
-                  {gitStatus.changedFiles.length}
-                </span>
-              )}
-            </button>
+        <button
+          type="button"
+          onClick={onToggleInspector}
+          title="Click to open Bot Settings, Swarm Members, Project & Git (Cmd+I)"
+          className={`px-4 py-1.5 rounded-full flex items-center gap-2.5 active:scale-[0.97] ${
+            inspectorOpen
+              ? "liquid-glass-active text-white"
+              : "floating-header-pill text-zinc-100"
+          }`}
+        >
+          {chatParticipants.length > 1 ? (
+            <div className="flex items-center -space-x-1.5">
+              {chatParticipants.slice(0, 4).map((b) => (
+                <BotCharacterAvatar key={b.id} bot={b} size={22} />
+              ))}
+            </div>
+          ) : (
+            activeSpeakerBot && (
+              <BotCharacterAvatar
+                bot={activeSpeakerBot}
+                size={24}
+                isStreaming={isStreaming}
+              />
+            )
           )}
-        </div>
-
-        {/* Center: Floating Bot / Swarm Header Pill */}
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={onToggleInspector}
-            title="Toggle Bot Settings, Swarm Config, Git Diffs & Computer (Cmd+I)"
-            className={`px-4 py-1.5 rounded-full flex items-center gap-2.5 active:scale-[0.97] ${
-              inspectorOpen
-                ? "liquid-glass-active text-white"
-                : "floating-header-pill text-zinc-100"
-            }`}
-          >
-            {chatParticipants.length > 1 ? (
-              <div className="flex items-center -space-x-1.5">
-                {chatParticipants.slice(0, 4).map((b) => (
-                  <BotCharacterAvatar key={b.id} bot={b} size={22} />
-                ))}
-              </div>
-            ) : (
-              activeSpeakerBot && (
-                <BotCharacterAvatar
-                  bot={activeSpeakerBot}
-                  size={24}
-                  useHeroMascot={activeSpeakerBot.isPrimary}
-                />
-              )
-            )}
-            <span className="text-[14.5px] font-semibold tracking-tight max-w-[260px] truncate">
-              {chat.isPrimary ? "Omni" : chat.title}
-            </span>
-            {chatParticipants.length === 1 && activeSpeakerBot && (
-              <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-white/[0.07] text-zinc-300">
-                {activeSpeakerBot.cliDriver}
-              </span>
-            )}
-          </button>
-
-          {/* Quick "+ Bots" Swarm Room Popover Trigger */}
-          <div className="relative">
-            <button
-              type="button"
-              onClick={() => setAddBotPopoverOpen((v) => !v)}
-              title="Add or remove Bots in this conversation (Swarm Room)"
-              className="h-8 px-2.5 rounded-full floating-header-pill flex items-center gap-1.5 text-xs text-zinc-300 hover:text-white active:scale-95"
-            >
-              <Users className="w-3.5 h-3.5" />
-              <span>{chatParticipants.length}</span>
-            </button>
-
-            {addBotPopoverOpen && (
-              <>
-                <div
-                  className="fixed inset-0 z-20"
-                  onClick={() => setAddBotPopoverOpen(false)}
-                />
-                <div className="absolute right-0 mt-2 w-64 rounded-2xl liquid-glass-modal p-2.5 z-30 space-y-1.5 shadow-2xl">
-                  <div className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
-                    Bots in this conversation
-                  </div>
-                  {bots.map((b) => {
-                    const inChat = chat.participantBotIds.includes(b.id);
-                    return (
-                      <button
-                        key={b.id}
-                        type="button"
-                        onClick={() => onToggleBotInChat(b.id)}
-                        className={`w-full px-2.5 py-2 rounded-xl flex items-center justify-between gap-2 text-left text-xs transition-colors ${
-                          inChat
-                            ? "liquid-glass-active text-white"
-                            : "hover:bg-white/[0.06] text-zinc-300"
-                        }`}
-                      >
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <BotCharacterAvatar bot={b} size={28} showCliBadge />
-                          <div className="min-w-0">
-                            <div className="font-semibold truncate">{b.name}</div>
-                            <div className="text-[11px] text-zinc-400 truncate">
-                              {b.cliDriver} · {b.roleTitle}
-                            </div>
-                          </div>
-                        </div>
-                        {inChat && (
-                          <Check className="w-4 h-4 text-[#8cf1fb] shrink-0" />
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-
-        {/* Right: Active Swarm Stop Button */}
-        <div className="flex items-center justify-end min-w-[90px]">
-          {isStreaming && (
-            <button
-              type="button"
-              onClick={onStopChat}
-              className="h-8 px-3 rounded-full bg-red-500/20 hover:bg-red-500/30 border border-red-400/35 text-red-200 text-xs font-medium flex items-center gap-1.5 active:scale-95 transition-colors"
-            >
-              <Square className="w-3 h-3 fill-current text-red-300" />
-              <span>Stop ({chatActiveRuns.length})</span>
-            </button>
-          )}
-        </div>
+          <span className="text-[14.5px] font-semibold tracking-tight max-w-[260px] truncate">
+            {chat.isPrimary ? activeSpeakerBot?.name || "Botfinity" : chat.title}
+          </span>
+        </button>
       </div>
 
       {/* Full-Height Scrollable Transcript Area */}
-      <div className="h-full w-full overflow-y-auto overflow-x-hidden chat-scroll-mask px-6 pt-20 pb-40">
-        <div className="max-w-[760px] mx-auto space-y-5">
-          {chat.messages.length === 0 && (
-            <EmptyChatHero
-              chat={chat}
-              participants={chatParticipants}
-              allBots={bots}
-              onSendStarter={(prompt) => handleSend(prompt)}
-            />
-          )}
+      <div
+        className={`h-full w-full overflow-y-auto overflow-x-hidden chat-scroll-mask px-6 ${
+          isEmpty ? "flex flex-col items-center justify-center" : "pt-20 pb-40"
+        }`}
+      >
+        {isEmpty ? (
+          <EmptyChatHero
+            chat={chat}
+            participants={chatParticipants}
+            allBots={bots}
+            onSendStarter={(prompt) => handleSend(prompt)}
+          />
+        ) : (
+          <div className="max-w-[740px] mx-auto space-y-5">
+            {chat.messages.map((msg) => (
+              <MessageCard
+                key={msg.id}
+                message={msg}
+                bots={bots}
+                onQuickHandoff={(targetBot, sourceText) => {
+                  const snippet = sourceText.slice(0, 500);
+                  handleSend(
+                    `@${targetBot.name} review @${msg.authorName || "Bot"}'s response above and follow up or improve on it:\n\n> ${snippet.replace(/\n/g, "\n> ")}`,
+                    targetBot.id
+                  );
+                }}
+              />
+            ))}
 
-          {chat.messages.map((msg) => (
-            <MessageCard
-              key={msg.id}
-              message={msg}
-              bots={bots}
-              onQuickHandoff={(targetBot, sourceText) => {
-                const snippet = sourceText.slice(0, 500);
-                handleSend(
-                  `@${targetBot.name} review @${msg.authorName || "Bot"}'s response above and follow up or improve on it:\n\n> ${snippet.replace(/\n/g, "\n> ")}`,
-                  targetBot.id
-                );
-              }}
-            />
-          ))}
+            {isStreaming && (
+              <div className="flex flex-wrap items-center gap-2.5 text-xs text-zinc-300 pl-1 py-1">
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-[#8cf1fb]" />
+                <span>
+                  {chatActiveRuns
+                    .map(
+                      (r) =>
+                        `@${r.botName} is ${
+                          r.activity === "thinking"
+                            ? "thinking"
+                            : r.activity.startsWith("tool:")
+                              ? `running ${r.activity.slice(5)}`
+                              : "responding"
+                        }`
+                    )
+                    .join(" · ")}
+                  ...
+                </span>
+                <button
+                  type="button"
+                  onClick={onStopChat}
+                  className="ml-1 px-2.5 py-0.5 rounded-full liquid-glass-chip text-zinc-200 hover:text-white text-[11px] inline-flex items-center gap-1"
+                >
+                  <Square className="w-2.5 h-2.5 fill-current" />
+                  <span>Stop</span>
+                </button>
+              </div>
+            )}
 
-          {isStreaming && (
-            <div className="flex flex-wrap items-center gap-2.5 text-xs text-zinc-300 pl-1 py-1">
-              <Loader2 className="w-3.5 h-3.5 animate-spin text-[#8cf1fb]" />
-              <span>
-                {chatActiveRuns
-                  .map(
-                    (r) =>
-                      `@${r.botName} (${r.cliDriver}) is ${
-                        r.activity === "thinking"
-                          ? "thinking"
-                          : r.activity.startsWith("tool:")
-                            ? `running ${r.activity.slice(5)}`
-                            : "responding"
-                      }`
-                  )
-                  .join(" · ")}
-                ...
-              </span>
-              <button
-                type="button"
-                onClick={onStopChat}
-                className="ml-1 px-2.5 py-0.5 rounded-full liquid-glass-chip text-zinc-200 hover:text-white text-[11px]"
-              >
-                Stop
-              </button>
-            </div>
-          )}
-
-          <div ref={transcriptEndRef} className="h-10 shrink-0" />
-        </div>
+            <div ref={transcriptEndRef} className="h-10 shrink-0" />
+          </div>
+        )}
       </div>
 
       {/* Bottom Progressive Blur & Soft Vignette Feather */}
@@ -573,7 +387,7 @@ export function ChatWorkspace({
 
       {/* Floating Bottom Composer Area with Liquid Glass */}
       <div className="absolute bottom-0 inset-x-0 px-5 pb-4 pt-2 z-20 pointer-events-none">
-        <div className="max-w-[760px] mx-auto relative pointer-events-auto">
+        <div className="max-w-[740px] mx-auto relative pointer-events-auto">
           {/* `/` Slash Command & Skill Autocomplete Popover */}
           {slashMatch && matchingSlashItems.length > 0 && (
             <div className="mb-2.5 rounded-2xl liquid-glass-modal p-2 shadow-2xl space-y-1 max-h-64 overflow-y-auto">
@@ -656,11 +470,7 @@ export function ChatWorkspace({
                         <Sparkles className="w-4 h-4" />
                       </div>
                     ) : (
-                      <BotCharacterAvatar
-                        bot={entry.bot}
-                        size={32}
-                        showCliBadge
-                      />
+                      <BotCharacterAvatar bot={entry.bot} size={32} />
                     )}
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
@@ -980,7 +790,7 @@ export function ChatWorkspace({
               placeholder={
                 chat.isGroup
                   ? `Message Swarm (${chatParticipants.map((b) => `@${b.name}`).join(", ")}) — type @ to hand off, / for skills`
-                  : `Message ${activeSpeakerBot?.name || "Omni"} (${activeSpeakerBot?.cliDriver || "cli"}) — type @ to summon another Bot, / for skills`
+                  : `Message ${activeSpeakerBot?.name || "Botfinity"} — type @ to summon another Bot, / for skills`
               }
               className="flex-1 bg-transparent text-[15px] text-zinc-100 placeholder:text-zinc-500 focus:outline-none"
             />
@@ -1001,6 +811,9 @@ export function ChatWorkspace({
   );
 }
 
+/**
+ * Vertically & horizontally centered minimal empty state hero.
+ */
 function EmptyChatHero({
   chat,
   participants,
@@ -1021,68 +834,74 @@ function EmptyChatHero({
   const starters = chat.isGroup
     ? [
         {
-          title: "Architecture & Implementation Handoff",
-          prompt: `@${lead?.name || "Claude"} design a clean implementation plan for our next feature, then hand off to @${second?.name || "Codex"} to review and verify edge cases.`,
+          label: "Plan & cross-review",
+          prompt: `@${lead?.name || "Claude"} propose a clean plan for our next task, then hand off to @${second?.name || "Codex"} to review edge cases.`,
         },
         {
-          title: "Parallel Swarm Audit (@all)",
+          label: "Parallel Swarm audit (@all)",
           prompt:
-            "@all Inspect the current project structure and report the top 2 improvements from your perspective.",
+            "@all Inspect this project and share your top 2 highest-leverage improvements.",
+        },
+        {
+          label: "Review git diff",
+          prompt:
+            "@all Review uncommitted git changes in this repository and flag any bugs.",
         },
       ]
     : [
         {
-          title: `Analyze Project with ${lead?.name || "Bot"}`,
+          label: "Summarize project & git status",
           prompt:
             "Summarize the architecture of this project and check `git status` for any pending changes.",
         },
         {
-          title: `Collaborate with @${second?.name || "Codex"}`,
-          prompt: `Review the codebase for any bugs or code smells, and hand off to @${second?.name || "Codex"} to double-check your findings.`,
+          label: `Pair with @${second?.name || "Codex"}`,
+          prompt: `Audit the codebase for bugs or tech debt, then hand off to @${second?.name || "Codex"} to verify your findings.`,
+        },
+        {
+          label: "Review recent changes",
+          prompt: "Inspect recent git commits and diffs for any issues.",
         },
       ];
 
   return (
-    <div className="pt-12 pb-6 flex flex-col items-center text-center space-y-4">
+    <div className="flex flex-col items-center justify-center text-center max-w-lg mx-auto px-4 -mt-6 space-y-5">
       {participants.length > 1 ? (
         <div className="flex items-center -space-x-3">
           {participants.map((b) => (
-            <BotCharacterAvatar key={b.id} bot={b} size={62} showCliBadge />
+            <BotCharacterAvatar key={b.id} bot={b} size={64} />
           ))}
         </div>
       ) : (
         lead && (
           <BotCharacterAvatar
             bot={lead}
-            size={72}
-            showCliBadge={!lead.isPrimary}
+            size={76}
             showStarBadge={lead.isPrimary}
-            useHeroMascot={lead.isPrimary}
           />
         )
       )}
 
-      <div className="space-y-1 max-w-md">
-        <h2 className="text-lg font-semibold text-white">{chat.title}</h2>
-        <p className="text-xs text-[#8e8d8a] leading-relaxed">
+      <div className="space-y-1">
+        <h2 className="text-[20px] font-semibold text-white tracking-tight">
+          {chat.title}
+        </h2>
+        <p className="text-[13.5px] text-[#8e8d8a]">
           {chat.isGroup
-            ? `Multi-Bot Swarm Room with ${participants.map((b) => `@${b.name} (${b.cliDriver})`).join(", ")}. Bots can talk to each other and hand off work automatically.`
-            : lead?.description}
+            ? participants.map((b) => `@${b.name}`).join(" · ")
+            : lead?.roleTitle}
         </p>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 w-full max-w-[600px] pt-2">
+      <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
         {starters.map((s) => (
           <button
-            key={s.title}
+            key={s.label}
             type="button"
             onClick={() => onSendStarter(s.prompt)}
-            className="p-3.5 rounded-2xl liquid-glass-card hover:bg-[#222222] text-left space-y-1 transition-all active:scale-[0.99]"
+            className="px-4 py-2 rounded-full liquid-glass-pill text-[13px] font-medium text-zinc-200 hover:text-white active:scale-95"
           >
-            <div className="text-[13.5px] font-semibold text-zinc-100">
-              {s.title}
-            </div>
-            <div className="text-xs text-[#8e8d8a] line-clamp-2">{s.prompt}</div>
+            {s.label}
           </button>
         ))}
       </div>
@@ -1110,6 +929,7 @@ function MessageCard({
   const renderedHtml = useMemo(() => {
     const cleanText = message.text
       .replace(/<handoff[\s\S]*?<\/handoff>/gi, "")
+      .replace(/<handoff[\s\S]*$/gi, "")
       .trim();
     if (!cleanText) return "";
     const rawHtml = marked.parse(cleanText, { async: false }) as string;
@@ -1149,15 +969,13 @@ function MessageCard({
           color={message.authorColor ?? authorBot?.color ?? "cyan"}
           cliDriver={message.cliDriver ?? authorBot?.cliDriver}
           isPrimary={authorBot?.isPrimary}
-          size={38}
+          size={36}
           isStreaming={message.status === "streaming"}
-          showCliBadge={!authorBot?.isPrimary}
           showStarBadge={authorBot?.isPrimary}
-          useHeroMascot={authorBot?.isPrimary}
         />
       </div>
 
-      <div className="flex-1 max-w-[640px] min-w-0 space-y-2">
+      <div className="flex-1 max-w-[620px] min-w-0 space-y-2">
         <div className="w-full overflow-hidden rounded-2xl liquid-glass-card px-5 py-4 text-[15px] text-zinc-100 space-y-3 break-words">
           {/* Bot Identity & CLI Harness Header Bar */}
           <div className="flex items-center justify-between gap-2 pb-1 border-b border-white/[0.05]">
@@ -1166,11 +984,11 @@ function MessageCard({
                 {message.authorName || authorBot?.name || "Bot"}
               </span>
               {message.cliDriver && (
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white/[0.06] text-[11px] font-mono text-zinc-300">
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white/[0.05] text-[11px] font-mono text-zinc-400">
                   <CliProviderGlyph driver={message.cliDriver} size={11} />
                   <span>{message.cliDriver}</span>
                   {message.model && (
-                    <span className="text-zinc-400">· {message.model}</span>
+                    <span className="text-zinc-500">· {message.model}</span>
                   )}
                 </span>
               )}

@@ -72,6 +72,7 @@ pub async fn spawn_local_server() -> Result<
         .route("/api/chat/stop", post(http_stop_chat))
         .route("/api/chat/create", post(http_create_chat))
         .route("/api/chat/update", post(http_update_chat))
+        .route("/api/chat/clear", post(http_clear_chat))
         .route("/api/chat/delete", post(http_delete_chat))
         .route("/api/bot/upsert", post(http_upsert_bot))
         .route("/api/bot/delete", post(http_delete_bot))
@@ -347,6 +348,32 @@ async fn http_update_chat(
 #[serde(rename_all = "camelCase")]
 pub struct IdInput {
     pub id: String,
+}
+
+pub fn clear_chat_thread(state: &SharedOmniState, id: &str) -> Result<OmniSnapshot, String> {
+    let mut guard = state
+        .write()
+        .map_err(|_| "State lock poisoned".to_string())?;
+    if let Some(chat) = guard.store.chats.iter_mut().find(|c| c.id == id) {
+        chat.messages.clear();
+        chat.native_sessions.clear();
+        chat.updated_at_ms = now_ms();
+    }
+    let _ = guard.persist();
+    guard.emit(OmniStreamEvent::StateUpdated {
+        chat_id: Some(id.to_string()),
+    });
+    Ok(guard.snapshot())
+}
+
+async fn http_clear_chat(
+    State(state): State<SharedOmniState>,
+    Json(input): Json<IdInput>,
+) -> impl IntoResponse {
+    match clear_chat_thread(&state, &input.id) {
+        Ok(snap) => Json(snap).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
 }
 
 pub fn delete_chat_thread(state: &SharedOmniState, id: &str) -> Result<OmniSnapshot, String> {
