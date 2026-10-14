@@ -25,7 +25,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "fs", "process", "time", "io-util", "signal"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 axum = { version = "0.7" }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.7", features = ["cors"] }
 futures-util = "0.3"
 dirs = "5"
 uuid = { version = "1", features = ["v4"] }
