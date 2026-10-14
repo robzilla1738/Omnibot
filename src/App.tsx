@@ -61,7 +61,7 @@ export function App() {
   if (bootError) {
     return (
       <div className="h-screen w-screen bg-[#121212] text-zinc-200 flex flex-col items-center justify-center p-6 text-center">
-        <BotCharacterAvatar shape="blob" color="cyan" size={56} useHeroMascot />
+        <BotCharacterAvatar shape="omni-prism" color="cyan" size={64} useHeroMascot />
         <h2 className="mt-4 text-base font-semibold text-white">
           Omni Bot Local Daemon Offline
         </h2>
@@ -74,9 +74,9 @@ export function App() {
     return (
       <div className="h-screen w-screen bg-[#121212] flex flex-col items-center justify-center gap-3">
         <BotCharacterAvatar
-          shape="blob"
+          shape="omni-prism"
           color="cyan"
-          size={52}
+          size={58}
           showStarBadge
           useHeroMascot
         />

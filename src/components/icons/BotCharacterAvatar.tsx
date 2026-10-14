@@ -1,25 +1,40 @@
+import {
+  BarChart3,
+  Bot,
+  Code2,
+  Cpu,
+  FileCode2,
+  FolderGit2,
+  GitBranch,
+  Globe,
+  Palette,
+  ShieldCheck,
+  Sparkles,
+  Terminal,
+} from "lucide-react";
 import type React from "react";
 import { useEffect, useId, useMemo, useState } from "react";
 import type { BotColor, BotShape, CliDriverKind } from "../../lib/types";
 import {
-  AgentIcon,
-  BuildingsIcon,
-  ChartIcon,
   ClaudeIcon,
-  Cpu,
-  FileCode,
   GeminiIcon,
-  Globe,
   GrokIcon,
   OpenaiIcon,
-  PencilAiIcon,
-  ShieldCheck,
-  Sparkles,
-  TerminalIcon,
-  VibeCodingIcon,
 } from "./OmarchyIcons";
 
-export const BOT_SHAPES: Array<{ id: BotShape; label: string }> = [
+export const BOT_SHAPES: Array<{ id: BotShape; label: string; isProviderLogo?: boolean }> = [
+  // Bespoke Provider-Logo Bot PFPs
+  { id: "omni-prism", label: "Omni Prism", isProviderLogo: true },
+  { id: "claude-spark", label: "Claude Sunburst", isProviderLogo: true },
+  { id: "codex-bloom", label: "Codex Knot", isProviderLogo: true },
+  { id: "grok-orbit", label: "Grok Orbit", isProviderLogo: true },
+  { id: "cursor-cube", label: "Cursor Cube", isProviderLogo: true },
+  { id: "opencode-terminal", label: "OpenCode Terminal", isProviderLogo: true },
+  { id: "pi-crest", label: "Pi Crest", isProviderLogo: true },
+  { id: "gemini-star", label: "Gemini Star", isProviderLogo: true },
+  { id: "ollama-llama", label: "Ollama Llama", isProviderLogo: true },
+  { id: "aider-git", label: "Aider Git", isProviderLogo: true },
+  // Classic Procedural Grok Bot Shapes
   { id: "blob", label: "Blob" },
   { id: "squircle", label: "Squircle" },
   { id: "hex", label: "Hex" },
@@ -55,15 +70,15 @@ export const BOT_COLORS: Array<{
   swatch: string;
 }> = [
   { id: "cyan", label: "Cyan", from: "#58D3C5", to: "#00A592", swatch: "#1CC3B0" },
-  { id: "orange", label: "Orange", from: "#FF8838", to: "#C24E00", swatch: "#FF6700" },
-  { id: "green", label: "Green", from: "#1CCF82", to: "#008048", swatch: "#00C972" },
-  { id: "blue", label: "Blue", from: "#459FFE", to: "#0C64C1", swatch: "#1084FE" },
+  { id: "orange", label: "Terracotta", from: "#F28F6B", to: "#B55335", swatch: "#D97757" },
+  { id: "green", label: "Emerald", from: "#1CCF82", to: "#008048", swatch: "#10A37F" },
+  { id: "blue", label: "Azure", from: "#459FFE", to: "#0C64C1", swatch: "#1084FE" },
   { id: "violet", label: "Violet", from: "#B792FE", to: "#5C39A1", swatch: "#9159FE" },
   { id: "magenta", label: "Magenta", from: "#FF77BE", to: "#A21E62", swatch: "#FF309B" },
-  { id: "yellow", label: "Yellow", from: "#FFAF38", to: "#C27400", swatch: "#FF9800" },
-  { id: "red", label: "Red", from: "#FF5667", to: "#A21826", swatch: "#FF263C" },
-  { id: "brown", label: "Brown", from: "#AE8968", to: "#604227", swatch: "#936439" },
-  { id: "gray", label: "Silver", from: "#E4E4E7", to: "#71717A", swatch: "#A1A1AA" },
+  { id: "yellow", label: "Amber", from: "#FFAF38", to: "#C27400", swatch: "#FF9800" },
+  { id: "red", label: "Crimson", from: "#FF5667", to: "#A21826", swatch: "#FF263C" },
+  { id: "brown", label: "Bronze", from: "#AE8968", to: "#604227", swatch: "#936439" },
+  { id: "gray", label: "Titanium", from: "#F4F4F5", to: "#71717A", swatch: "#A1A1AA" },
   { id: "black", label: "Obsidian", from: "#52525B", to: "#18181B", swatch: "#27272A" },
 ];
 
@@ -440,9 +455,57 @@ export interface BotCharacterAvatarProps {
   className?: string;
 }
 
+function resolveEffectiveMascotShape(
+  rawShape: string,
+  isPrimary: boolean,
+  useHeroMascot: boolean,
+  cliDriver?: CliDriverKind
+): string {
+  if (isPrimary || useHeroMascot || rawShape === "omni-prism") {
+    return "omni-prism";
+  }
+  if (rawShape.includes("-")) {
+    return rawShape;
+  }
+  // If using legacy default shape for a known CLI driver, upgrade to its provider-logo Bot PFP
+  if (cliDriver) {
+    switch (cliDriver) {
+      case "claude":
+        if (rawShape === "squircle") return "claude-spark";
+        break;
+      case "codex":
+        if (rawShape === "hex") return "codex-bloom";
+        break;
+      case "opencode":
+        if (rawShape === "blob") return "opencode-terminal";
+        break;
+      case "cursor":
+        if (rawShape === "gem") return "cursor-cube";
+        break;
+      case "grok":
+        if (rawShape === "star") return "grok-orbit";
+        break;
+      case "pi":
+        if (rawShape === "pebble") return "pi-crest";
+        break;
+      case "gemini":
+        if (rawShape === "sparkle") return "gemini-star";
+        break;
+      case "ollama":
+        if (rawShape === "cloud") return "ollama-llama";
+        break;
+      case "aider":
+        if (rawShape === "shield") return "aider-git";
+        break;
+    }
+  }
+  return rawShape;
+}
+
 /**
- * Grok Bot + Omni Bot procedural character avatar with 25 mathematical shapes,
- * 11 color gradients, animated blinking & expressive capsule eyes, and CLI badges.
+ * Custom Provider-Logo Bot PFP & Grok Bot Procedural Character Avatar Engine.
+ * Each provider (Omni, Claude, Codex, Grok, Cursor, OpenCode, Pi, Gemini, Ollama, Aider)
+ * has a bespoke, logo-inspired Bot mascot with animated blinking & gaze eyes.
  */
 export function BotCharacterAvatar({
   bot,
@@ -457,23 +520,27 @@ export function BotCharacterAvatar({
   useHeroMascot = false,
   className = "",
 }: BotCharacterAvatarProps): React.ReactElement {
-  const gradId = useId();
-  const shape = propShape ?? bot?.shape ?? "blob";
-  const color = propColor ?? bot?.color ?? "cyan";
+  const uid = useId().replace(/:/g, "");
   const isPrimary = propIsPrimary ?? bot?.isPrimary ?? false;
   const cliDriver = propCliDriver ?? bot?.cliDriver;
+  const rawShape = propShape ?? bot?.shape ?? (isPrimary ? "omni-prism" : "blob");
+  const color = propColor ?? bot?.color ?? "cyan";
+
+  const effectiveShape = resolveEffectiveMascotShape(
+    rawShape,
+    isPrimary,
+    useHeroMascot,
+    cliDriver
+  );
 
   const [isBlinking, setIsBlinking] = useState(false);
 
   useEffect(() => {
-    const scheduleBlink = () => {
-      const delay = 2800 + Math.random() * 4200;
-      return setTimeout(() => {
-        setIsBlinking(true);
-        setTimeout(() => setIsBlinking(false), 150);
-      }, delay);
-    };
-    const timer = scheduleBlink();
+    const delay = 2600 + Math.random() * 4200;
+    const timer = setTimeout(() => {
+      setIsBlinking(true);
+      setTimeout(() => setIsBlinking(false), 145);
+    }, delay);
     return () => clearTimeout(timer);
   }, [isBlinking]);
 
@@ -482,49 +549,8 @@ export function BotCharacterAvatar({
     [color]
   );
 
-  const svgPath = useMemo(() => getShapeSvgPath(shape), [shape]);
-
-  if ((isPrimary || useHeroMascot) && shape === "blob" && color === "cyan") {
-    return (
-      <div
-        className={`relative inline-flex items-center justify-center select-none shrink-0 ${className}`}
-        style={{ width: size, height: size }}
-      >
-        <img
-          src="/omni-character.png"
-          alt="Omni"
-          draggable={false}
-          className={`w-full h-full object-contain select-none pointer-events-none transition-transform duration-300 ${
-            isStreaming ? "scale-105 animate-pulse" : ""
-          }`}
-        />
-        {(showStarBadge || isPrimary) && (
-          <span
-            className="absolute flex items-center justify-center rounded-full bg-[#e88827] text-white shadow-md ring-2 ring-[#0e0e0e]"
-            style={{
-              width: Math.max(14, Math.round(size * 0.28)),
-              height: Math.max(14, Math.round(size * 0.28)),
-              right: Math.round(size * 0.02),
-              bottom: Math.round(size * 0.02),
-            }}
-          >
-            <svg
-              width={Math.max(8, Math.round(size * 0.16))}
-              height={Math.max(8, Math.round(size * 0.16))}
-              viewBox="0 0 16 16"
-              fill="currentColor"
-            >
-              <path d="M8 1.3l1.95 4.08 4.5.62-3.27 3.15.79 4.48L8 11.5l-3.97 2.13.79-4.48L1.55 6l4.5-.62L8 1.3z" />
-            </svg>
-          </span>
-        )}
-      </div>
-    );
-  }
-
-  const eyeHeight = isBlinking ? 6 : isStreaming ? 30 : 38;
-  const eyeY = CENTER - eyeHeight / 2 - 4;
-  const eyeOffsetX = isStreaming ? 4 : 0;
+  const eyeScaleY = isBlinking ? 0.14 : isStreaming ? 0.84 : 1;
+  const eyeShiftX = isStreaming ? 4 : 0;
 
   return (
     <div
@@ -534,55 +560,23 @@ export function BotCharacterAvatar({
       <svg
         width={size}
         height={size}
-        viewBox="0 0 228.54 228.54"
+        viewBox="0 0 240 240"
         className={`overflow-visible transition-transform duration-300 ${
-          isStreaming ? "scale-[1.04]" : ""
+          isStreaming ? "scale-[1.05]" : ""
         }`}
       >
-        <defs>
-          <linearGradient id={gradId} x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stopColor={palette.from} />
-            <stop offset="100%" stopColor={palette.to} />
-          </linearGradient>
-        </defs>
-
-        {/* Body silhouette */}
-        <path
-          d={svgPath}
-          fill={`url(#${gradId})`}
-          stroke="rgba(255,255,255,0.16)"
-          strokeWidth="4"
-        />
-
-        {/* Expressive Capsule Eyes */}
-        <g
-          style={{
-            transition: "transform 180ms ease, height 120ms ease",
-            transform: `translate(${eyeOffsetX}px, 0px)`,
-          }}
-        >
-          <rect
-            x={CENTER - 36}
-            y={eyeY}
-            width={18}
-            height={eyeHeight}
-            rx={9}
-            fill="#09090b"
-          />
-          <rect
-            x={CENTER + 18}
-            y={eyeY}
-            width={18}
-            height={eyeHeight}
-            rx={9}
-            fill="#09090b"
-          />
-        </g>
+        {renderProviderOrCustomMascot(
+          effectiveShape,
+          uid,
+          palette,
+          eyeScaleY,
+          eyeShiftX
+        )}
       </svg>
 
       {showStarBadge && (
         <span
-          className="absolute flex items-center justify-center rounded-full bg-[#e88827] text-white shadow-md ring-2 ring-[#0e0e0e]"
+          className="absolute flex items-center justify-center rounded-full bg-gradient-to-br from-[#38BDF8] to-[#6366F1] text-white shadow-md ring-2 ring-[#0e0e0e]"
           style={{
             width: Math.max(14, Math.round(size * 0.28)),
             height: Math.max(14, Math.round(size * 0.28)),
@@ -590,20 +584,18 @@ export function BotCharacterAvatar({
             bottom: -1,
           }}
         >
-          <svg
-            width={Math.max(8, Math.round(size * 0.16))}
-            height={Math.max(8, Math.round(size * 0.16))}
-            viewBox="0 0 16 16"
-            fill="currentColor"
-          >
-            <path d="M8 1.3l1.95 4.08 4.5.62-3.27 3.15.79 4.48L8 11.5l-3.97 2.13.79-4.48L1.55 6l4.5-.62L8 1.3z" />
-          </svg>
+          <Sparkles
+            style={{
+              width: Math.max(8, Math.round(size * 0.16)),
+              height: Math.max(8, Math.round(size * 0.16)),
+            }}
+          />
         </span>
       )}
 
       {showCliBadge && cliDriver && !showStarBadge && (
         <span
-          className="absolute flex items-center justify-center rounded-full bg-[#161618] text-white shadow-md ring-2 ring-[#0e0e0e]"
+          className="absolute flex items-center justify-center rounded-full bg-[#141418] text-white shadow-md ring-2 ring-[#0e0e0e]"
           style={{
             width: Math.max(15, Math.round(size * 0.34)),
             height: Math.max(15, Math.round(size * 0.34)),
@@ -613,12 +605,427 @@ export function BotCharacterAvatar({
         >
           <CliProviderGlyph
             driver={cliDriver}
-            size={Math.max(9, Math.round(size * 0.21))}
+            size={Math.max(9, Math.round(size * 0.2))}
           />
         </span>
       )}
     </div>
   );
+}
+
+function renderBotEyes(
+  cx: number,
+  cy: number,
+  eyeScaleY: number,
+  eyeShiftX: number,
+  eyeColor = "#09090B",
+  glintColor = "#FFFFFF",
+  gap = 24,
+  w = 16,
+  h = 34
+) {
+  const actualH = Math.max(4, h * eyeScaleY);
+  const topY = cy - actualH / 2;
+  const leftX = cx - gap - w / 2 + eyeShiftX;
+  const rightX = cx + gap - w / 2 + eyeShiftX;
+
+  return (
+    <g style={{ transition: "all 140ms ease" }}>
+      <rect x={leftX} y={topY} width={w} height={actualH} rx={w / 2} fill={eyeColor} />
+      <rect x={rightX} y={topY} width={w} height={actualH} rx={w / 2} fill={eyeColor} />
+      {eyeScaleY > 0.4 && (
+        <>
+          <circle cx={leftX + w * 0.36} cy={topY + actualH * 0.26} r={w * 0.18} fill={glintColor} opacity={0.9} />
+          <circle cx={rightX + w * 0.36} cy={topY + actualH * 0.26} r={w * 0.18} fill={glintColor} opacity={0.9} />
+        </>
+      )}
+    </g>
+  );
+}
+
+function renderProviderOrCustomMascot(
+  shape: string,
+  uid: string,
+  palette: { from: string; to: string },
+  eyeScaleY: number,
+  eyeShiftX: number
+): React.ReactNode {
+  switch (shape) {
+    // 1. OMNI PRISM BOT (Bespoke Lead Coordinator Mascot)
+    case "omni-prism":
+      return (
+        <g>
+          <defs>
+            <linearGradient id={`omni-b-${uid}`} x1="30" y1="20" x2="210" y2="220" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#A855F7" />
+              <stop offset="48%" stopColor="#6366F1" />
+              <stop offset="100%" stopColor="#06B6D4" />
+            </linearGradient>
+            <linearGradient id={`omni-r-${uid}`} x1="16" y1="120" x2="224" y2="120" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#F97316" />
+              <stop offset="45%" stopColor="#EC4899" />
+              <stop offset="100%" stopColor="#22D3EE" />
+            </linearGradient>
+          </defs>
+          {/* Back orbital arc */}
+          <g transform="rotate(-18 120 124)">
+            <path d="M 18 124 A 102 36 0 0 1 222 124" stroke={`url(#omni-r-${uid})`} strokeWidth="8" strokeOpacity="0.4" fill="none" />
+          </g>
+          {/* Antenna */}
+          <path d="M 120 22 L 120 42" stroke="#67E8F9" strokeWidth="6" strokeLinecap="round" />
+          <circle cx="120" cy="18" r="9" fill="#67E8F9" />
+          {/* Sculpted Prism Head */}
+          <path
+            d="M 120 38 C 168 38, 202 68, 206 114 C 210 156, 192 198, 162 214 C 144 224, 132 226, 120 226 C 108 226, 96 224, 78 214 C 48 198, 30 156, 34 114 C 38 68, 72 38, 120 38 Z"
+            fill={`url(#omni-b-${uid})`}
+            stroke="rgba(255,255,255,0.22)"
+            strokeWidth="3"
+          />
+          {/* Inner Visor */}
+          <rect x="58" y="88" width="124" height="68" rx="32" fill="#0B0B14" stroke="rgba(255,255,255,0.25)" strokeWidth="2.5" />
+          {renderBotEyes(120, 122, eyeScaleY, eyeShiftX, "#67E8F9", "#FFFFFF", 22, 16, 32)}
+          {/* Front orbital arc + satellite nodes */}
+          <g transform="rotate(-18 120 124)">
+            <path d="M 222 124 A 102 36 0 0 1 18 124" stroke={`url(#omni-r-${uid})`} strokeWidth="9" strokeLinecap="round" fill="none" />
+            <circle cx="22" cy="124" r="9" fill="#F97316" stroke="#0E0E14" strokeWidth="3" />
+            <circle cx="218" cy="124" r="9" fill="#10B981" stroke="#0E0E14" strokeWidth="3" />
+            <circle cx="120" cy="160" r="8" fill="#22D3EE" stroke="#0E0E14" strokeWidth="3" />
+          </g>
+        </g>
+      );
+
+    // 2. CLAUDE SPARK BOT (Anthropic 12-Ray Sunburst Mascot)
+    case "claude-spark": {
+      const rays = 12;
+      const pts: Array<[number, number]> = [];
+      for (let i = 0; i < rays * 2; i++) {
+        const ang = -Math.PI / 2 + (i / (rays * 2)) * TWO_PI;
+        const r = i % 2 === 0 ? 108 : 74;
+        pts.push([120 + Math.cos(ang) * r, 120 + Math.sin(ang) * r]);
+      }
+      const burstPath = roundedPolygon(pts, 11);
+      return (
+        <g>
+          <defs>
+            <linearGradient id={`claude-${uid}`} x1="24" y1="20" x2="216" y2="220" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#F59E7A" />
+              <stop offset="50%" stopColor="#D97757" />
+              <stop offset="100%" stopColor="#A64629" />
+            </linearGradient>
+          </defs>
+          <path
+            d={burstPath}
+            fill={`url(#claude-${uid})`}
+            stroke="rgba(255,255,255,0.22)"
+            strokeWidth="3"
+          />
+          <circle cx="120" cy="122" r="56" fill="#23120B" fillOpacity="0.22" />
+          {renderBotEyes(120, 120, eyeScaleY, eyeShiftX, "#180C07", "#FFD8C7", 22, 16, 34)}
+        </g>
+      );
+    }
+
+    // 3. CODEX BLOOM BOT (OpenAI 6-Fold Interlocking Hexagonal Blossom Mascot)
+    case "codex-bloom": {
+      const lobes: Array<[number, number, number]> = [[120, 120, 68]];
+      for (let i = 0; i < 6; i++) {
+        const ang = (i / 6) * TWO_PI;
+        lobes.push([120 + Math.cos(ang) * 44, 120 + Math.sin(ang) * 44, 54]);
+      }
+      const bloomPath = metaballUnion(
+        lobes.map(([cx, cy, r]) => [cx - 120 + CENTER, cy - 120 + CENTER, r])
+      );
+      return (
+        <g>
+          <defs>
+            <linearGradient id={`codex-${uid}`} x1="24" y1="24" x2="216" y2="216" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#34D399" />
+              <stop offset="55%" stopColor="#10A37F" />
+              <stop offset="100%" stopColor="#065F46" />
+            </linearGradient>
+          </defs>
+          <g transform={`translate(${120 - CENTER}, ${120 - CENTER})`}>
+            <path
+              d={bloomPath}
+              fill={`url(#codex-${uid})`}
+              stroke="rgba(255,255,255,0.22)"
+              strokeWidth="3.5"
+            />
+          </g>
+          {/* OpenAI Geometric Knot Inner Hexagon Ring */}
+          <polygon
+            points="120,56 175,88 175,152 120,184 65,152 65,88"
+            fill="#052E22"
+            fillOpacity="0.45"
+            stroke="rgba(255,255,255,0.28)"
+            strokeWidth="3"
+            strokeLinejoin="round"
+          />
+          {renderBotEyes(120, 120, eyeScaleY, eyeShiftX, "#ECFDF5", "#FFFFFF", 22, 15, 32)}
+        </g>
+      );
+    }
+
+    // 4. GROK ORBIT BOT (xAI Monochrome Black-Hole + Diagonal Orbital Slash Mascot)
+    case "grok-orbit":
+      return (
+        <g>
+          <defs>
+            <linearGradient id={`grok-b-${uid}`} x1="36" y1="30" x2="204" y2="210" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#3F3F46" />
+              <stop offset="45%" stopColor="#18181B" />
+              <stop offset="100%" stopColor="#09090B" />
+            </linearGradient>
+            <linearGradient id={`grok-s-${uid}`} x1="20" y1="200" x2="220" y2="30" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#A1A1AA" />
+              <stop offset="50%" stopColor="#FFFFFF" />
+              <stop offset="100%" stopColor="#FFFFFF" />
+            </linearGradient>
+          </defs>
+          {/* Monochrome Event-Horizon Sphere */}
+          <circle
+            cx="120"
+            cy="122"
+            r="88"
+            fill={`url(#grok-b-${uid})`}
+            stroke="rgba(255,255,255,0.32)"
+            strokeWidth="4"
+          />
+          {/* Iconic Grok Diagonal Orbital Accretion Slash */}
+          <path
+            d="M 28 188 C 68 174, 154 114, 214 34"
+            stroke={`url(#grok-s-${uid})`}
+            strokeWidth="12"
+            strokeLinecap="round"
+            fill="none"
+          />
+          <path
+            d="M 48 86 A 76 76 0 0 1 182 76"
+            stroke="#FFFFFF"
+            strokeOpacity="0.28"
+            strokeWidth="5"
+            strokeLinecap="round"
+            fill="none"
+          />
+          {renderBotEyes(120, 124, eyeScaleY, eyeShiftX, "#FFFFFF", "#E4E4E7", 23, 15, 33)}
+        </g>
+      );
+
+    // 5. CURSOR CUBE BOT (Cursor 3D Isometric Cube + Pointer Chevron Mascot)
+    case "cursor-cube":
+      return (
+        <g>
+          <defs>
+            <linearGradient id={`cur-top-${uid}`} x1="120" y1="20" x2="120" y2="120" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#93C5FD" />
+              <stop offset="100%" stopColor="#3B82F6" />
+            </linearGradient>
+            <linearGradient id={`cur-left-${uid}`} x1="30" y1="70" x2="120" y2="216" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#3B82F6" />
+              <stop offset="100%" stopColor="#1D4ED8" />
+            </linearGradient>
+            <linearGradient id={`cur-right-${uid}`} x1="120" y1="70" x2="210" y2="216" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#2563EB" />
+              <stop offset="100%" stopColor="#1E3A8A" />
+            </linearGradient>
+          </defs>
+          {/* 3D Isometric Cube Silhouette */}
+          <polygon points="120,22 208,72 120,122 32,72" fill={`url(#cur-top-${uid})`} />
+          <polygon points="32,72 120,122 120,220 32,170" fill={`url(#cur-left-${uid})`} />
+          <polygon points="208,72 120,122 120,220 208,170" fill={`url(#cur-right-${uid})`} />
+          <polygon
+            points="120,22 208,72 208,170 120,220 32,170 32,72"
+            fill="none"
+            stroke="rgba(255,255,255,0.28)"
+            strokeWidth="3.5"
+            strokeLinejoin="round"
+          />
+          {/* Iconic Cursor Pointer Arrow Emblem on Top Facet */}
+          <path d="M 102 54 L 146 68 L 122 76 L 114 96 Z" fill="#FFFFFF" fillOpacity="0.92" />
+          {/* Front Visor Across Cube Center */}
+          <rect x="58" y="106" width="124" height="64" rx="28" fill="#09152E" stroke="rgba(255,255,255,0.28)" strokeWidth="2.5" />
+          {renderBotEyes(120, 138, eyeScaleY, eyeShiftX, "#60A5FA", "#FFFFFF", 22, 15, 30)}
+        </g>
+      );
+
+    // 6. OPENCODE TERMINAL BOT (OpenCode `>_` Terminal Keycap Mascot)
+    case "opencode-terminal":
+      return (
+        <g>
+          <defs>
+            <linearGradient id={`oc-${uid}`} x1="24" y1="24" x2="216" y2="216" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#67E8F9" />
+              <stop offset="50%" stopColor="#06B6D4" />
+              <stop offset="100%" stopColor="#0E7490" />
+            </linearGradient>
+          </defs>
+          {/* Outer Keycap / Terminal Block */}
+          <rect
+            x="24"
+            y="28"
+            width="192"
+            height="184"
+            rx="46"
+            fill={`url(#oc-${uid})`}
+            stroke="rgba(255,255,255,0.26)"
+            strokeWidth="3.5"
+          />
+          {/* Inner Recessed Terminal Screen */}
+          <rect
+            x="44"
+            y="52"
+            width="152"
+            height="136"
+            rx="32"
+            fill="#081C24"
+            stroke="rgba(103,232,249,0.35)"
+            strokeWidth="2.5"
+          />
+          {/* Terminal `>_` Prompt Crest in Top-Left of Screen */}
+          <path
+            d="M 64 72 L 76 80 L 64 88 M 82 88 L 96 88"
+            stroke="#22D3EE"
+            strokeWidth="4.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            fill="none"
+          />
+          {renderBotEyes(120, 126, eyeScaleY, eyeShiftX, "#67E8F9", "#FFFFFF", 24, 16, 34)}
+        </g>
+      );
+
+    // 7. PI CREST BOT (Pi Mathematical Symbol Mascot)
+    case "pi-crest":
+      return (
+        <g>
+          <defs>
+            <linearGradient id={`pi-${uid}`} x1="30" y1="24" x2="210" y2="216" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#D8B4FE" />
+              <stop offset="50%" stopColor="#9333EA" />
+              <stop offset="100%" stopColor="#4C1D95" />
+            </linearGradient>
+          </defs>
+          {/* Sculpted Body */}
+          <circle
+            cx="120"
+            cy="128"
+            r="84"
+            fill={`url(#pi-${uid})`}
+            stroke="rgba(255,255,255,0.24)"
+            strokeWidth="3.5"
+          />
+          {/* Iconic Sweeping Pi (π) Crown */}
+          <path
+            d="M 52 54 C 74 36, 166 36, 188 50"
+            stroke="#F3E8FF"
+            strokeWidth="14"
+            strokeLinecap="round"
+            fill="none"
+          />
+          <path d="M 88 46 L 82 78 M 152 46 L 158 78" stroke="#F3E8FF" strokeWidth="10" strokeLinecap="round" />
+          {renderBotEyes(120, 130, eyeScaleY, eyeShiftX, "#1E0936", "#F3E8FF", 23, 16, 34)}
+        </g>
+      );
+
+    // 8. GEMINI STAR BOT (Google Gemini 4-Point Concave Sparkle Mascot)
+    case "gemini-star": {
+      const starPath = samplePolar((t) => {
+        const r = 74 + 38 * Math.pow(Math.cos(t * 2), 2);
+        return [120 + Math.cos(t) * r, 124 + Math.sin(t) * r];
+      });
+      return (
+        <g>
+          <defs>
+            <linearGradient id={`gem-${uid}`} x1="24" y1="24" x2="216" y2="216" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#60A5FA" />
+              <stop offset="52%" stopColor="#8B5CF6" />
+              <stop offset="100%" stopColor="#F43F5E" />
+            </linearGradient>
+          </defs>
+          <path
+            d={starPath}
+            fill={`url(#gem-${uid})`}
+            stroke="rgba(255,255,255,0.25)"
+            strokeWidth="3.5"
+          />
+          {/* Twin Mini Gemini Sparkle at Top Right */}
+          <path
+            d="M 192 22 Q 192 42 212 42 Q 192 42 192 62 Q 192 42 172 42 Q 192 42 192 22 Z"
+            fill="#93C5FD"
+          />
+          {renderBotEyes(120, 124, eyeScaleY, eyeShiftX, "#0F172A", "#FFFFFF", 20, 15, 32)}
+        </g>
+      );
+    }
+
+    // 9. OLLAMA LLAMA BOT (Perked Llama Ears Mascot)
+    case "ollama-llama":
+      return (
+        <g>
+          <defs>
+            <linearGradient id={`llama-${uid}`} x1="36" y1="20" x2="204" y2="220" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#F9A8D4" />
+              <stop offset="50%" stopColor="#EC4899" />
+              <stop offset="100%" stopColor="#9D174D" />
+            </linearGradient>
+          </defs>
+          {/* Left & Right Perked Llama Ears */}
+          <rect x="54" y="18" width="34" height="68" rx="17" transform="rotate(-10 71 52)" fill={`url(#llama-${uid})`} stroke="rgba(255,255,255,0.22)" strokeWidth="3" />
+          <rect x="152" y="18" width="34" height="68" rx="17" transform="rotate(10 169 52)" fill={`url(#llama-${uid})`} stroke="rgba(255,255,255,0.22)" strokeWidth="3" />
+          {/* Fluffy Llama Head */}
+          <rect x="34" y="56" width="172" height="158" rx="68" fill={`url(#llama-${uid})`} stroke="rgba(255,255,255,0.24)" strokeWidth="3.5" />
+          {/* Cute Rounded Snout */}
+          <rect x="94" y="148" width="52" height="36" rx="18" fill="#500724" fillOpacity="0.35" />
+          {renderBotEyes(120, 118, eyeScaleY, eyeShiftX, "#2E0516", "#FCE7F3", 26, 16, 34)}
+        </g>
+      );
+
+    // 10. AIDER GIT BOT (Git Branch Nodes + Shield Mascot)
+    case "aider-git": {
+      const shieldPath = getShapeSvgPath("shield");
+      return (
+        <g>
+          <defs>
+            <linearGradient id={`aider-${uid}`} x1="30" y1="24" x2="210" y2="216" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#FCD34D" />
+              <stop offset="55%" stopColor="#F59E0B" />
+              <stop offset="100%" stopColor="#B45309" />
+            </linearGradient>
+          </defs>
+          <g transform={`translate(${120 - CENTER}, ${124 - CENTER})`}>
+            <path d={shieldPath} fill={`url(#aider-${uid})`} stroke="rgba(255,255,255,0.24)" strokeWidth="3.5" />
+          </g>
+          {/* Git Branch Antennae */}
+          <path d="M 96 58 L 120 76 L 144 58" stroke="#451A03" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+          <circle cx="96" cy="56" r="7" fill="#FEF3C7" stroke="#451A03" strokeWidth="3" />
+          <circle cx="144" cy="56" r="7" fill="#FEF3C7" stroke="#451A03" strokeWidth="3" />
+          {renderBotEyes(120, 126, eyeScaleY, eyeShiftX, "#271002", "#FEF3C7", 22, 16, 34)}
+        </g>
+      );
+    }
+
+    // Fallback: Classic Grok Bot Procedural Mathematical Shapes
+    default: {
+      const svgPath = getShapeSvgPath(shape);
+      return (
+        <g transform={`translate(${120 - CENTER}, ${120 - CENTER})`}>
+          <defs>
+            <linearGradient id={`custom-${uid}`} x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stopColor={palette.from} />
+              <stop offset="100%" stopColor={palette.to} />
+            </linearGradient>
+          </defs>
+          <path
+            d={svgPath}
+            fill={`url(#custom-${uid})`}
+            stroke="rgba(255,255,255,0.2)"
+            strokeWidth="4"
+          />
+          {renderBotEyes(CENTER, CENTER - 4, eyeScaleY, eyeShiftX, "#09090B", "#FFFFFF", 24, 17, 36)}
+        </g>
+      );
+    }
+  }
 }
 
 export function CliProviderGlyph({
@@ -646,13 +1053,16 @@ export function CliProviderGlyph({
     return <GeminiIcon style={style} className={`text-blue-400 ${className}`} />;
   }
   if (d === "opencode") {
-    return <TerminalIcon style={style} className={`text-[#8cf1fb] ${className}`} />;
+    return <Terminal style={style} className={`text-[#8cf1fb] ${className}`} />;
   }
   if (d === "cursor") {
-    return <VibeCodingIcon style={style} className={`text-sky-400 ${className}`} />;
+    return <Code2 style={style} className={`text-sky-400 ${className}`} />;
   }
   if (d === "pi") {
     return <Cpu style={style} className={`text-violet-400 ${className}`} />;
+  }
+  if (d === "aider") {
+    return <GitBranch style={style} className={`text-amber-400 ${className}`} />;
   }
   return <Sparkles style={style} className={`text-cyan-300 ${className}`} />;
 }
@@ -696,7 +1106,7 @@ export function CliBrandBadge({
         style={boxStyle}
         className={`${rounded} bg-[#8cf1fb]/15 border border-[#8cf1fb]/30 text-[#8cf1fb] flex items-center justify-center shrink-0 shadow-sm`}
       >
-        <TerminalIcon style={{ width: svgSize, height: svgSize }} />
+        <Terminal style={{ width: svgSize, height: svgSize }} />
       </div>
     );
   }
@@ -706,7 +1116,7 @@ export function CliBrandBadge({
         style={boxStyle}
         className={`${rounded} bg-blue-500/15 border border-blue-400/30 text-blue-400 flex items-center justify-center shrink-0 shadow-sm`}
       >
-        <VibeCodingIcon style={{ width: svgSize, height: svgSize }} />
+        <Code2 style={{ width: svgSize, height: svgSize }} />
       </div>
     );
   }
@@ -777,7 +1187,7 @@ export function SkillBrandIcon({
         style={boxStyle}
         className="rounded-xl bg-purple-500/14 border border-purple-400/25 text-purple-300 flex items-center justify-center shrink-0"
       >
-        <PencilAiIcon style={{ width: svgSize, height: svgSize }} />
+        <Palette style={{ width: svgSize, height: svgSize }} />
       </div>
     );
   }
@@ -787,7 +1197,7 @@ export function SkillBrandIcon({
         style={boxStyle}
         className="rounded-xl bg-blue-500/14 border border-blue-400/25 text-blue-300 flex items-center justify-center shrink-0"
       >
-        <VibeCodingIcon style={{ width: svgSize, height: svgSize }} />
+        <Code2 style={{ width: svgSize, height: svgSize }} />
       </div>
     );
   }
@@ -797,7 +1207,7 @@ export function SkillBrandIcon({
         style={boxStyle}
         className="rounded-xl bg-cyan-500/14 border border-cyan-400/25 text-cyan-300 flex items-center justify-center shrink-0"
       >
-        <ChartIcon style={{ width: svgSize, height: svgSize }} />
+        <BarChart3 style={{ width: svgSize, height: svgSize }} />
       </div>
     );
   }
@@ -807,17 +1217,17 @@ export function SkillBrandIcon({
         style={boxStyle}
         className="rounded-xl bg-sky-500/14 border border-sky-400/25 text-sky-300 flex items-center justify-center shrink-0"
       >
-        <FileCode style={{ width: svgSize, height: svgSize }} />
+        <FileCode2 style={{ width: svgSize, height: svgSize }} />
       </div>
     );
   }
-  if (lower.includes("magnus") || lower.includes("bg-")) {
+  if (lower.includes("git") || lower.includes("repo") || lower.includes("origin")) {
     return (
       <div
         style={boxStyle}
         className="rounded-xl bg-[#8cf1fb]/14 border border-[#8cf1fb]/25 text-[#8cf1fb] flex items-center justify-center shrink-0"
       >
-        <BuildingsIcon style={{ width: svgSize, height: svgSize }} />
+        <FolderGit2 style={{ width: svgSize, height: svgSize }} />
       </div>
     );
   }
@@ -827,7 +1237,7 @@ export function SkillBrandIcon({
       style={boxStyle}
       className="rounded-xl bg-[#1afafd]/12 border border-[#1afafd]/25 text-[#1afafd] flex items-center justify-center shrink-0"
     >
-      <AgentIcon style={{ width: svgSize, height: svgSize }} />
+      <Bot style={{ width: svgSize, height: svgSize }} />
     </div>
   );
 }

@@ -2,8 +2,9 @@ use crate::computer::{
     get_system_overview, list_workspace_directory, open_on_desktop, read_workspace_file,
     search_workspace_files,
 };
-use crate::git_ops::read_file_diff;
+use crate::git_ops::{git_discard_file, git_stage_and_commit, read_file_diff};
 use crate::orchestrator::{dispatch_chat_turn, SendMessageInput};
+use crate::scanner::{test_cli_harness, CliDriverKind};
 use crate::state::{
     now_ms, BotProfile, ChatThread, OmniPreferences, OmniRuntimeState, OmniSnapshot,
     OmniStreamEvent, RoutineEntry, SharedOmniState, WorkspaceEntry,
@@ -85,6 +86,9 @@ pub async fn spawn_local_server() -> Result<
         .route("/api/computer/search", get(http_search_files))
         .route("/api/computer/open", post(http_open_item))
         .route("/api/git/diff", get(http_git_diff))
+        .route("/api/git/commit", post(http_git_commit))
+        .route("/api/git/discard", post(http_git_discard))
+        .route("/api/harness/test", post(http_test_harness))
         .layer(CorsLayer::permissive())
         .with_state(shared.clone());
 
@@ -673,4 +677,60 @@ async fn http_git_diff(
         Ok(diff) => Json(serde_json::json!({ "diff": diff })).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitCommitBody {
+    message: String,
+}
+
+async fn http_git_commit(
+    State(state): State<SharedOmniState>,
+    Json(body): Json<GitCommitBody>,
+) -> impl IntoResponse {
+    let root = state
+        .read()
+        .map(|g| g.store.preferences.workspace_root.clone())
+        .unwrap_or_else(|_| ".".to_string());
+    if let Err(e) = git_stage_and_commit(&root, &body.message) {
+        return (StatusCode::BAD_REQUEST, e).into_response();
+    }
+    match state.read() {
+        Ok(guard) => Json(guard.snapshot()).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "State lock poisoned").into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitDiscardBody {
+    file_path: String,
+}
+
+async fn http_git_discard(
+    State(state): State<SharedOmniState>,
+    Json(body): Json<GitDiscardBody>,
+) -> impl IntoResponse {
+    let root = state
+        .read()
+        .map(|g| g.store.preferences.workspace_root.clone())
+        .unwrap_or_else(|_| ".".to_string());
+    if let Err(e) = git_discard_file(&root, &body.file_path) {
+        return (StatusCode::BAD_REQUEST, e).into_response();
+    }
+    match state.read() {
+        Ok(guard) => Json(guard.snapshot()).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "State lock poisoned").into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TestHarnessBody {
+    kind: CliDriverKind,
+}
+
+async fn http_test_harness(Json(body): Json<TestHarnessBody>) -> impl IntoResponse {
+    Json(test_cli_harness(body.kind)).into_response()
 }

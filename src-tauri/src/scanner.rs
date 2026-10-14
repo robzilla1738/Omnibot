@@ -67,15 +67,15 @@ impl CliDriverKind {
 
     pub fn default_shape(self) -> &'static str {
         match self {
-            Self::Claude => "squircle",
-            Self::Codex => "hex",
-            Self::Opencode => "blob",
-            Self::Cursor => "gem",
-            Self::Grok => "star",
-            Self::Pi => "pebble",
-            Self::Gemini => "sparkle",
-            Self::Aider => "shield",
-            Self::Ollama => "cloud",
+            Self::Claude => "claude-spark",
+            Self::Codex => "codex-bloom",
+            Self::Opencode => "opencode-terminal",
+            Self::Cursor => "cursor-cube",
+            Self::Grok => "grok-orbit",
+            Self::Pi => "pi-crest",
+            Self::Gemini => "gemini-star",
+            Self::Aider => "aider-git",
+            Self::Ollama => "ollama-llama",
             Self::Custom => "capsule",
         }
     }
@@ -194,6 +194,60 @@ pub struct LocalMcpServer {
     pub command_or_url: String,
     pub source: String,
     pub transport: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliHarnessTestResult {
+    pub kind: CliDriverKind,
+    pub ok: bool,
+    pub binary_path: Option<String>,
+    pub version: Option<String>,
+    pub latency_ms: u64,
+    pub message: String,
+}
+
+pub fn test_cli_harness(kind: CliDriverKind) -> CliHarnessTestResult {
+    let start = std::time::Instant::now();
+    let harnesses = scan_local_cli_harnesses();
+    let Some(info) = harnesses.into_iter().find(|h| h.kind == kind) else {
+        return CliHarnessTestResult {
+            kind,
+            ok: false,
+            binary_path: None,
+            version: None,
+            latency_ms: 0,
+            message: "Driver not registered".to_string(),
+        };
+    };
+
+    let Some(bin_path) = info.binary_path.clone() else {
+        return CliHarnessTestResult {
+            kind,
+            ok: false,
+            binary_path: None,
+            version: None,
+            latency_ms: start.elapsed().as_millis() as u64,
+            message: format!("Binary '{}' not found on PATH", info.binary_name),
+        };
+    };
+
+    let version = probe_version(&bin_path, "--version");
+    let latency_ms = start.elapsed().as_millis() as u64;
+    let ok = version.is_some();
+    let message = match &version {
+        Some(v) => format!("Verified {} at {} ({latency_ms}ms)", v, bin_path),
+        None => format!("Binary found at {} but --version probe failed", bin_path),
+    };
+
+    CliHarnessTestResult {
+        kind,
+        ok,
+        binary_path: Some(bin_path),
+        version,
+        latency_ms,
+        message,
+    }
 }
 
 pub fn extended_search_dirs() -> Vec<PathBuf> {

@@ -10,8 +10,9 @@ use computer::{
     get_system_overview, list_workspace_directory, open_on_desktop, read_workspace_file,
     search_workspace_files, write_clipboard_text, LocalFileEntry, SystemOverview,
 };
-use git_ops::read_file_diff;
+use git_ops::{git_discard_file, git_stage_and_commit, read_file_diff};
 use orchestrator::{dispatch_chat_turn, SendMessageInput};
+use scanner::{test_cli_harness, CliDriverKind, CliHarnessTestResult};
 use server::{
     create_chat_thread, delete_bot_profile, delete_chat_thread, delete_routine_entry,
     delete_workspace_entry, spawn_local_server, stop_chat_runs, update_chat_thread,
@@ -235,6 +236,51 @@ fn omni_git_diff(
 }
 
 #[tauri::command]
+fn omni_git_commit(
+    state: State<'_, ManagedOmniState>,
+    message: String,
+) -> Result<OmniSnapshot, String> {
+    let root = {
+        let guard = state
+            .0
+            .read()
+            .map_err(|_| "State lock poisoned".to_string())?;
+        guard.store.preferences.workspace_root.clone()
+    };
+    git_stage_and_commit(&root, &message)?;
+    let guard = state
+        .0
+        .read()
+        .map_err(|_| "State lock poisoned".to_string())?;
+    Ok(guard.snapshot())
+}
+
+#[tauri::command]
+fn omni_git_discard(
+    state: State<'_, ManagedOmniState>,
+    file_path: String,
+) -> Result<OmniSnapshot, String> {
+    let root = {
+        let guard = state
+            .0
+            .read()
+            .map_err(|_| "State lock poisoned".to_string())?;
+        guard.store.preferences.workspace_root.clone()
+    };
+    git_discard_file(&root, &file_path)?;
+    let guard = state
+        .0
+        .read()
+        .map_err(|_| "State lock poisoned".to_string())?;
+    Ok(guard.snapshot())
+}
+
+#[tauri::command]
+fn omni_test_harness(kind: CliDriverKind) -> CliHarnessTestResult {
+    test_cli_harness(kind)
+}
+
+#[tauri::command]
 fn omni_write_clipboard(text: String) -> Result<String, String> {
     write_clipboard_text(&text)
 }
@@ -292,6 +338,9 @@ pub fn run() {
             omni_search_local_files,
             omni_open_local_item,
             omni_git_diff,
+            omni_git_commit,
+            omni_git_discard,
+            omni_test_harness,
             omni_write_clipboard,
         ])
         .run(tauri::generate_context!())

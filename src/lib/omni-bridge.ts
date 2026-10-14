@@ -3,6 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import type {
   BotProfile,
   ChatThread,
+  CliDriverKind,
+  CliHarnessTestResult,
   LocalFileEntry,
   OmniPreferences,
   OmniSnapshot,
@@ -41,6 +43,19 @@ export async function getOmniSnapshot(): Promise<OmniSnapshot> {
     const snap = await invoke<OmniSnapshot>("omni_snapshot");
     if (snap.serverBaseUrl) cachedServerBaseUrl = snap.serverBaseUrl;
     return snap;
+  }
+  for (const port of [4321, 4322, 4323, 4324, 4325]) {
+    try {
+      const candidate = `http://127.0.0.1:${port}`;
+      const res = await fetch(`${candidate}/api/snapshot`);
+      if (res.ok) {
+        const snap = (await res.json()) as OmniSnapshot;
+        cachedServerBaseUrl = snap.serverBaseUrl || candidate;
+        return snap;
+      }
+    } catch {
+      // Try next candidate port
+    }
   }
   const snap = await httpJson<OmniSnapshot>("/api/snapshot");
   if (snap.serverBaseUrl) cachedServerBaseUrl = snap.serverBaseUrl;
@@ -275,6 +290,38 @@ export async function getGitFileDiff(filePath: string): Promise<string> {
     `/api/git/diff?path=${encodeURIComponent(filePath)}`
   );
   return res.diff;
+}
+
+export async function commitGitChanges(message: string): Promise<OmniSnapshot> {
+  if (isTauriRuntime()) {
+    return invoke<OmniSnapshot>("omni_git_commit", { message });
+  }
+  return httpJson<OmniSnapshot>("/api/git/commit", {
+    method: "POST",
+    body: JSON.stringify({ message }),
+  });
+}
+
+export async function discardGitFile(filePath: string): Promise<OmniSnapshot> {
+  if (isTauriRuntime()) {
+    return invoke<OmniSnapshot>("omni_git_discard", { filePath });
+  }
+  return httpJson<OmniSnapshot>("/api/git/discard", {
+    method: "POST",
+    body: JSON.stringify({ filePath }),
+  });
+}
+
+export async function testCliHarness(
+  kind: CliDriverKind
+): Promise<CliHarnessTestResult> {
+  if (isTauriRuntime()) {
+    return invoke<CliHarnessTestResult>("omni_test_harness", { kind });
+  }
+  return httpJson<CliHarnessTestResult>("/api/harness/test", {
+    method: "POST",
+    body: JSON.stringify({ kind }),
+  });
 }
 
 export function subscribeOmniEvents(

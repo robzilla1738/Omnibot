@@ -11,6 +11,16 @@ export type CliDriverKind =
   | "custom";
 
 export type BotShape =
+  | "omni-prism"
+  | "claude-spark"
+  | "codex-bloom"
+  | "grok-orbit"
+  | "cursor-cube"
+  | "opencode-terminal"
+  | "pi-crest"
+  | "gemini-star"
+  | "ollama-llama"
+  | "aider-git"
   | "blob"
   | "pebble"
   | "bean"
@@ -156,6 +166,15 @@ export interface CliHarnessInfo {
   models: string[];
   supportsJsonStream: boolean;
   supportsSessionResume: boolean;
+}
+
+export interface CliHarnessTestResult {
+  kind: CliDriverKind;
+  ok: boolean;
+  binaryPath?: string | null;
+  version?: string | null;
+  latencyMs: number;
+  message: string;
 }
 
 export interface LocalSkillItem {

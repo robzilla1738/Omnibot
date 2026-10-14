@@ -1,11 +1,13 @@
 import type React from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  commitGitChanges,
   createOmniChat,
   deleteOmniBot,
   deleteOmniChat,
   deleteOmniRoutine,
   deleteOmniWorkspace,
+  discardGitFile,
   getOmniSnapshot,
   rescanOmniEnvironment,
   saveOmniPreferences,
@@ -218,7 +220,7 @@ export function DesktopShell({
         slug: "omni",
         roleTitle: "Lead Swarm Coordinator",
         description: "",
-        shape: "blob",
+        shape: "omni-prism",
         color: "cyan",
         isPrimary: true,
         cliDriver: "claude",
@@ -241,9 +243,7 @@ export function DesktopShell({
 
   const activeBot = useMemo(() => {
     const firstId = activeChat?.participantBotIds[0];
-    return (
-      snapshot.bots.find((b) => b.id === firstId) ?? primaryBot
-    );
+    return snapshot.bots.find((b) => b.id === firstId) ?? primaryBot;
   }, [activeChat, snapshot.bots, primaryBot]);
 
   const handleSelectPrimary = useCallback(() => {
@@ -340,6 +340,17 @@ export function DesktopShell({
     [activeChat]
   );
 
+  const handleSelectProject = useCallback(
+    async (path: string) => {
+      const nextSnap = await saveOmniPreferences({
+        ...snapshot.preferences,
+        workspaceRoot: path,
+      });
+      setSnapshot(nextSnap);
+    },
+    [snapshot.preferences]
+  );
+
   if (!activeChat) return null;
 
   return (
@@ -354,7 +365,6 @@ export function DesktopShell({
         activeChatId={activeChat.id}
         activeRuns={snapshot.activeRuns}
         harnesses={snapshot.harnesses}
-        workspaces={snapshot.workspaces}
         onSelectPrimary={handleSelectPrimary}
         onSelectBotDirectChat={handleSelectBotDirectChat}
         onSelectChat={setActiveChatId}
@@ -375,6 +385,8 @@ export function DesktopShell({
         bots={snapshot.bots}
         harnesses={snapshot.harnesses}
         skills={snapshot.skills}
+        projects={snapshot.workspaces}
+        activeProjectPath={snapshot.preferences.workspaceRoot}
         gitStatus={snapshot.gitStatus}
         activeRuns={snapshot.activeRuns}
         inspectorOpen={inspectorOpen}
@@ -390,6 +402,10 @@ export function DesktopShell({
           setInspectorOpen(true);
           setSidebarCollapsed(true);
         }}
+        onSelectProject={handleSelectProject}
+        onOpenProjectsHub={() =>
+          setOmniHubState({ open: true, section: "projects" })
+        }
         onSendMessage={async (params) => {
           await sendOmniMessage({
             chatId: activeChat.id,
@@ -445,6 +461,14 @@ export function DesktopShell({
             overrideBotId: routine.botId,
           });
         }}
+        onCommitGit={async (message: string) => {
+          const next = await commitGitChanges(message);
+          setSnapshot(next);
+        }}
+        onDiscardGitFile={async (filePath: string) => {
+          const next = await discardGitFile(filePath);
+          setSnapshot(next);
+        }}
         onRescan={async () => {
           const next = await rescanOmniEnvironment();
           setSnapshot(next);
@@ -492,7 +516,7 @@ export function DesktopShell({
             title: skill.name,
             participantBotIds: [activeBot.id],
             skillSlug: skill.slug,
-            initialPrompt: `Run skill /${skill.slug} (${skill.name}) on this workspace.`,
+            initialPrompt: `Run skill /${skill.slug} (${skill.name}) on this project.`,
           });
         }}
       />
@@ -505,7 +529,7 @@ export function DesktopShell({
         bots={snapshot.bots}
         harnesses={snapshot.harnesses}
         skills={snapshot.skills}
-        workspaces={snapshot.workspaces}
+        projects={snapshot.workspaces}
         routines={snapshot.routines}
         preferences={snapshot.preferences}
         onUpsertBot={async (bot) => {
@@ -520,11 +544,11 @@ export function DesktopShell({
           const next = await saveOmniPreferences(prefs);
           setSnapshot(next);
         }}
-        onUpsertWorkspace={async (ws: WorkspaceEntry) => {
+        onUpsertProject={async (ws: WorkspaceEntry) => {
           const next = await upsertOmniWorkspace(ws);
           setSnapshot(next);
         }}
-        onDeleteWorkspace={async (id) => {
+        onDeleteProject={async (id) => {
           const next = await deleteOmniWorkspace(id);
           setSnapshot(next);
         }}
@@ -560,11 +584,12 @@ export function DesktopShell({
         bots={snapshot.bots}
         chats={snapshot.chats}
         skills={snapshot.skills}
-        workspaces={snapshot.workspaces}
+        projects={snapshot.workspaces}
         onClose={() => setCommandModal((prev) => ({ ...prev, open: false }))}
         onSelectPrimary={handleSelectPrimary}
         onSelectBotDirectChat={handleSelectBotDirectChat}
         onSelectChat={setActiveChatId}
+        onSelectProject={handleSelectProject}
         onCreateSwarmOrChat={handleCreateSwarmOrChat}
       />
     </div>

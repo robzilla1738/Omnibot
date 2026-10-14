@@ -215,3 +215,26 @@ pub fn read_file_diff(workspace_root: &str, file_path: &str) -> Result<String, S
     let full = Path::new(workspace_root).join(file_path);
     fs::read_to_string(&full).map_err(|e| format!("Could not read {file_path}: {e}"))
 }
+
+pub fn git_stage_and_commit(workspace_root: &str, message: &str) -> Result<String, String> {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return Err("Commit message cannot be empty.".to_string());
+    }
+    run_git(workspace_root, &["add", "-A"])?;
+    run_git(workspace_root, &["commit", "-m", trimmed])
+}
+
+pub fn git_discard_file(workspace_root: &str, file_path: &str) -> Result<String, String> {
+    let trimmed = file_path.trim();
+    if trimmed.is_empty() {
+        return Err("File path cannot be empty.".to_string());
+    }
+    if run_git(workspace_root, &["checkout", "--", trimmed]).is_err() {
+        let full = Path::new(workspace_root).join(trimmed);
+        if full.is_file() {
+            fs::remove_file(&full).map_err(|e| format!("Failed to remove {trimmed}: {e}"))?;
+        }
+    }
+    Ok(format!("Discarded changes in {trimmed}"))
+}

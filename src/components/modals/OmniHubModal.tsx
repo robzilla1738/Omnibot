@@ -1,3 +1,17 @@
+import {
+  Bot,
+  Brain,
+  Clock,
+  FolderGit2,
+  Play,
+  Plus,
+  Search,
+  Settings,
+  ShieldCheck,
+  Sparkles,
+  Trash2,
+  X,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import type {
   BotColor,
@@ -16,25 +30,11 @@ import {
   BotCharacterAvatar,
   SkillBrandIcon,
 } from "../icons/BotCharacterAvatar";
-import {
-  AgentIcon,
-  BrainIcon,
-  Clock,
-  FolderKanban,
-  Play,
-  Plus,
-  Search,
-  Settings,
-  ShieldCheck,
-  Sparkles,
-  Trash2,
-  X,
-} from "../icons/OmarchyIcons";
 
 export type OmniHubSection =
   | "bots"
+  | "projects"
   | "memories"
-  | "workspaces"
   | "skills"
   | "routines"
   | "instructions";
@@ -46,14 +46,14 @@ export interface OmniHubModalProps {
   bots: BotProfile[];
   harnesses: CliHarnessInfo[];
   skills: LocalSkillItem[];
-  workspaces: WorkspaceEntry[];
+  projects: WorkspaceEntry[];
   routines: RoutineEntry[];
   preferences: OmniPreferences;
   onUpsertBot: (bot: BotProfile) => Promise<void>;
   onDeleteBot: (id: string) => Promise<void>;
   onUpdatePreferences: (prefs: OmniPreferences) => Promise<void>;
-  onUpsertWorkspace: (ws: WorkspaceEntry) => Promise<void>;
-  onDeleteWorkspace: (id: string) => Promise<void>;
+  onUpsertProject: (ws: WorkspaceEntry) => Promise<void>;
+  onDeleteProject: (id: string) => Promise<void>;
   onUpsertRoutine: (routine: RoutineEntry) => Promise<void>;
   onDeleteRoutine: (id: string) => Promise<void>;
   onRunRoutineNow: (routine: RoutineEntry) => Promise<void>;
@@ -69,17 +69,17 @@ const HUB_SECTIONS: Array<{
   {
     id: "bots",
     label: "Bots & Roster",
-    subtitle: "Create and customize persistent CLI Bots, shapes, colors, and roles",
+    subtitle: "Create and customize persistent CLI Bots, provider mascots, and roles",
+  },
+  {
+    id: "projects",
+    label: "Projects",
+    subtitle: "Local git repositories and project-specific instructions",
   },
   {
     id: "memories",
     label: "Shared Memories",
     subtitle: "Persistent facts injected across every Bot and Swarm Room",
-  },
-  {
-    id: "workspaces",
-    label: "Workspaces",
-    subtitle: "Local git repositories and project-specific instructions",
   },
   {
     id: "skills",
@@ -105,14 +105,14 @@ export function OmniHubModal({
   bots,
   harnesses,
   skills,
-  workspaces,
+  projects,
   routines,
   preferences,
   onUpsertBot,
   onDeleteBot,
   onUpdatePreferences,
-  onUpsertWorkspace,
-  onDeleteWorkspace,
+  onUpsertProject,
+  onDeleteProject,
   onUpsertRoutine,
   onDeleteRoutine,
   onRunRoutineNow,
@@ -128,20 +128,20 @@ export function OmniHubModal({
   const [botName, setBotName] = useState("");
   const [botRole, setBotRole] = useState("");
   const [botDesc, setBotDesc] = useState("");
-  const [botShape, setBotShape] = useState<BotShape>("crystal");
-  const [botColor, setBotColor] = useState<BotColor>("violet");
+  const [botShape, setBotShape] = useState<BotShape>("claude-spark");
+  const [botColor, setBotColor] = useState<BotColor>("orange");
   const [botDriver, setBotDriver] = useState<CliDriverKind>("claude");
   const [botPrompt, setBotPrompt] = useState("");
 
   // Memories state
   const [newMemoryText, setNewMemoryText] = useState("");
 
-  // Workspaces state
-  const [showNewWorkspace, setShowNewWorkspace] = useState(false);
-  const [wsName, setWsName] = useState("");
-  const [wsPath, setWsPath] = useState(preferences.workspaceRoot);
-  const [wsDesc, setWsDesc] = useState("");
-  const [wsInstructions, setWsInstructions] = useState("");
+  // Projects state
+  const [showNewProject, setShowNewProject] = useState(false);
+  const [projName, setProjName] = useState("");
+  const [projPath, setProjPath] = useState(preferences.workspaceRoot);
+  const [projDesc, setProjDesc] = useState("");
+  const [projInstructions, setProjInstructions] = useState("");
 
   // Instructions state
   const [globalInstructionsDraft, setGlobalInstructionsDraft] = useState(
@@ -231,19 +231,19 @@ export function OmniHubModal({
     });
   };
 
-  const handleCreateWorkspace = async () => {
-    if (!wsName.trim() || !wsPath.trim()) return;
-    await onUpsertWorkspace({
+  const handleCreateProject = async () => {
+    if (!projName.trim() || !projPath.trim()) return;
+    await onUpsertProject({
       id: "",
-      name: wsName.trim(),
-      path: wsPath.trim(),
-      description: wsDesc.trim() || "Local repository workspace",
-      instructions: wsInstructions.trim(),
+      name: projName.trim(),
+      path: projPath.trim(),
+      description: projDesc.trim() || "Local git project",
+      instructions: projInstructions.trim(),
     });
-    setWsName("");
-    setWsDesc("");
-    setWsInstructions("");
-    setShowNewWorkspace(false);
+    setProjName("");
+    setProjDesc("");
+    setProjInstructions("");
+    setShowNewProject(false);
   };
 
   const activeSectionMeta =
@@ -252,11 +252,11 @@ export function OmniHubModal({
   const renderNavIcon = (id: OmniHubSection) => {
     switch (id) {
       case "bots":
-        return <AgentIcon className="w-4 h-4 shrink-0" />;
+        return <Bot className="w-4 h-4 shrink-0" />;
+      case "projects":
+        return <FolderGit2 className="w-4 h-4 shrink-0" />;
       case "memories":
-        return <BrainIcon className="w-4 h-4 shrink-0" />;
-      case "workspaces":
-        return <FolderKanban className="w-4 h-4 shrink-0" />;
+        return <Brain className="w-4 h-4 shrink-0" />;
       case "skills":
         return <Sparkles className="w-4 h-4 shrink-0" />;
       case "routines":
@@ -270,10 +270,10 @@ export function OmniHubModal({
     switch (id) {
       case "bots":
         return bots.length;
+      case "projects":
+        return projects.length;
       case "memories":
         return preferences.sharedMemories.length;
-      case "workspaces":
-        return workspaces.length;
       case "skills":
         return skills.length;
       case "routines":
@@ -306,9 +306,9 @@ export function OmniHubModal({
           <div className="space-y-4">
             <div className="px-2 pt-1 flex items-center gap-2.5">
               <BotCharacterAvatar
-                shape="blob"
+                shape="omni-prism"
                 color="cyan"
-                size={28}
+                size={30}
                 useHeroMascot
               />
               <div className="min-w-0">
@@ -316,7 +316,7 @@ export function OmniHubModal({
                   Omni Hub
                 </div>
                 <div className="text-[11.5px] text-zinc-400 truncate">
-                  Local Swarm &amp; Memory
+                  Bots, Projects &amp; Memory
                 </div>
               </div>
             </div>
@@ -410,7 +410,7 @@ export function OmniHubModal({
                             {editingBotId ? `Edit ${botName}` : "Create a New Bot"}
                           </div>
                           <div className="text-xs text-zinc-400">
-                            Assign a character avatar, role, and local CLI harness
+                            Assign a provider-logo mascot or custom shape, role, and CLI
                           </div>
                         </div>
                       </div>
@@ -485,10 +485,10 @@ export function OmniHubModal({
                       </div>
                       <div className="space-y-1.5">
                         <label className="block text-xs text-zinc-400">
-                          Character Shape
+                          Character Mascot / Shape
                         </label>
                         <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
-                          {BOT_SHAPES.slice(0, 14).map((s) => (
+                          {BOT_SHAPES.slice(0, 18).map((s) => (
                             <button
                               key={s.id}
                               type="button"
@@ -536,7 +536,7 @@ export function OmniHubModal({
                         <div className="flex items-center gap-3 min-w-0">
                           <BotCharacterAvatar
                             bot={b}
-                            size={44}
+                            size={46}
                             showCliBadge={!b.isPrimary}
                             showStarBadge={b.isPrimary}
                             useHeroMascot={b.isPrimary}
@@ -591,6 +591,108 @@ export function OmniHubModal({
               </div>
             )}
 
+            {section === "projects" && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-zinc-400">
+                    Active project: <code className="text-zinc-200">{preferences.workspaceRoot}</code>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShowNewProject((v) => !v)}
+                    className="px-3.5 py-1.5 rounded-full liquid-glass-chip text-xs font-medium text-zinc-100 flex items-center gap-1.5"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add Project</span>
+                  </button>
+                </div>
+
+                {showNewProject && (
+                  <div className="rounded-2xl liquid-glass-card p-4 space-y-3">
+                    <input
+                      type="text"
+                      value={projName}
+                      onChange={(e) => setProjName(e.target.value)}
+                      placeholder="Project name (e.g. omni-bot)"
+                      className="w-full rounded-xl bg-black/40 border border-white/10 px-3 py-2 text-[13px] text-white focus:outline-none"
+                    />
+                    <input
+                      type="text"
+                      value={projPath}
+                      onChange={(e) => setProjPath(e.target.value)}
+                      placeholder="/Users/rcourson/Tests/omni-bot"
+                      className="w-full rounded-xl bg-black/40 border border-white/10 px-3 py-2 text-[13px] text-white font-mono focus:outline-none"
+                    />
+                    <input
+                      type="text"
+                      value={projDesc}
+                      onChange={(e) => setProjDesc(e.target.value)}
+                      placeholder="Short description"
+                      className="w-full rounded-xl bg-black/40 border border-white/10 px-3 py-2 text-[13px] text-white focus:outline-none"
+                    />
+                    <div className="flex justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={handleCreateProject}
+                        className="px-4 py-1.5 rounded-full bg-white text-black text-xs font-semibold"
+                      >
+                        Save Project
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-3.5">
+                  {projects.map((proj) => {
+                    const isActive = preferences.workspaceRoot === proj.path;
+                    return (
+                      <div
+                        key={proj.id}
+                        className="rounded-2xl liquid-glass-card p-4 flex flex-col justify-between gap-3"
+                      >
+                        <div>
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[14px] font-semibold text-white truncate flex items-center gap-2">
+                              <FolderGit2 className="w-4 h-4 text-[#8cf1fb]" />
+                              <span>{proj.name}</span>
+                            </span>
+                            {projects.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => onDeleteProject(proj.id)}
+                                className="text-zinc-500 hover:text-red-400 p-1"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                          <div className="text-xs font-mono text-zinc-400 truncate mt-1">
+                            {proj.path}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdatePreferences({
+                              ...preferences,
+                              workspaceRoot: proj.path,
+                            })
+                          }
+                          className={`w-full py-1.5 rounded-xl text-xs font-medium ${
+                            isActive
+                              ? "bg-emerald-500/20 text-emerald-300 border border-emerald-400/30"
+                              : "liquid-glass-chip text-zinc-100 hover:text-white"
+                          }`}
+                        >
+                          {isActive ? "Active Project" : "Switch to Project"}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {section === "memories" && (
               <div className="space-y-4">
                 <div className="flex items-center gap-2.5">
@@ -636,107 +738,6 @@ export function OmniHubModal({
                       </button>
                     </div>
                   ))}
-                </div>
-              </div>
-            )}
-
-            {section === "workspaces" && (
-              <div className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-zinc-400">
-                    Active workspace: <code className="text-zinc-200">{preferences.workspaceRoot}</code>
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setShowNewWorkspace((v) => !v)}
-                    className="px-3.5 py-1.5 rounded-full liquid-glass-chip text-xs font-medium text-zinc-100 flex items-center gap-1.5"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>Add Workspace</span>
-                  </button>
-                </div>
-
-                {showNewWorkspace && (
-                  <div className="rounded-2xl liquid-glass-card p-4 space-y-3">
-                    <input
-                      type="text"
-                      value={wsName}
-                      onChange={(e) => setWsName(e.target.value)}
-                      placeholder="Workspace name (e.g. omni-bot)"
-                      className="w-full rounded-xl bg-black/40 border border-white/10 px-3 py-2 text-[13px] text-white focus:outline-none"
-                    />
-                    <input
-                      type="text"
-                      value={wsPath}
-                      onChange={(e) => setWsPath(e.target.value)}
-                      placeholder="/Users/rcourson/Tests/omni-bot"
-                      className="w-full rounded-xl bg-black/40 border border-white/10 px-3 py-2 text-[13px] text-white font-mono focus:outline-none"
-                    />
-                    <input
-                      type="text"
-                      value={wsDesc}
-                      onChange={(e) => setWsDesc(e.target.value)}
-                      placeholder="Short description"
-                      className="w-full rounded-xl bg-black/40 border border-white/10 px-3 py-2 text-[13px] text-white focus:outline-none"
-                    />
-                    <div className="flex justify-end gap-2">
-                      <button
-                        type="button"
-                        onClick={handleCreateWorkspace}
-                        className="px-4 py-1.5 rounded-full bg-white text-black text-xs font-semibold"
-                      >
-                        Save Workspace
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                <div className="grid grid-cols-2 gap-3.5">
-                  {workspaces.map((ws) => {
-                    const isActive = preferences.workspaceRoot === ws.path;
-                    return (
-                      <div
-                        key={ws.id}
-                        className="rounded-2xl liquid-glass-card p-4 flex flex-col justify-between gap-3"
-                      >
-                        <div>
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-[14px] font-semibold text-white truncate">
-                              {ws.name}
-                            </span>
-                            {workspaces.length > 1 && (
-                              <button
-                                type="button"
-                                onClick={() => onDeleteWorkspace(ws.id)}
-                                className="text-zinc-500 hover:text-red-400 p-1"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            )}
-                          </div>
-                          <div className="text-xs font-mono text-zinc-400 truncate mt-0.5">
-                            {ws.path}
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            onUpdatePreferences({
-                              ...preferences,
-                              workspaceRoot: ws.path,
-                            })
-                          }
-                          className={`w-full py-1.5 rounded-xl text-xs font-medium ${
-                            isActive
-                              ? "bg-emerald-500/20 text-emerald-300 border border-emerald-400/30"
-                              : "liquid-glass-chip text-zinc-100 hover:text-white"
-                          }`}
-                        >
-                          {isActive ? "Active Workspace" : "Set as Active Workspace"}
-                        </button>
-                      </div>
-                    );
-                  })}
                 </div>
               </div>
             )}
@@ -896,7 +897,7 @@ export function OmniHubModal({
                       <span>Auto-Approve Local CLI Tool Execution</span>
                     </div>
                     <p className="text-xs text-zinc-400 mt-0.5">
-                      Allow non-interactive CLI turns to read/edit workspace files and run shell checks without blocking
+                      Allow non-interactive CLI turns to read/edit project files and run shell checks without blocking
                     </p>
                   </div>
                   <button

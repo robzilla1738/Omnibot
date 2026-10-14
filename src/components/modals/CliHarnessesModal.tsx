@@ -1,10 +1,20 @@
+import {
+  Activity,
+  ArrowUpRight,
+  Check,
+  RefreshCw,
+  Search,
+  X,
+} from "lucide-react";
 import { useMemo, useState } from "react";
+import { testCliHarness } from "../../lib/omni-bridge";
 import type {
   BotColor,
   BotProfile,
   BotShape,
   CliDriverKind,
   CliHarnessInfo,
+  CliHarnessTestResult,
   LocalMcpServer,
   LocalSkillItem,
 } from "../../lib/types";
@@ -13,13 +23,6 @@ import {
   CliBrandBadge,
   SkillBrandIcon,
 } from "../icons/BotCharacterAvatar";
-import {
-  ArrowUpRight,
-  Check,
-  RefreshCw,
-  Search,
-  X,
-} from "../icons/OmarchyIcons";
 
 export interface CliHarnessesModalProps {
   open: boolean;
@@ -128,6 +131,9 @@ export function CliHarnessesModal({
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState<CategoryFilter>("All");
   const [rescanning, setRescanning] = useState(false);
+  const [testResults, setTestResults] = useState<
+    Record<string, CliHarnessTestResult>
+  >({});
 
   const installedList = useMemo(
     () => harnesses.filter((h) => h.installed),
@@ -135,10 +141,7 @@ export function CliHarnessesModal({
   );
 
   const filteredHarnesses = useMemo(() => {
-    if (
-      category !== "All" &&
-      category !== "Installed CLIs"
-    ) {
+    if (category !== "All" && category !== "Installed CLIs") {
       return [];
     }
     const q = search.trim().toLowerCase();
@@ -195,6 +198,11 @@ export function CliHarnessesModal({
     } finally {
       setRescanning(false);
     }
+  };
+
+  const handleTestHarness = async (kind: CliDriverKind) => {
+    const res = await testCliHarness(kind);
+    setTestResults((prev) => ({ ...prev, [kind]: res }));
   };
 
   return (
@@ -308,7 +316,10 @@ export function CliHarnessesModal({
               </div>
               <div className="grid grid-cols-2 gap-x-8 gap-y-4">
                 {filteredHarnesses.map((h) => {
-                  const matchingBot = bots.find((b) => b.cliDriver === h.kind);
+                  const matchingBot = bots.find(
+                    (b) => !b.isPrimary && b.cliDriver === h.kind
+                  );
+                  const testRes = testResults[h.kind];
                   return (
                     <div
                       key={h.id}
@@ -318,11 +329,11 @@ export function CliHarnessesModal({
                         {matchingBot ? (
                           <BotCharacterAvatar
                             bot={matchingBot}
-                            size={42}
+                            size={44}
                             showCliBadge
                           />
                         ) : (
-                          <CliBrandBadge driver={h.kind} size={42} />
+                          <CliBrandBadge driver={h.kind} size={44} />
                         )}
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
@@ -336,28 +347,44 @@ export function CliHarnessesModal({
                             )}
                           </div>
                           <div
-                            title={h.binaryPath || h.installHint}
+                            title={testRes?.message || h.binaryPath || h.installHint}
                             className="text-[12px] font-mono text-zinc-400 truncate mt-0.5"
                           >
-                            {h.installed
-                              ? h.binaryPath
-                              : `Not found · ${h.installHint}`}
+                            {testRes ? (
+                              <span className="text-emerald-300">
+                                ✓ {testRes.latencyMs}ms · {h.binaryPath}
+                              </span>
+                            ) : h.installed ? (
+                              h.binaryPath
+                            ) : (
+                              `Not found · ${h.installHint}`
+                            )}
                           </div>
                         </div>
                       </div>
 
                       {h.installed && matchingBot ? (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            onSelectBotDirectChat(matchingBot);
-                            onClose();
-                          }}
-                          className="px-3.5 py-1.5 rounded-full bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-400/30 text-xs font-medium text-emerald-300 shrink-0 active:scale-95 transition-colors flex items-center gap-1.5"
-                        >
-                          <Check className="w-3.5 h-3.5" />
-                          <span>Chat</span>
-                        </button>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handleTestHarness(h.kind)}
+                            title="Run live CLI health check"
+                            className="p-2 rounded-full bg-[#1f1f1f] hover:bg-[#272727] border border-white/[0.06] text-zinc-300 hover:text-white active:scale-95 transition-colors"
+                          >
+                            <Activity className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onSelectBotDirectChat(matchingBot);
+                              onClose();
+                            }}
+                            className="px-3.5 py-1.5 rounded-full bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-400/30 text-xs font-medium text-emerald-300 active:scale-95 transition-colors flex items-center gap-1.5"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                            <span>Chat</span>
+                          </button>
+                        </div>
                       ) : (
                         <span className="text-xs text-zinc-500 shrink-0">
                           Not installed
@@ -396,7 +423,7 @@ export function CliHarnessesModal({
                           shape={tpl.shape}
                           color={tpl.color}
                           cliDriver={tpl.preferredDriver}
-                          size={42}
+                          size={44}
                           showCliBadge
                         />
                         <div className="min-w-0 flex-1">

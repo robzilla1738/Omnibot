@@ -1,3 +1,11 @@
+import {
+  Check,
+  FolderGit2,
+  MessageSquare,
+  Plus,
+  Search,
+  X,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   BotProfile,
@@ -6,14 +14,6 @@ import type {
   WorkspaceEntry,
 } from "../../lib/types";
 import { BotCharacterAvatar, SkillBrandIcon } from "../icons/BotCharacterAvatar";
-import {
-  Check,
-  FolderKanban,
-  MessageSquare,
-  Plus,
-  Search,
-  X,
-} from "../icons/OmarchyIcons";
 
 export interface SearchAndNewChatModalProps {
   open: boolean;
@@ -21,11 +21,12 @@ export interface SearchAndNewChatModalProps {
   bots: BotProfile[];
   chats: ChatThread[];
   skills: LocalSkillItem[];
-  workspaces: WorkspaceEntry[];
+  projects: WorkspaceEntry[];
   onClose: () => void;
   onSelectPrimary: () => void;
   onSelectBotDirectChat: (bot: BotProfile) => void;
   onSelectChat: (chatId: string) => void;
+  onSelectProject: (path: string) => Promise<void>;
   onCreateSwarmOrChat: (params: {
     title?: string;
     participantBotIds: string[];
@@ -57,11 +58,12 @@ export function SearchAndNewChatModal({
   bots,
   chats,
   skills,
-  workspaces,
+  projects,
   onClose,
   onSelectPrimary,
   onSelectBotDirectChat,
   onSelectChat,
+  onSelectProject,
   onCreateSwarmOrChat,
 }: SearchAndNewChatModalProps) {
   const [query, setQuery] = useState("");
@@ -155,8 +157,8 @@ export function SearchAndNewChatModal({
             onChange={(e) => setQuery(e.target.value)}
             placeholder={
               mode === "search"
-                ? "Search Bots, Swarm Rooms, Threads, and Skills..."
-                : "Swarm Room or Sidechat title (optional)..."
+                ? "Search Bots, Swarm Rooms, Projects, and Skills..."
+                : "Swarm Room or Thread title (optional)..."
             }
             onKeyDown={(e) => {
               if (e.key === "Escape") onClose();
@@ -188,7 +190,7 @@ export function SearchAndNewChatModal({
               <div className="space-y-2">
                 <div className="px-1 flex items-center justify-between text-xs text-[#8e8d8a]">
                   <span>
-                    Select 1 Bot for a Sidechat or 2+ Bots for a Swarm Room (
+                    Select 1 Bot for a Thread or 2+ Bots for a Swarm Room (
                     {selectedBotIds.length} selected)
                   </span>
                 </div>
@@ -209,7 +211,7 @@ export function SearchAndNewChatModal({
                         <div className="flex items-center gap-2.5 min-w-0">
                           <BotCharacterAvatar
                             bot={b}
-                            size={32}
+                            size={34}
                             showCliBadge={!b.isPrimary}
                             showStarBadge={b.isPrimary}
                             useHeroMascot={b.isPrimary}
@@ -235,7 +237,7 @@ export function SearchAndNewChatModal({
               {/* Git Worktree Toggle */}
               <div className="px-3.5 py-2.5 rounded-2xl bg-[#18181b] border border-white/[0.06] flex items-center justify-between">
                 <div className="flex items-center gap-2.5">
-                  <FolderKanban className="w-4 h-4 text-[#8cf1fb]" />
+                  <FolderGit2 className="w-4 h-4 text-[#8cf1fb]" />
                   <div>
                     <div className="text-[13.5px] font-medium text-zinc-100">
                       Isolate Bots in Git Worktrees
@@ -337,7 +339,7 @@ export function SearchAndNewChatModal({
                   >
                     <BotCharacterAvatar
                       bot={b}
-                      size={36}
+                      size={38}
                       showCliBadge={!b.isPrimary}
                       showStarBadge={b.isPrimary}
                       useHeroMascot={b.isPrimary}
@@ -389,39 +391,36 @@ export function SearchAndNewChatModal({
                 </div>
               )}
 
-              {/* Workspaces */}
-              {workspaces.length > 0 && (
+              {/* Projects */}
+              {projects.length > 0 && (
                 <div className="space-y-1">
-                  <div className="px-2 text-xs text-[#8e8d8a]">Workspaces</div>
-                  {workspaces
+                  <div className="px-2 text-xs text-[#8e8d8a]">Projects</div>
+                  {projects
                     .filter(
-                      (w) =>
+                      (p) =>
                         !trimmedQuery ||
-                        w.name.toLowerCase().includes(trimmedQuery) ||
-                        w.path.toLowerCase().includes(trimmedQuery)
+                        p.name.toLowerCase().includes(trimmedQuery) ||
+                        p.path.toLowerCase().includes(trimmedQuery)
                     )
-                    .map((w) => (
+                    .map((p) => (
                       <button
-                        key={w.id}
+                        key={p.id}
                         type="button"
-                        onClick={() => {
-                          onCreateSwarmOrChat({
-                            title: w.name,
-                            participantBotIds: ["bot-omni"],
-                          });
+                        onClick={async () => {
+                          await onSelectProject(p.path);
                           onClose();
                         }}
                         className="w-full px-3 py-2 rounded-[16px] hover:bg-[#1b1b1b] flex items-center gap-3.5 text-left transition-colors"
                       >
                         <div className="w-[36px] h-[36px] rounded-[11px] bg-[#8cf1fb]/15 text-[#8cf1fb] flex items-center justify-center shrink-0">
-                          <FolderKanban className="w-[17px] h-[17px]" />
+                          <FolderGit2 className="w-[17px] h-[17px]" />
                         </div>
                         <div className="min-w-0 flex-1">
                           <div className="text-[14.5px] font-medium text-[#f4f4f5] truncate">
-                            {w.name}
+                            {p.name}
                           </div>
                           <div className="text-[12px] font-mono text-[#8e8d8a] truncate">
-                            {w.path}
+                            {p.path}
                           </div>
                         </div>
                       </button>

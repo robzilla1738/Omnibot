@@ -1,3 +1,22 @@
+import {
+  Brain,
+  Check,
+  ChevronRight,
+  Clock,
+  ExternalLink,
+  FileCode2,
+  Folder,
+  GitCommitHorizontal,
+  HardDrive,
+  Laptop,
+  LayoutGrid,
+  Play,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Share2,
+  X,
+} from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import {
   getComputerOverview,
@@ -24,23 +43,6 @@ import {
   BOT_SHAPES,
   BotCharacterAvatar,
 } from "../icons/BotCharacterAvatar";
-import {
-  BrainIcon,
-  Check,
-  ChevronRight,
-  Clock,
-  ExternalLink,
-  FileCode,
-  Folder,
-  HardDrive,
-  Laptop,
-  LayoutGridIcon,
-  Play,
-  Plus,
-  RefreshCw,
-  Share,
-  X,
-} from "../icons/OmarchyIcons";
 import type { OmniHubSection } from "../modals/OmniHubModal";
 
 export type InspectorTab = "details" | "git" | "computer";
@@ -69,6 +71,8 @@ export interface InspectorDrawerProps {
   onUpdatePreferences: (next: OmniPreferences) => Promise<void>;
   onUpsertRoutine: (routine: RoutineEntry) => Promise<void>;
   onRunRoutineNow: (routine: RoutineEntry) => Promise<void>;
+  onCommitGit: (message: string) => Promise<void>;
+  onDiscardGitFile: (filePath: string) => Promise<void>;
   onRescan: () => Promise<void>;
   onOpenOmniHub: (section?: OmniHubSection) => void;
 }
@@ -91,6 +95,8 @@ export function InspectorDrawer({
   onUpdatePreferences,
   onUpsertRoutine,
   onRunRoutineNow,
+  onCommitGit,
+  onDiscardGitFile,
   onRescan,
   onOpenOmniHub,
 }: InspectorDrawerProps) {
@@ -105,6 +111,8 @@ export function InspectorDrawer({
 
   const [selectedDiffFile, setSelectedDiffFile] = useState<string | null>(null);
   const [selectedDiffContent, setSelectedDiffContent] = useState<string>("");
+  const [commitMessage, setCommitMessage] = useState("");
+  const [committing, setCommitting] = useState(false);
 
   const [systemOverview, setSystemOverview] = useState<SystemOverview | null>(
     null
@@ -153,6 +161,18 @@ export function InspectorDrawer({
       setSelectedDiffContent(
         err instanceof Error ? err.message : "Could not load diff"
       );
+    }
+  };
+
+  const handleCommitAll = async () => {
+    if (!commitMessage.trim()) return;
+    setCommitting(true);
+    try {
+      await onCommitGit(commitMessage.trim());
+      setCommitMessage("");
+      setSelectedDiffFile(null);
+    } finally {
+      setCommitting(false);
     }
   };
 
@@ -213,7 +233,7 @@ export function InspectorDrawer({
             {shareCopied ? (
               <Check className="w-[17px] h-[17px] text-emerald-400" />
             ) : (
-              <Share className="w-[17px] h-[17px]" />
+              <Share2 className="w-[17px] h-[17px]" />
             )}
           </button>
           <button
@@ -380,7 +400,7 @@ export function InspectorDrawer({
                     </div>
                   </div>
 
-                  {/* Color Palette Picker (11 Grok Bot colors) */}
+                  {/* Color Palette Picker */}
                   <div className="space-y-1.5">
                     <label className="block text-xs text-[#8e8d8a]">
                       Character Color
@@ -411,12 +431,12 @@ export function InspectorDrawer({
                     </div>
                   </div>
 
-                  {/* Shape Grid (25 Grok Bot shapes) */}
+                  {/* Shape Grid (Provider Logo Mascots + Grok Bot Shapes) */}
                   <div className="space-y-1.5">
                     <label className="block text-xs text-[#8e8d8a]">
-                      Character Shape ({BOT_SHAPES.length})
+                      Provider Mascots &amp; Bot Shapes ({BOT_SHAPES.length})
                     </label>
-                    <div className="grid grid-cols-5 gap-1.5 max-h-48 overflow-y-auto p-1">
+                    <div className="grid grid-cols-5 gap-1.5 max-h-52 overflow-y-auto p-1">
                       {BOT_SHAPES.map((s) => {
                         const selected = activeBot.shape === s.id;
                         return (
@@ -649,7 +669,7 @@ export function InspectorDrawer({
                   >
                     <span className="flex items-center gap-3 min-w-0">
                       <span className="w-[34px] h-[34px] rounded-[10px] bg-cyan-500/15 text-cyan-400 flex items-center justify-center shrink-0">
-                        <BrainIcon className="w-[17px] h-[17px]" />
+                        <Brain className="w-[17px] h-[17px]" />
                       </span>
                       <span className="text-[14.5px] font-medium text-[#f4f4f5] truncate">
                         Shared &amp; Bot Memories
@@ -659,15 +679,15 @@ export function InspectorDrawer({
                   </button>
                   <button
                     type="button"
-                    onClick={() => onOpenOmniHub("skills")}
+                    onClick={() => onOpenOmniHub("projects")}
                     className="w-full px-4 py-3 flex items-center justify-between gap-3.5 text-left hover:bg-white/[0.04] transition-colors"
                   >
                     <span className="flex items-center gap-3 min-w-0">
                       <span className="w-[34px] h-[34px] rounded-[10px] bg-[#8cf1fb]/15 text-[#8cf1fb] flex items-center justify-center shrink-0">
-                        <LayoutGridIcon className="w-[17px] h-[17px]" />
+                        <LayoutGrid className="w-[17px] h-[17px]" />
                       </span>
                       <span className="text-[14.5px] font-medium text-[#f4f4f5] truncate">
-                        Skills, Workspaces &amp; Hub
+                        Projects, Skills &amp; Hub
                       </span>
                     </span>
                     <ChevronRight className="w-4 h-4 text-zinc-500 shrink-0" />
@@ -679,11 +699,13 @@ export function InspectorDrawer({
 
           {activeTab === "git" && (
             <div className="space-y-5">
-              <div className="liquid-glass-card rounded-2xl p-4 space-y-2.5">
+              <div className="liquid-glass-card rounded-2xl p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="min-w-0">
                     <div className="text-[14.5px] font-semibold text-white truncate">
-                      {gitStatus.isRepo ? `Branch: ${gitStatus.branch}` : "Not a Git repository"}
+                      {gitStatus.isRepo
+                        ? `Branch: ${gitStatus.branch}`
+                        : "Not a Git repository"}
                     </div>
                     <div className="text-xs text-[#8e8d8a] font-mono truncate">
                       {gitStatus.rootPath}
@@ -698,6 +720,31 @@ export function InspectorDrawer({
                     <RefreshCw className="w-3.5 h-3.5" />
                   </button>
                 </div>
+
+                {gitStatus.changedFiles.length > 0 && (
+                  <div className="flex gap-2 pt-1">
+                    <input
+                      type="text"
+                      value={commitMessage}
+                      onChange={(e) => setCommitMessage(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") handleCommitAll();
+                      }}
+                      placeholder="Commit message..."
+                      className="min-w-0 flex-1 rounded-xl bg-[#1f1f1f] border border-white/[0.07] px-3 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      disabled={committing || !commitMessage.trim()}
+                      onClick={handleCommitAll}
+                      className="px-3 py-1.5 rounded-xl bg-white hover:bg-zinc-200 disabled:opacity-40 text-black text-xs font-semibold flex items-center gap-1.5 shrink-0"
+                    >
+                      <GitCommitHorizontal className="w-3.5 h-3.5" />
+                      <span>{committing ? "..." : "Commit"}</span>
+                    </button>
+                  </div>
+                )}
+
                 {gitStatus.diffStat && (
                   <pre className="text-[11px] font-mono text-zinc-400 bg-black/40 rounded-xl p-2.5 overflow-x-auto">
                     {gitStatus.diffStat}
@@ -719,29 +766,39 @@ export function InspectorDrawer({
                       const expanded = selectedDiffFile === f.path;
                       return (
                         <div key={f.path}>
-                          <button
-                            type="button"
-                            onClick={() => handleLoadFileDiff(f.path)}
-                            className="w-full px-3.5 py-2.5 flex items-center justify-between gap-2 text-left hover:bg-white/[0.04] transition-colors"
-                          >
-                            <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                              <FileCode className="w-4 h-4 text-cyan-400 shrink-0" />
+                          <div className="px-3.5 py-2.5 flex items-center justify-between gap-2 hover:bg-white/[0.04] transition-colors">
+                            <button
+                              type="button"
+                              onClick={() => handleLoadFileDiff(f.path)}
+                              className="flex items-center gap-2.5 min-w-0 flex-1 text-left"
+                            >
+                              <FileCode2 className="w-4 h-4 text-cyan-400 shrink-0" />
                               <span className="text-[13px] font-mono text-zinc-100 truncate">
                                 {f.path}
                               </span>
+                            </button>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <span
+                                className={`text-[11px] px-2 py-0.5 rounded-full capitalize ${
+                                  f.status === "added"
+                                    ? "bg-emerald-500/15 text-emerald-300"
+                                    : f.status === "deleted"
+                                      ? "bg-red-500/15 text-red-300"
+                                      : "bg-amber-500/15 text-amber-300"
+                                }`}
+                              >
+                                {f.status}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => onDiscardGitFile(f.path)}
+                                title="Discard changes in this file"
+                                className="p-1 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-white/[0.06]"
+                              >
+                                <RotateCcw className="w-3.5 h-3.5" />
+                              </button>
                             </div>
-                            <span
-                              className={`text-[11px] px-2 py-0.5 rounded-full capitalize shrink-0 ${
-                                f.status === "added"
-                                  ? "bg-emerald-500/15 text-emerald-300"
-                                  : f.status === "deleted"
-                                    ? "bg-red-500/15 text-red-300"
-                                    : "bg-amber-500/15 text-amber-300"
-                              }`}
-                            >
-                              {f.status}
-                            </span>
-                          </button>
+                          </div>
                           {expanded && (
                             <pre className="px-3.5 py-2.5 bg-black/60 border-t border-white/[0.06] text-[11px] font-mono text-zinc-300 overflow-x-auto max-h-60">
                               {selectedDiffContent}
@@ -781,7 +838,7 @@ export function InspectorDrawer({
 
           {activeTab === "computer" && (
             <div className="space-y-5">
-              {/* Local Mac Workspace Root */}
+              {/* Local Mac Project Root */}
               <div className="liquid-glass-card rounded-2xl p-4 space-y-3.5">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2.5">
@@ -790,7 +847,7 @@ export function InspectorDrawer({
                     </span>
                     <div>
                       <div className="text-[14.5px] font-medium text-[#f4f4f5]">
-                        Local Mac Workspace
+                        Active Project Directory
                       </div>
                       {systemOverview && (
                         <div className="text-[12.5px] text-[#8e8d8a] truncate">
@@ -834,11 +891,11 @@ export function InspectorDrawer({
                 </div>
               </div>
 
-              {/* Workspace Files Preview */}
+              {/* Project Files Preview */}
               <div className="space-y-2">
                 <div className="px-1.5 flex items-center justify-between">
                   <span className="text-[13.5px] font-normal text-[#8e8d8a]">
-                    Workspace Files ({localFiles.length})
+                    Project Files ({localFiles.length})
                   </span>
                   <button
                     type="button"
