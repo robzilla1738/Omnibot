@@ -317,6 +317,7 @@ fn fail_startup(message: &str, show_alert: bool) -> ! {
 /// The single exit path for both the window app and `--server-only`.
 fn shutdown(state: &SharedOmniState) {
     terminal::shutdown(state);
+    drivers::terminate_all_running_processes();
 }
 
 async fn wait_for_termination() {
@@ -341,6 +342,8 @@ async fn wait_for_termination() {
 
 pub fn run() {
     let server_only = std::env::args().any(|a| a == "--server-only");
+    // Reading the login shell can take a few seconds; start before the first CLI scan needs it.
+    std::thread::spawn(scanner::user_environment);
     let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|error| {
         fail_startup(
             &format!("The background runtime couldn't start: {error}"),

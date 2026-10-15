@@ -1,7 +1,7 @@
 //! Bounded, in-memory process output and explicitly owned interactive PTYs.
 use crate::drivers::{resolve_driver_binary, DriverTurnRequest};
 use crate::execution;
-use crate::scanner::{augmented_path_env, CliDriverKind};
+use crate::scanner::{path_env_for_binary, user_environment, CliDriverKind};
 use crate::state::{now_ms, OmniRuntimeState, OmniStreamEvent, SharedOmniState};
 use axum::{
     extract::{Query, State},
@@ -472,14 +472,19 @@ pub fn start(state: SharedOmniState, input: StartInput) -> Result<TerminalInfo, 
             }
             let (binary, args) =
                 resolve_driver_binary(&bot).ok_or("CLI command is no longer available")?;
-            let mut command = CommandBuilder::new(binary);
+            let mut command = CommandBuilder::new(&binary);
             command.args(args);
             command.cwd(&cwd);
-            command.env("PATH", augmented_path_env());
+            for (key, value) in user_environment() {
+                command.env(key, value);
+            }
+            command.env("PATH", path_env_for_binary(&binary));
             command.env("TERM", "xterm-256color");
             command.env("COLORTERM", "truecolor");
             // Finder-launched apps have no locale, which makes CLIs print non-ASCII as `?`.
-            if std::env::var_os("LANG").is_none() {
+            if std::env::var_os("LANG").is_none()
+                && !user_environment().iter().any(|(key, _)| key == "LANG")
+            {
                 command.env("LANG", "en_US.UTF-8");
             }
             command.env_remove("NO_COLOR");
