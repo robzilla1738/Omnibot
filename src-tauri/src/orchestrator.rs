@@ -504,14 +504,27 @@ pub(crate) async fn run_single_bot_step(
         }
 
         if let Some(slug) = &skill_slug {
-            if let Some(skill) = skills.iter().find(|s| &s.slug == slug) {
-                if let Ok(skill_body) = fs::read_to_string(&skill.path) {
-                    let snippet: String = skill_body.chars().take(4500).collect();
+            let skill_body = skills
+                .iter()
+                .find(|s| &s.slug == slug)
+                .ok_or_else(|| "it is no longer installed".to_string())
+                .and_then(|skill| {
+                    fs::read_to_string(&skill.path)
+                        .map(|body| (skill, body))
+                        .map_err(|e| e.to_string())
+                });
+            match skill_body {
+                Ok((skill, body)) => {
+                    let snippet: String = body.chars().take(4500).collect();
                     sys_parts.push(format!(
                         "Active Skill `/{}` ({}):\n{}",
                         skill.slug, skill.name, snippet
                     ));
                 }
+                Err(error) => chat.messages.push(crate::workflow::notice_message(&format!(
+                    "Skill /{slug} could not be loaded ({error}). @{} is continuing without it.",
+                    bot.name
+                ))),
             }
         }
 
@@ -682,37 +695,10 @@ pub(crate) async fn run_single_bot_step(
             .map(|h| (bot.clone(), h))
             .collect();
 
-    let actionable = crate::routing::actionable_text(&output.text);
-    let mut unresolved = Vec::new();
-    for line in actionable
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with("<handoff "))
-    {
-        if let Some((header, _)) = line[9..].split_once('>') {
-            if let Some(attributes) = shlex::split(header) {
-                if let Some(target) = attributes.iter().find_map(|a| a.strip_prefix("to=")) {
-                    for name in target
-                        .split(',')
-                        .map(|name| name.trim().trim_start_matches('@'))
-                    {
-                        let count = all_bots
-                            .iter()
-                            .filter(|b| {
-                                b.id != bot.id
-                                    && (b.name.eq_ignore_ascii_case(name)
-                                        || b.slug.eq_ignore_ascii_case(name)
-                                        || b.id == name)
-                            })
-                            .count();
-                        if count != 1 {
-                            unresolved.push(name.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let unresolved: Vec<_> = handoff_blocks(&bot, &output.text, &all_bots)
+        .into_iter()
+        .flat_map(|block| block.unresolved)
+        .collect();
     for recipient in unresolved {
         let workflow_id = state
             .read()
@@ -808,17 +794,23 @@ fn extract_mentioned_bots(
     crate::routing::mentions(text, all_bots, exclude_bot_id)
 }
 
-fn parse_bot_handoffs(
+struct HandoffBlock<'a> {
+    mode: String,
+    note: String,
+    targets: Vec<&'a BotProfile>,
+    unresolved: Vec<String>,
+}
+
+/// Complete, standalone `<handoff>` blocks, with recipient names that matched no single teammate.
+fn handoff_blocks<'a>(
     speaking_bot: &BotProfile,
     reply_text: &str,
-    all_bots: &[BotProfile],
-    only_explicit_handoffs: bool,
-) -> Vec<HandoffEvent> {
+    all_bots: &'a [BotProfile],
+) -> Vec<HandoffBlock<'a>> {
     // Quoted examples and code are data, not executable routing instructions.
     let actionable = crate::routing::unquoted_text(reply_text);
-    let reply_text = actionable.as_str();
-    let mut handoffs = Vec::new();
-    let mut remaining = reply_text;
+    let mut blocks = Vec::new();
+    let mut remaining = actionable.as_str();
     while let Some(open) = remaining.find("<handoff ") {
         let prefix = &remaining[..open];
         let rest = &remaining[open + 9..];
@@ -851,6 +843,7 @@ fn parse_bot_handoffs(
             continue;
         };
         let mut targets = Vec::new();
+        let mut unresolved = Vec::new();
         for name in target.split(',').map(|s| s.trim().trim_start_matches('@')) {
             let matches: Vec<_> = all_bots
                 .iter()
@@ -862,24 +855,45 @@ fn parse_bot_handoffs(
                             || b.id == name)
                 })
                 .collect();
-            if matches.len() == 1 && !targets.iter().any(|b: &&BotProfile| b.id == matches[0].id) {
+            if matches.len() != 1 {
+                unresolved.push(name.to_string());
+            } else if !targets.iter().any(|b: &&BotProfile| b.id == matches[0].id) {
                 targets.push(matches[0]);
             }
         }
-        if !targets.is_empty() {
-            handoffs.push(HandoffEvent {
-                from_bot_id: speaking_bot.id.clone(),
-                from_bot_name: speaking_bot.name.clone(),
-                to_bot_ids: targets.iter().map(|b| b.id.clone()).collect(),
-                to_bot_names: targets.iter().map(|b| b.name.clone()).collect(),
-                mode: mode.into(),
-                note: note.chars().take(6000).collect(),
-            });
-        }
+        blocks.push(HandoffBlock {
+            mode: mode.into(),
+            note: note.chars().take(6000).collect(),
+            targets,
+            unresolved,
+        });
     }
+    blocks
+}
+
+fn parse_bot_handoffs(
+    speaking_bot: &BotProfile,
+    reply_text: &str,
+    all_bots: &[BotProfile],
+    only_explicit_handoffs: bool,
+) -> Vec<HandoffEvent> {
+    let handoffs: Vec<_> = handoff_blocks(speaking_bot, reply_text, all_bots)
+        .into_iter()
+        .filter(|block| !block.targets.is_empty())
+        .map(|block| HandoffEvent {
+            from_bot_id: speaking_bot.id.clone(),
+            from_bot_name: speaking_bot.name.clone(),
+            to_bot_ids: block.targets.iter().map(|b| b.id.clone()).collect(),
+            to_bot_names: block.targets.iter().map(|b| b.name.clone()).collect(),
+            mode: block.mode,
+            note: block.note,
+        })
+        .collect();
     if !handoffs.is_empty() || only_explicit_handoffs {
         return handoffs;
     }
+    let actionable = crate::routing::unquoted_text(reply_text);
+    let reply_text = actionable.as_str();
 
     // 2. Otherwise check the last 6 lines for an explicit directive handoff to another @Bot
     let tail_lines: Vec<&str> = reply_text
