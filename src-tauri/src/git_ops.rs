@@ -1,8 +1,10 @@
 use crate::scanner::augmented_path_env;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,7 +37,29 @@ pub struct GitRepoStatus {
     pub worktrees: Vec<GitWorktreeEntry>,
 }
 
-fn run_git(cwd: &str, args: &[&str]) -> Result<String, String> {
+#[derive(Clone, Copy)]
+enum Git {
+    /// Never takes optional locks, so status checks don't contend with a bot's Git commands.
+    Read,
+    Write,
+    /// Populates or deletes a checkout, or runs hooks.
+    Long,
+}
+
+const DIFF_PREVIEW_BYTES: u64 = 24_000;
+
+fn run_git(cwd: &str, args: &[&str], kind: Git) -> Result<String, String> {
+    run_git_limited(cwd, args, kind, None).map(|(stdout, _)| stdout)
+}
+
+/// Returns stdout and whether it was cut at `limit` bytes. Git is stopped once it writes past
+/// the limit, so a huge diff is never fully produced or read.
+fn run_git_limited(
+    cwd: &str,
+    args: &[&str],
+    kind: Git,
+    limit: Option<u64>,
+) -> Result<(String, bool), String> {
     let output_dir = std::env::temp_dir().join(format!("omni-git-{}", uuid::Uuid::new_v4()));
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
@@ -51,7 +75,8 @@ fn run_git(cwd: &str, args: &[&str]) -> Result<String, String> {
         }
     }
     let _cleanup = OutputDir(output_dir.clone());
-    let stdout = fs::File::create(output_dir.join("stdout")).map_err(|e| e.to_string())?;
+    let stdout_path = output_dir.join("stdout");
+    let stdout = fs::File::create(&stdout_path).map_err(|e| e.to_string())?;
     let stderr = fs::File::create(output_dir.join("stderr")).map_err(|e| e.to_string())?;
     let mut command = Command::new("git");
     command
@@ -62,6 +87,9 @@ fn run_git(cwd: &str, args: &[&str]) -> Result<String, String> {
         .stdin(std::process::Stdio::null())
         .stdout(stdout)
         .stderr(stderr);
+    if matches!(kind, Git::Read) {
+        command.env("GIT_OPTIONAL_LOCKS", "0");
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -70,65 +98,80 @@ fn run_git(cwd: &str, args: &[&str]) -> Result<String, String> {
     let mut child = command
         .spawn()
         .map_err(|e| format!("Failed to run git: {e}"))?;
+    let timeout = Duration::from_secs(match kind {
+        Git::Long => 300,
+        Git::Read | Git::Write => 15,
+    });
+    let stdout_len = || fs::metadata(&stdout_path).map_or(0, |m| m.len());
     let start = std::time::Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-            break status;
+            break Some(status);
         }
-        if start.elapsed() > std::time::Duration::from_secs(15) {
+        let overflow = limit.is_some_and(|limit| stdout_len() > limit);
+        if overflow || start.elapsed() > timeout {
             #[cfg(unix)]
             unsafe {
                 libc::kill(-(child.id() as i32), libc::SIGKILL);
             }
             let _ = child.kill();
             let _ = child.wait();
+            if overflow {
+                break None;
+            }
             return Err("Git took too long. Check repository hooks or locks and try again.".into());
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(10));
     };
-    let out = std::process::Output {
-        status,
-        stdout: fs::read(output_dir.join("stdout")).map_err(|e| e.to_string())?,
-        stderr: fs::read(output_dir.join("stderr")).map_err(|e| e.to_string())?,
-    };
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if status.is_some_and(|status| !status.success()) {
+        let stderr = fs::read(output_dir.join("stderr")).map_err(|e| e.to_string())?;
+        let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
         return Err(if stderr.is_empty() {
             "git command failed".to_string()
         } else {
             stderr
         });
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    let truncated = limit.is_some_and(|limit| stdout_len() > limit);
+    let mut stdout = Vec::new();
+    fs::File::open(&stdout_path)
+        .and_then(|file| {
+            file.take(limit.unwrap_or(u64::MAX))
+                .read_to_end(&mut stdout)
+        })
+        .map_err(|e| e.to_string())?;
+    // Drop a multi-byte character split by the limit rather than rendering a replacement.
+    let valid = match std::str::from_utf8(&stdout) {
+        Err(error) if truncated && error.error_len().is_none() => error.valid_up_to(),
+        _ => stdout.len(),
+    };
+    Ok((
+        String::from_utf8_lossy(&stdout[..valid]).into_owned(),
+        truncated,
+    ))
 }
 
 pub fn inspect_git_status(workspace_root: &str) -> GitRepoStatus {
-    let Ok(top_level) = run_git(workspace_root, &["rev-parse", "--show-toplevel"]) else {
+    let Ok(top_level) = run_git(workspace_root, &["rev-parse", "--show-toplevel"], Git::Read)
+    else {
         return GitRepoStatus {
             is_repo: false,
             root_path: workspace_root.to_string(),
-            branch: String::new(),
-            head_short: String::new(),
-            ahead: 0,
-            behind: 0,
-            changed_files: Vec::new(),
-            diff_stat: String::new(),
-            diff_preview: String::new(),
-            worktrees: Vec::new(),
+            ..Default::default()
         };
     };
     let root_path = top_level.trim().to_string();
-    let branch = run_git(&root_path, &["rev-parse", "--abbrev-ref", "HEAD"])
-        .unwrap_or_else(|_| "main".to_string())
-        .trim()
-        .to_string();
-    let head_short = run_git(&root_path, &["rev-parse", "--short", "HEAD"])
+    let git = |args: &[&str]| run_git(&root_path, args, Git::Read);
+    // Unborn branches still have a symbolic HEAD; only a detached HEAD has no branch name.
+    let branch = git(&["symbolic-ref", "--short", "-q", "HEAD"])
+        .map_or_else(|_| "HEAD (detached)".to_string(), |b| b.trim().to_string());
+    let head_short = git(&["rev-parse", "--short", "HEAD"])
         .unwrap_or_default()
         .trim()
         .to_string();
 
     let mut changed_files = Vec::new();
-    if let Ok(porcelain) = run_git(&root_path, &["status", "--porcelain=v1", "-z"]) {
+    if let Ok(porcelain) = git(&["status", "--porcelain=v1", "-z"]) {
         let mut entries = porcelain.split('\0').filter(|entry| !entry.is_empty());
         while let Some(entry) = entries.next() {
             if entry.len() < 4 || !entry.is_char_boundary(3) {
@@ -160,26 +203,23 @@ pub fn inspect_git_status(workspace_root: &str) -> GitRepoStatus {
         }
     }
 
-    let diff_stat = run_git(&root_path, &["diff", "--stat", "HEAD"])
-        .or_else(|_| run_git(&root_path, &["diff", "--stat"]))
+    let diff_stat = git(&["diff", "--stat", "HEAD"])
+        .or_else(|_| git(&["diff", "--stat"]))
         .unwrap_or_default()
         .trim()
         .to_string();
 
-    let mut diff_preview = run_git(&root_path, &["diff", "HEAD"])
-        .or_else(|_| run_git(&root_path, &["diff"]))
+    let preview =
+        |args: &[&str]| run_git_limited(&root_path, args, Git::Read, Some(DIFF_PREVIEW_BYTES));
+    let (mut diff_preview, truncated) = preview(&["diff", "HEAD"])
+        .or_else(|_| preview(&["diff"]))
         .unwrap_or_default();
-    if diff_preview.len() > 24_000 {
-        let mut end = 24_000;
-        while !diff_preview.is_char_boundary(end) {
-            end -= 1;
-        }
-        diff_preview.truncate(end);
+    if truncated {
         diff_preview.push_str("\n... [diff truncated at 24 KB]");
     }
 
     let mut worktrees = Vec::new();
-    if let Ok(wt_raw) = run_git(&root_path, &["worktree", "list", "--porcelain"]) {
+    if let Ok(wt_raw) = git(&["worktree", "list", "--porcelain"]) {
         let mut current_path = String::new();
         let mut current_head = String::new();
         let mut current_branch = String::new();
@@ -214,11 +254,8 @@ pub fn inspect_git_status(workspace_root: &str) -> GitRepoStatus {
         }
     }
 
-    let divergence = run_git(
-        &root_path,
-        &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
-    )
-    .unwrap_or_default();
+    let divergence =
+        git(&["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]).unwrap_or_default();
     let mut counts = divergence
         .split_whitespace()
         .filter_map(|n| n.parse::<u32>().ok());
@@ -236,17 +273,39 @@ pub fn inspect_git_status(workspace_root: &str) -> GitRepoStatus {
     }
 }
 
-pub fn ensure_bot_worktree(
-    workspace_root: &str,
-    chat_id: &str,
-    bot_slug: &str,
-) -> Result<String, String> {
-    ensure_bot_worktree_in(
-        workspace_root,
-        chat_id,
-        bot_slug,
-        &crate::state::omni_data_dir(),
-    )
+// Full identifiers prevent timestamp-prefix collisions across rooms. Encode arbitrary IDs so
+// they cannot escape the worktree root or become Git options.
+fn key(value: &str) -> String {
+    value.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn common_dir(cwd: &str) -> Result<PathBuf, String> {
+    let dir = run_git(
+        cwd,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        Git::Read,
+    )?;
+    Ok(canonical(Path::new(dir.trim())))
+}
+
+/// A folder is only reusable if it is itself a worktree root and its HEAD resolves; an empty
+/// or half-created folder would otherwise resolve to an enclosing repository.
+fn is_complete_worktree(path: &Path) -> bool {
+    let cwd = path.to_string_lossy();
+    let toplevel = run_git(
+        &cwd,
+        &["rev-parse", "--is-inside-work-tree", "--show-toplevel"],
+        Git::Read,
+    );
+    toplevel.is_ok_and(|out| {
+        let mut lines = out.lines();
+        lines.next() == Some("true")
+            && lines.next().map(|top| canonical(Path::new(top))) == Some(canonical(path))
+    }) && run_git(&cwd, &["rev-parse", "--verify", "-q", "HEAD"], Git::Read).is_ok()
 }
 
 pub(crate) fn ensure_bot_worktree_in(
@@ -255,17 +314,8 @@ pub(crate) fn ensure_bot_worktree_in(
     bot_slug: &str,
     data_dir: &Path,
 ) -> Result<String, String> {
-    let root = run_git(workspace_root, &["rev-parse", "--show-toplevel"])?;
+    let root = run_git(workspace_root, &["rev-parse", "--show-toplevel"], Git::Read)?;
     let root = root.trim();
-    // Full identifiers prevent timestamp-prefix collisions across rooms. Encode
-    // arbitrary IDs so they cannot escape the worktree root or become Git options.
-    fn key(value: &str) -> String {
-        value
-            .as_bytes()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
-    }
     let chat_key = key(chat_id);
     let bot_key = key(bot_slug);
     let canonical_root = fs::canonicalize(root).map_err(|e| e.to_string())?;
@@ -276,20 +326,13 @@ pub(crate) fn ensure_bot_worktree_in(
         hash = hash.wrapping_mul(0x100000001b3);
     }
     let repository_key = format!("{hash:016x}");
+    let expected = common_dir(root)?;
     let legacy = data_dir.join("worktrees").join(&chat_key).join(&bot_key);
-    if legacy.exists() {
-        let expected = run_git(
-            root,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        )?;
-        if let Ok(actual) = run_git(
-            &legacy.to_string_lossy(),
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        ) {
-            if fs::canonicalize(expected.trim()).ok() == fs::canonicalize(actual.trim()).ok() {
-                return Ok(legacy.to_string_lossy().into_owned());
-            }
-        }
+    if legacy.exists()
+        && is_complete_worktree(&legacy)
+        && common_dir(&legacy.to_string_lossy()).ok() == Some(expected.clone())
+    {
+        return Ok(legacy.to_string_lossy().into_owned());
     }
     let wt_base = data_dir
         .join("worktrees")
@@ -299,32 +342,129 @@ pub(crate) fn ensure_bot_worktree_in(
     let wt_dir = wt_base.join(&bot_key);
     let wt_str = wt_dir.to_string_lossy().into_owned();
     if wt_dir.exists() {
-        let expected = run_git(
-            root,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        )?;
-        let actual = run_git(
-            &wt_str,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        )?;
-        if fs::canonicalize(expected.trim()).ok() != fs::canonicalize(actual.trim()).ok() {
+        if !is_complete_worktree(&wt_dir) {
+            return Err(format!(
+                "The worktree folder {wt_str} is incomplete. Move or delete it, then try again."
+            ));
+        }
+        if common_dir(&wt_str)? != expected {
             return Err("Existing worktree belongs to another repository.".into());
         }
         return Ok(wt_str);
     }
+    // A worktree folder deleted outside Git still holds its branch until pruned.
+    run_git(root, &["worktree", "prune"], Git::Write)?;
     let branch = format!("omni/{chat_key}/{bot_key}");
+    let branch_ref = format!("refs/heads/{branch}");
     // Never reset an existing branch or fall back to the shared workspace.
-    if run_git(
-        root,
-        &["show-ref", "--verify", &format!("refs/heads/{branch}")],
-    )
-    .is_ok()
-    {
-        run_git(root, &["worktree", "add", &wt_str, &branch])?;
+    let added = if run_git(root, &["show-ref", "--verify", &branch_ref], Git::Read).is_ok() {
+        run_git(root, &["worktree", "add", &wt_str, &branch], Git::Long)
     } else {
-        run_git(root, &["worktree", "add", "-b", &branch, &wt_str, "HEAD"])?;
+        run_git(
+            root,
+            &["worktree", "add", "-b", &branch, &wt_str, "HEAD"],
+            Git::Long,
+        )
+    };
+    if let Err(error) = added {
+        if wt_dir.exists() {
+            let _ = fs::remove_dir_all(&wt_dir);
+            let _ = run_git(root, &["worktree", "prune"], Git::Write);
+        }
+        return Err(error);
     }
     Ok(wt_str)
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeCleanup {
+    /// Deleted worktree folders, and deleted branches as `branch <name>`.
+    pub removed: Vec<String>,
+    pub kept: Vec<KeptWorktreeItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeptWorktreeItem {
+    pub item: String,
+    pub reason: String,
+}
+
+/// Removes a chat's Omnibot worktrees and their `omni/` branches without forcing anything:
+/// worktrees with changes and branches with unmerged commits are kept and reported.
+pub fn remove_chat_worktrees(data_dir: &Path, chat_id: &str) -> WorktreeCleanup {
+    let chat_key = key(chat_id);
+    let base = data_dir.join("worktrees");
+    // Legacy layout: worktrees/<chat>/<bot>; current: worktrees/<repository>/<chat>/<bot>.
+    let mut chat_dirs = vec![base.join(&chat_key)];
+    if let Ok(entries) = fs::read_dir(&base) {
+        chat_dirs.extend(
+            entries
+                .flatten()
+                .filter(|entry| entry.file_name() != chat_key.as_str())
+                .map(|entry| entry.path().join(&chat_key)),
+        );
+    }
+    let mut cleanup = WorktreeCleanup::default();
+    for chat_dir in chat_dirs {
+        let Ok(entries) = fs::read_dir(&chat_dir) else {
+            continue;
+        };
+        for entry in entries.flatten().filter(|e| e.path().is_dir()) {
+            remove_worktree(&entry.path(), &mut cleanup);
+        }
+        // Succeeds only when nothing was kept.
+        let _ = fs::remove_dir(&chat_dir);
+    }
+    cleanup
+}
+
+fn remove_worktree(path: &Path, cleanup: &mut WorktreeCleanup) {
+    let path = canonical(path);
+    let label = path.to_string_lossy().into_owned();
+    let mut keep = |item: String, reason: String| {
+        cleanup.kept.push(KeptWorktreeItem { item, reason });
+    };
+    if !is_complete_worktree(&path) {
+        keep(label, "This folder isn't a complete Git worktree.".into());
+        return;
+    }
+    let repository = match common_dir(&label) {
+        Ok(dir) => dir.to_string_lossy().into_owned(),
+        Err(error) => return keep(label, error),
+    };
+    let branch = run_git(
+        &label,
+        &["symbolic-ref", "--short", "-q", "HEAD"],
+        Git::Read,
+    )
+    .ok()
+    .map(|b| b.trim().to_string())
+    .filter(|b| b.starts_with("omni/"));
+    if let Err(error) = run_git(&repository, &["worktree", "remove", &label], Git::Long) {
+        let reason = if error.contains("modified or untracked") {
+            "It has uncommitted or untracked changes.".into()
+        } else {
+            error
+        };
+        return keep(label, reason);
+    }
+    cleanup.removed.push(label);
+    if let Some(branch) = branch {
+        match run_git(&repository, &["branch", "-d", &branch], Git::Write) {
+            Ok(_) => cleanup.removed.push(format!("branch {branch}")),
+            Err(error) => cleanup.kept.push(KeptWorktreeItem {
+                item: format!("branch {branch}"),
+                reason: if error.contains("not fully merged") {
+                    "It has commits that aren't merged.".into()
+                } else {
+                    error
+                },
+            }),
+        }
+    }
+    let _ = run_git(&repository, &["worktree", "prune"], Git::Write);
 }
 
 // Git pathspec magic, traversal, and symlinked parents must not broaden a file action.
@@ -356,11 +496,13 @@ pub fn read_file_diff(workspace_root: &str, file_path: &str) -> Result<String, S
     let diff = run_git(
         workspace_root,
         &["--literal-pathspecs", "diff", "HEAD", "--", file_path],
+        Git::Read,
     )
     .or_else(|_| {
         run_git(
             workspace_root,
             &["--literal-pathspecs", "diff", "--", file_path],
+            Git::Read,
         )
     })?;
     if !diff.trim().is_empty() {
@@ -374,8 +516,8 @@ pub fn git_stage_and_commit(workspace_root: &str, message: &str) -> Result<Strin
     if trimmed.is_empty() {
         return Err("Commit message cannot be empty.".to_string());
     }
-    run_git(workspace_root, &["add", "-A"])?;
-    run_git(workspace_root, &["commit", "-m", trimmed])
+    run_git(workspace_root, &["add", "-A"], Git::Long)?;
+    run_git(workspace_root, &["commit", "-m", trimmed], Git::Long)
 }
 
 pub fn git_discard_file(workspace_root: &str, file_path: &str) -> Result<String, String> {
@@ -389,11 +531,13 @@ pub fn git_discard_file(workspace_root: &str, file_path: &str) -> Result<String,
             "--",
             file_path,
         ],
+        Git::Read,
     )
     .is_ok()
         || run_git(
             workspace_root,
             &["cat-file", "-e", &format!("HEAD:{file_path}")],
+            Git::Read,
         )
         .is_ok();
     if tracked {
@@ -409,6 +553,7 @@ pub fn git_discard_file(workspace_root: &str, file_path: &str) -> Result<String,
                 "--",
                 file_path,
             ],
+            Git::Write,
         )?;
     } else if full.is_file() {
         fs::remove_file(&full).map_err(|e| format!("Failed to remove {file_path}: {e}"))?;
@@ -422,6 +567,10 @@ pub fn git_discard_file(workspace_root: &str, file_path: &str) -> Result<String,
 mod tests {
     use super::*;
     use crate::test_support::Fixture;
+
+    fn run_git(cwd: &str, args: &[&str]) -> Result<String, String> {
+        super::run_git(cwd, args, Git::Long)
+    }
 
     fn repository() -> Fixture {
         let f = Fixture::new(&[]);
@@ -552,5 +701,100 @@ mod tests {
         fs::write(f.dir.join("tracked.txt"), "💻".repeat(8000)).unwrap();
         let status = inspect_git_status(root);
         assert!(status.diff_preview.contains("truncated"));
+        assert!(status.diff_preview.len() < DIFF_PREVIEW_BYTES as usize + 64);
+        assert!(!status.diff_preview.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn branch_names_are_reported_honestly() {
+        let f = repository();
+        let root = f.dir.to_str().unwrap();
+        run_git(root, &["checkout", "-q", "-b", "feature"]).unwrap();
+        assert_eq!(inspect_git_status(root).branch, "feature");
+        run_git(root, &["checkout", "-q", "--detach"]).unwrap();
+        assert_eq!(inspect_git_status(root).branch, "HEAD (detached)");
+        let empty = Fixture::new(&[]);
+        let empty_root = empty.dir.to_str().unwrap();
+        run_git(empty_root, &["init", "-q", "-b", "trunk"]).unwrap();
+        assert_eq!(inspect_git_status(empty_root).branch, "trunk");
+    }
+
+    #[test]
+    fn incomplete_worktree_folders_are_rejected_and_failed_adds_leave_nothing_behind() {
+        let f = repository();
+        let root = f.dir.to_str().unwrap();
+        run_git(root, &["config", "core.hooksPath", "/dev/null"]).unwrap();
+        let data = f.dir.join("state");
+        let first = ensure_bot_worktree_in(root, "room", "x", &data).unwrap();
+        let partial = Path::new(&first).parent().unwrap().join(key("y"));
+        fs::create_dir_all(&partial).unwrap();
+        let error = ensure_bot_worktree_in(root, "room", "y", &data).unwrap_err();
+        assert!(error.contains("incomplete"), "{error}");
+        fs::remove_dir(&partial).unwrap();
+
+        let hooks = f.dir.join("hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("post-checkout");
+        fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o700)).unwrap();
+        run_git(root, &["config", "core.hooksPath", hooks.to_str().unwrap()]).unwrap();
+        assert!(ensure_bot_worktree_in(root, "room", "y", &data).is_err());
+        assert!(!partial.exists());
+        run_git(root, &["config", "core.hooksPath", "/dev/null"]).unwrap();
+        let retried = ensure_bot_worktree_in(root, "room", "y", &data).unwrap();
+        assert!(is_complete_worktree(Path::new(&retried)));
+    }
+
+    #[test]
+    fn chat_cleanup_removes_clean_worktrees_and_keeps_dirty_or_unmerged_work() {
+        let f = repository();
+        let root = f.dir.to_str().unwrap();
+        run_git(root, &["config", "core.hooksPath", "/dev/null"]).unwrap();
+        let data = f.dir.join("state");
+        let worktree =
+            |chat: &str, bot: &str| ensure_bot_worktree_in(root, chat, bot, &data).unwrap();
+        let clean = worktree("room", "clean");
+        let dirty = worktree("room", "dirty");
+        let ahead = worktree("room", "ahead");
+        let other = worktree("other", "clean");
+        fs::write(Path::new(&dirty).join("draft.txt"), "keep me").unwrap();
+        fs::write(Path::new(&ahead).join("tracked.txt"), "committed work").unwrap();
+        run_git(&ahead, &["commit", "-qam", "work"]).unwrap();
+        let branch = |bot: &str| format!("omni/{}/{}", key("room"), key(bot));
+        let has_branch = |bot: &str| {
+            run_git(
+                root,
+                &[
+                    "show-ref",
+                    "--verify",
+                    &format!("refs/heads/{}", branch(bot)),
+                ],
+            )
+            .is_ok()
+        };
+
+        let result = remove_chat_worktrees(&data, "room");
+
+        assert!(!Path::new(&clean).exists());
+        assert!(!has_branch("clean"));
+        assert!(result
+            .removed
+            .contains(&format!("branch {}", branch("clean"))));
+        assert!(Path::new(&dirty).join("draft.txt").exists());
+        assert!(has_branch("dirty"));
+        assert!(result
+            .kept
+            .iter()
+            .any(|k| k.item == canonical(Path::new(&dirty)).to_string_lossy()
+                && k.reason.contains("uncommitted")));
+        assert!(!Path::new(&ahead).exists());
+        assert!(has_branch("ahead"));
+        assert!(result.kept.iter().any(
+            |k| k.item == format!("branch {}", branch("ahead")) && k.reason.contains("merged")
+        ));
+        assert!(Path::new(&other).exists());
+        let listed = run_git(root, &["worktree", "list", "--porcelain"]).unwrap();
+        assert_eq!(listed.matches("worktree ").count(), 3);
     }
 }
