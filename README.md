@@ -33,7 +33,7 @@ pnpm tauri:dev
 
 In setup, customize your main bot, find installed tools, select bots to add to the sidebar, and review permissions. Adding a project is optional. Standard CLI permissions are the default. Discovery checks installation and model metadata; it does not prove that your provider account can complete a request.
 
-Open **Bot library** to add or pin bots later. Click a bot's name or avatar to edit its settings. Archive bots to preserve their history and memory; restore them from Bot library. Right-click empty sidebar space for view options. The settings button reopens setup.
+Click **Bots** at the bottom of the sidebar to open the Bot library and add or pin bots later. Click a bot's name or avatar to edit its settings. Archive bots to preserve their history and memory; restore them from Bot library. Right-click empty sidebar space for view options. The settings button reopens setup.
 
 ### CLI support
 
