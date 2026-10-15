@@ -10,8 +10,8 @@ A local macOS app for working with AI bots, projects, and group chats through yo
 - **Keep bots, projects, and tasks separate.** Bots have ongoing conversations and personal memory. Projects provide workspace context. Chats are separate tasks, optionally linked to a project.
 - **Choose your tools.** Discover installed CLIs, add individual bots, and select models from each supported CLI's available catalog. Custom model IDs and CLI defaults remain available.
 - **Work together when you want.** Start a group chat, mention teammates, run sequential or parallel work, and use explicit handoffs. Optional Git worktrees isolate edits by bot.
-- **Stay in control.** Stream replies and tool activity, stop running work, inspect Git changes, edit memories, and schedule routines while the app is open.
-- **Organize your sidebar.** Filter by Bots, Projects, or Chats; drag to reorder; collapse sections; rename or remove items using their context menus.
+- **Stay in control.** Stream replies and tool activity, stop running work, inspect Git changes, edit memories, and schedule routines while the app is open. Quitting Omnibot stops running bots.
+- **Organize your sidebar.** Filter by Bots, Projects, or Chats; drag to reorder; collapse sections; rename or delete items using their context menus. Destructive actions ask for confirmation.
 
 Omnibot stores its own conversations, preferences, and memories locally. When you send a message, the selected CLI uses its configured provider, authentication, permissions, and billing. Omnibot is an independent project and is not affiliated with the providers it integrates.
 
@@ -37,7 +37,12 @@ Open **Bot library** to add or pin bots later. Click a bot's name or avatar to e
 
 ### CLI support
 
-Execution adapters are implemented for Claude Code, Codex, OpenCode, Cursor Agent, Grok Build, Pi, Muse, Gemini CLI, Aider, and Ollama, plus custom commands. Streaming, model discovery, session resume, and usage reporting depend on each CLI's protocol. Unsupported metadata is shown as unavailable rather than guessed. Ollama requires an explicit installed model.
+Execution adapters are implemented for Claude Code, Codex, OpenCode, Cursor Agent, Grok Build, Pi, Muse (`muse exec`), Gemini CLI, Aider, and Ollama, plus custom commands. Antigravity and ACP adapters are experimental: they pass one prompt and show plain-text output. Streaming, model discovery, session resume, and usage reporting depend on each CLI's protocol. Unsupported metadata is shown as unavailable rather than guessed.
+
+- Prompts are passed on stdin or after `--`, so a message that starts with `-` is never read as a CLI option.
+- When opened from Finder, Omnibot loads the `PATH` and variables exported by your login shell, so CLIs installed with Homebrew, npm, nvm, mise, and similar tools are found with their API keys.
+- Ollama uses only models already installed (`ollama list`); it never downloads one. Aider runs with `--no-auto-commits` so you review and commit changes yourself.
+- **Approve all tools** applies only to CLIs with an equivalent option; others run with their default permissions and the activity log says so.
 
 Install and sign in to each CLI using its own documentation. Check **Bot library → Local tools** for local diagnostics. See [lifecycle and coordination changes](docs/bot-lifecycle-implementation.md) and [implementation notes and limitations](docs/local-review.md) for verified behavior; live inference has not been tested against every CLI/version combination.
 
@@ -65,7 +70,9 @@ Git worktrees start from committed HEAD, do not include uncommitted changes auto
 
 Routines support manual, daily, weekday, and weekly schedules with a selected bot and model. Scheduled runs use local time while Omnibot is open; missed runs are not replayed. Older cron entries remain manual until configured through the schedule picker.
 
-Token counts and cost come from CLI reports. Missing metrics remain unavailable, and reported cost may differ from your provider invoice. Dollar guardrails depend on when a CLI reports cost; they are not provider-side spending caps. Duration is measured locally.
+Token counts and cost come from CLI reports. Missing metrics remain unavailable, and reported cost may differ from your provider invoice. Dollar guardrails depend on when a CLI reports cost; they are not provider-side spending caps. A budget of 0 means no limit. When a CLI reports cost only with its final answer (as Claude Code does), Omnibot keeps the answer and adds a notice instead of stopping the turn. Duration is measured locally.
+
+The turn timeout measures time without any output, so long runs that keep working are not cut off; every turn still stops after six times the timeout (at most three hours).
 
 ## Keyboard shortcuts
 
@@ -99,25 +106,24 @@ Tests use temporary repositories, fake CLI processes, and mocked API responses. 
 
 State lives in `~/.omni-bot/`; `OMNI_BOT_HOME` selects another data directory. Back up this folder before testing changes with important conversations. Keep one app instance per data directory.
 
-The local API listens on loopback, normally `127.0.0.1:4321`; the development UI uses `localhost:1420`. It is intended for your own machine, not remote hosting. See [the security policy](SECURITY.md) for the trust boundaries.
+The local API listens on loopback, normally `127.0.0.1:4321`; the development UI uses `localhost:1420`. Requests need the token in `~/.omni-bot/api-token` (sent as `Authorization: Bearer <token>`); the app passes it to its own window automatically. It is intended for your own machine, not remote hosting. If saved state can't be read, Omnibot keeps the damaged file as `store.corrupt-<time>.json` and restores `store.json.bak`. See [the security policy](SECURITY.md) for the trust boundaries.
 
 The application, Dock entry, executable, window, and bundle are named **Omnibot**. The original data directory, environment variable, and bundle identifier (`com.robzilla1738.botfinity`) are retained for compatibility. Legacy avatar paths and sidebar preferences migrate automatically. Your custom bot names are independent of the application name.
 
-## Contributing and license
-
-Bug reports and focused pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting changes and [SECURITY.md](SECURITY.md) before reporting a vulnerability.
-
-Omnibot's code is available under the [MIT license](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md) for borrowed code, icon attribution, and provider trademarks.
-
-### Embedded terminal
+## Embedded terminal
 
 Use the circular **Terminal** button beside Settings in the expanded sidebar (⌘`) to enter the interactive Claude Code or custom-command session directly. Existing sessions are reused; active chat automation is stopped before starting a new interactive session. Resize or expand the panel, search its output, and switch to **Run logs** for automated process output. Hiding the panel keeps the process running; **End control** stops it. See [terminal behavior and testing](docs/embedded-terminal.md).
 
-
-### Interface and provider settings
+## Interface and provider settings
 
 Dropdowns use native platform menus and keyboard controls. Token usage, reported cost, duration, and the model badge sit beside the bot name and appear on card hover or keyboard focus (always available on touch devices). The chat area has no activity-history panel. The jump-to-latest control stays above the measured composer height, including terminal notices.
 
 Cursor workspace trust is separate from tool approval. **Bot library → Team Rules & Trust → Trust bot homes in Cursor** permits Cursor to trust only Omnibot-managed bot home folders; project folders still need their own approval. This preference defaults off for new profiles. Provider errors are presented without duplicate JSON envelopes, while raw diagnostics remain in terminal run logs.
 
 See the [implementation notes](docs/bot-lifecycle-implementation.md) and [embedded terminal guide](docs/embedded-terminal.md) for behavior, testing, and limitations.
+
+## Contributing and license
+
+Bug reports and focused pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting changes and [SECURITY.md](SECURITY.md) before reporting a vulnerability.
+
+Omnibot's code is available under the [MIT license](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md) for borrowed code, icon attribution, and provider trademarks.

@@ -6,7 +6,7 @@ Implemented locally on `plan/bot-lifecycle-and-coordination`. Nothing is publish
 
 Click the circular **Terminal** control beside Settings in the expanded sidebar, or press **⌘`** (Ctrl+` on other keyboards). The default view opens the interactive CLI automatically for Claude Code and custom commands and focuses its input. Opening it while chat automation is running stops that workflow and cancels pending handoffs first. An existing live interactive session is reused, including after hiding/reopening or a page reload. Startup errors offer an explicit retry; completed or stopped sessions are not automatically restarted while the panel remains open.
 
-**Run logs** is a secondary view for troubleshooting. It contains actual stdout and stderr from automated runs, including output without a newline. Those processes use structured protocols with closed stdin, so their logs are read-only and may contain JSON. Unsupported interactive adapters show an explanation rather than automatically presenting raw logs.
+**Run logs** is a secondary view for troubleshooting. It contains actual stdout and stderr from automated runs, including output without a newline. Those processes are non-interactive (stdin carries at most the prompt), so their logs are read-only and may contain JSON. Unsupported interactive adapters show an explanation rather than automatically presenting raw logs.
 
 Drag the panel's left edge to resize, expand it for more space, and search or copy selected output from the toolbar. Process tabs and the follow button apply within the selected view. Opening an interactive CLI starts a new PTY process; it does not attach a keyboard to an already-running headless process.
 
@@ -23,9 +23,9 @@ Terminal conversations remain in the terminal, not the app's parsed chat transcr
 - React uses lazily loaded xterm.js with Fit, Search, and Serialize addons; styling uses the app's neutral charcoal surfaces, circular controls, and pill buttons.
 - Rust uses `portable-pty`. A process owner handles group/foreground cleanup; nonblocking Unix I/O keeps Stop responsive even when the child ignores input.
 - Terminal HTTP endpoints use the existing loopback host/origin validation. Start takes a saved chat/bot identity, not an arbitrary command. Input and dimensions are validated; pending input is bounded.
-- Terminal output has its own byte-offset API, separate from canonical snapshots. The visible panel polls at approximately 80 ms after each completed read, with backpressure from xterm parsing. Hidden panels stop reading. Session metadata refreshes separately.
+- Terminal output has its own byte-offset API, separate from canonical snapshots. The visible panel polls about every 80 ms while output is arriving and backs off to once per second when idle, with backpressure from xterm parsing. Output is transferred as base64 so multibyte characters split across reads stay intact. Hidden panels stop reading. Session metadata refreshes separately.
 - Output is held in memory, up to 2 MiB per process, with up to 32 retained sessions (active sessions are never evicted). The UI retains up to 5,000 scrollback lines and serializes screens when switching tabs. Expired output is identified visibly. Full terminal transcripts are not written to disk and do not survive an app restart; task records do.
-- The native window and server-only mode both stop interactive sessions during normal shutdown. Crashes or forced OS termination cannot run application cleanup.
+- The native window and server-only mode both stop interactive sessions and automated bot processes during normal shutdown (including SIGTERM in server-only mode). Crashes or forced OS termination cannot run application cleanup.
 
 ## Verification
 

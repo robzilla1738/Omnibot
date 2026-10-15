@@ -8,16 +8,16 @@ Security fixes target the current `main` branch. Older commits and third-party C
 
 ## Trust boundaries
 
-Omnibot is a local desktop application. Its HTTP API binds to loopback, rejects foreign browser origins and unexpected Host headers, and has no remote authentication layer. Local processes and applications on the same machine are trusted. Do not expose the API through a public proxy or tunnel.
+Omnibot is a local desktop application. Its HTTP API binds to loopback, rejects foreign browser origins and unexpected Host headers, and requires a per-install token stored in `<data directory>/api-token` (readable only by your user). This keeps web pages and other users' processes out, but any process running as your user can read the token and is trusted. Do not expose the API through a public proxy or tunnel.
 
-Bots run installed CLI tools with your user account and the permissions configured for those tools. Standard permissions are the setup default. Automatic approval can allow tools to edit files and execute commands without a prompt. Bot home folders, project folders, and Git worktrees organize data; they are not operating-system sandboxes.
+Bots run installed CLI tools with your user account, the environment from your login shell, and the permissions configured for those tools. Quitting Omnibot stops running bot processes. Standard permissions are the setup default. Automatic approval can allow tools to edit files and execute commands without a prompt. Bot home folders, project folders, and Git worktrees organize data; they are not operating-system sandboxes.
 
 The app stores conversations, memories, workspace paths, and native session IDs locally. The selected CLI may transmit prompts, source code, files, and tool results to its configured provider and maintain its own logs. Omnibot does not replace the provider's privacy, authentication, or billing settings.
 
 Only install CLIs, custom commands, skills, and MCP configurations you trust. A discovered executable is local code, and discovery may invoke its version or model-listing commands. CLI metadata probes do not intentionally submit inference prompts.
 
-Markdown is sanitized, avatars are validated local raster images, and state writes are atomic. These measures do not make untrusted CLI tools or arbitrary generated commands safe. Review permissions and changes appropriate to the task.
+Markdown is sanitized, links in chats open in your default browser instead of the app window, avatars are validated local raster images, and state writes are atomic with a rolling backup. These measures do not make untrusted CLI tools or arbitrary generated commands safe. Review permissions and changes appropriate to the task.
 
 ## Repository hygiene
 
-Never commit API keys, `.env` files, signing certificates, exported conversations, or local state. Use fake CLIs and mocked data for automated tests. Release builds are currently ad-hoc signed, not Apple-notarized.
+Never commit API keys, `.env` files, signing certificates, exported conversations, or local state. Use fake CLIs and mocked data for automated tests. Published release builds are Developer ID signed and Apple-notarized; local development builds are ad-hoc signed.

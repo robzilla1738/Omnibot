@@ -28,7 +28,7 @@ You need a valid **Developer ID Application** certificate, a working `notarytool
      --keychain-profile your-existing-profile
    ```
 
-The script checks credential availability, builds Apple Silicon and Intel slices, signs the complete app, submits it to Apple, and requires `Accepted`. It staples and verifies the app, creates a ZIP preserving framework symlinks, and re-extracts the ZIP to verify its actual signature, notarization, architecture, version, and embedded update configuration. It also creates, signs, notarizes, and staples a DMG. Finally it generates and verifies the signed appcast and SHA-256 checksums. Outputs stay in ignored `release-artifacts/<version>/`; the live feed is unchanged.
+The script first refuses to run unless all four version numbers match, the working tree is clean, and `HEAD` is on the remote. It then checks credential availability, builds Apple Silicon and Intel slices, signs the complete app, submits it to Apple, and requires `Accepted`. It staples and verifies the app, creates a ZIP preserving framework symlinks, and re-extracts the ZIP to verify its actual signature, notarization, architecture, version, and embedded update configuration. It also creates, signs, notarizes, and staples a DMG. Finally it generates and verifies the signed appcast and SHA-256 checksums. Outputs stay in ignored `release-artifacts/<version>/`; the live feed is unchanged.
 
 If a candidate directory already exists, archive it before making a replacement. Do not replace a candidate after it has been published. Failed notarization submissions can be inspected with `xcrun notarytool log <submission-id> --keychain-profile <profile>`.
 

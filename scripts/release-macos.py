@@ -70,6 +70,25 @@ def notarize(path, profile):
     return receipt
 
 
+def check_versions(version):
+    config = json.loads((ROOT / "src-tauri/tauri.conf.json").read_text())
+    cargo = re.search(r'(?m)^version = "([^"]+)"', (ROOT / "src-tauri/Cargo.toml").read_text())
+    lock = re.search(r'name = "omnibot"\nversion = "([^"]+)"', (ROOT / "src-tauri/Cargo.lock").read_text())
+    found = {"src-tauri/tauri.conf.json": config["version"],
+             "src-tauri/Cargo.toml": cargo and cargo[1], "src-tauri/Cargo.lock": lock and lock[1]}
+    mismatched = [f"{name}={value!r}" for name, value in found.items() if value != version]
+    if mismatched:
+        raise SystemExit(f"package.json is {version}, but: {', '.join(mismatched)}.")
+
+
+def check_source():
+    if run("git", "status", "--porcelain", capture=True).stdout.strip():
+        raise SystemExit("Commit or stash local changes; releases must build the exact committed source.")
+    run("git", "fetch", "--quiet", "origin")
+    if not run("git", "branch", "--remotes", "--contains", "HEAD", capture=True).stdout.strip():
+        raise SystemExit("HEAD is not on the remote. Push it and wait for CI to pass before releasing.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--identity", required=True, help="Developer ID Application signing identity")
@@ -81,9 +100,8 @@ def main():
     if not team_match:
         parser.error("Identity must include its 10-character Apple team ID.")
     version = json.loads((ROOT / "package.json").read_text())["version"]
-    config = json.loads((ROOT / "src-tauri/tauri.conf.json").read_text())
-    if config["version"] != version:
-        raise SystemExit("Package and native versions differ.")
+    check_versions(version)
+    check_source()
     # Validate credentials before spending time compiling. Never log account history.
     run("xcrun", "notarytool", "history", "--keychain-profile", args.keychain_profile,
         "--output-format", "json", capture=True)
