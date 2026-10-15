@@ -1,10 +1,12 @@
 import { useSidebarDrag, reorderAt } from "./useSidebarDrag";
 import { createPortal } from "react-dom";
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { ChevronDown, Folder, MessageSquare, MoreHorizontal, Plus, X } from "lucide-react";
 import type { AppSidebarProps } from "./AppSidebar";
 import { BotCharacterAvatar } from "../icons/BotCharacterAvatar";
 import { Collapse } from "../ui/Collapse";
+import { useConfirm } from "../ui/Dialog";
+import { useMenu } from "../ui/useMenu";
 
 type Section = "bots" | "projects" | "chats";
 type Layout = { view: "all" | Section; sections: Section[]; hidden: string[]; collapsed: string[]; order: Record<string, string[]>; sort: "manual" | "name" | "recent" };
@@ -19,7 +21,7 @@ function readLayout(): Layout {
     return { ...base, view: ["all", ...base.sections].includes(saved.view) ? saved.view : "all", sections: [...new Set<Section>([...(Array.isArray(saved.sections) ? saved.sections.filter((s: Section) => Object.hasOwn(labels, s)) : []), ...base.sections])], hidden: Array.isArray(saved.hidden) ? saved.hidden.filter((s: unknown) => typeof s === "string") : [], collapsed: Array.isArray(saved.collapsed) ? saved.collapsed.filter((s: unknown) => typeof s === "string") : [], order: saved.order && typeof saved.order === "object" ? saved.order : {}, sort: ["manual", "name", "recent"].includes(saved.sort) ? saved.sort : "manual" };
   } catch { return defaults(); }
 }
-type Item = { id: string; name: string; detail: string; updated: number; active: boolean; icon: ReactNode; open: () => void; rename: (name: string) => Promise<void>; remove?: () => Promise<void> };
+type Item = { id: string; name: string; detail: string; updated: number; active: boolean; icon: ReactNode; open: () => void; rename: (name: string) => Promise<void>; remove?: () => Promise<void>; destroy?: () => Promise<void> };
 export function SidebarSections(props: AppSidebarProps & { customizationHost: HTMLElement | null; customizationOpen: boolean; onCloseCustomization: () => void }) {
   const [layout, setLayout] = useState(readLayout);
   const [menu, setMenu] = useState<string | null>(null);
@@ -28,8 +30,14 @@ export function SidebarSections(props: AppSidebarProps & { customizationHost: HT
   const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const { confirm, confirmElement } = useConfirm();
+  const { onCloseCustomization } = props;
   useEffect(() => { try { localStorage.setItem(storageKey, JSON.stringify(layout)); } catch { setError("View changes couldn't be saved on this device."); } }, [layout]);
-  useEffect(() => { const close = (e: KeyboardEvent) => { if (e.key === "Escape") { setMenu(null); setRename(null); props.onCloseCustomization(); } }; window.addEventListener("keydown", close); return () => window.removeEventListener("keydown", close); }, []);
+  useEffect(() => {
+    const close = (e: KeyboardEvent) => { if (e.key === "Escape" && !e.defaultPrevented) { setMenu(null); setRename(null); onCloseCustomization(); } };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [onCloseCustomization]);
   useEffect(() => {
     if (!props.customizationOpen) return;
     const close = (event: PointerEvent) => { if (!(event.target as Element).closest('[data-sidebar-settings]')) props.onCloseCustomization(); };
@@ -53,7 +61,7 @@ export function SidebarSections(props: AppSidebarProps & { customizationHost: HT
       return [{ id, name: bot.name, detail: running ? "Thinking…" : direct[0]?.messages.filter(m => m.text.trim()).at(-1)?.text.replace(/[#*_`]/g, "").replace(/\s+/g, " ") || bot.roleTitle || "Start a conversation", updated: direct[0]?.updatedAtMs ?? 0, active: direct.some(c => c.id === props.activeChatId), icon: <BotCharacterAvatar bot={bot} size={40} isStreaming={running} />, open: () => props.onSelectBotDirectChat(bot), rename: (name: string) => props.onUpsertBot({ ...bot, name }), remove: async () => { if (props.pinnedBotIds.includes(id)) await props.onTogglePin(bot); if (layout.view === "bots") toggle("hidden", `bots:${id}`); } }];
     }),
     projects: props.workspaces.map(project => ({ id: project.id, name: project.name, detail: project.path.split("/").filter(Boolean).slice(-2).join("/"), updated: Math.max(0,...projectChats(project.path).map(c => c.updatedAtMs)), active: props.chats.some(c => c.id === props.activeChatId && c.workspacePath === project.path), icon: <span className="w-10 h-10 rounded-xl bg-white/[0.04] flex items-center justify-center"><Folder size={22} className="text-zinc-400" /></span>, open: () => { void run(() => props.onSelectProject(project.path)); }, rename: name => props.onUpsertProject({ ...project, name }) })),
-    chats: props.chats.filter(c => !c.isPrimary && !c.isBotHome).map(chat => ({ id: chat.id, name: chat.title, detail: chat.messages.filter(m => m.text.trim()).at(-1)?.text.replace(/[#*_`]/g, "").replace(/\s+/g, " ") || (chat.workspacePath ? chat.workspacePath.split("/").filter(Boolean).at(-1)! : chat.isGroup ? "Group chat" : "Personal chat"), updated: chat.updatedAtMs, active: chat.id === props.activeChatId, icon: chatIcon(chat.participantBotIds), open: () => props.onSelectChat(chat.id), rename: title => props.onUpdateChat({ chatId: chat.id, title }) })),
+    chats: props.chats.filter(c => !c.isPrimary && !c.isBotHome).map(chat => ({ id: chat.id, name: chat.title, detail: chat.messages.filter(m => m.text.trim()).at(-1)?.text.replace(/[#*_`]/g, "").replace(/\s+/g, " ") || (chat.workspacePath ? chat.workspacePath.split("/").filter(Boolean).at(-1)! : chat.isGroup ? "Group chat" : "Personal chat"), updated: chat.updatedAtMs, active: chat.id === props.activeChatId, icon: chatIcon(chat.participantBotIds), open: () => props.onSelectChat(chat.id), rename: title => props.onUpdateChat({ chatId: chat.id, title }), destroy: () => props.onDeleteChat(chat.id) })),
   };
   const sorted = (section: Section) => {
     const order = Array.isArray(layout.order[section]) ? layout.order[section] : [];
@@ -71,6 +79,19 @@ export function SidebarSections(props: AppSidebarProps & { customizationHost: HT
   };
   const menuSection = menu?.split(":")[0] as Section | undefined;
   const menuItem = menuSection && items[menuSection]?.find(item => `${menuSection}:${item.id}` === menu);
+  const closeMenu = useCallback(() => { setMenu(null); setRename(null); }, []);
+  const itemMenu = useMenu(Boolean(menuItem), closeMenu);
+  const deleteItem = async (item: Item) => {
+    if (!item.destroy) return;
+    closeMenu();
+    const confirmed = await confirm({
+      title: `Delete “${item.name}”?`,
+      message: "The conversation and its history will be permanently deleted. Project files are not affected.",
+      confirmLabel: "Delete chat",
+      destructive: true,
+    });
+    if (confirmed) await run(item.destroy);
+  };
   useEffect(() => {
     if (!menu) return;
     const close = (event: PointerEvent) => {
@@ -102,16 +123,18 @@ export function SidebarSections(props: AppSidebarProps & { customizationHost: HT
       <button onClick={() => { setLayout(defaults()); setMenu(null); }} className="text-zinc-400 hover:text-white">Reset view & restore hidden items</button>
     </div>, props.customizationHost)}
     {error && <p role="alert" className="text-xs text-red-300 px-2">{error}</p>}
-    {menuItem && props.customizationHost && createPortal(<div data-sidebar-item-menu role="dialog" aria-label={`Options for ${menuItem.name}`} style={{ left: menuPoint.x, top: menuPoint.y }} className="motion-menu fixed z-50 w-[210px] rounded-2xl bg-[#242424] p-2 shadow-2xl text-[13px]">
+    {menuItem && props.customizationHost && createPortal(<div ref={itemMenu.menuRef} data-sidebar-item-menu role={rename === menu ? "dialog" : "menu"} aria-label={rename === menu ? `Rename ${menuItem.name}` : `Options for ${menuItem.name}`} tabIndex={-1} onKeyDown={itemMenu.onKeyDown} style={{ left: menuPoint.x, top: menuPoint.y }} className="motion-menu fixed z-50 w-[210px] rounded-2xl bg-[#242424] p-2 shadow-2xl text-[13px]">
       {rename === menu ? <form className="space-y-3 p-2" onSubmit={e => { e.preventDefault(); if (draft.trim()) void run(() => menuItem.rename(draft.trim())); }}>
         <input autoFocus aria-label={`Rename ${menuItem.name}`} maxLength={120} value={draft} onChange={e => setDraft(e.target.value)} className="w-full bg-white/5 rounded-lg px-2 py-2" />
-        <div className="flex justify-end gap-2"><button type="button" onClick={() => setMenu(null)} className="px-2 py-1.5 text-zinc-400">Cancel</button><button disabled={saving || !draft.trim()} className="px-3 py-1.5 rounded-full bg-white text-black">Save</button></div>
+        <div className="flex justify-end gap-2"><button type="button" onClick={closeMenu} className="px-2 py-1.5 text-zinc-400">Cancel</button><button disabled={saving || !draft.trim()} className="px-3 py-1.5 rounded-full bg-white text-black">Save</button></div>
       </form> : <>
-        <button disabled={saving} onClick={() => { setRename(menu); setDraft(menuItem.name); }} className="w-full text-left px-3 py-2 rounded-xl hover:bg-white/5">Rename</button>
-        {menuSection === "bots" && !props.pinnedBotIds.includes(menuItem.id) && <button onClick={() => void run(() => props.onTogglePin(props.bots.find(b => b.id === menuItem.id)!))} className="w-full text-left px-3 py-2 rounded-xl hover:bg-white/5">Pin to sidebar</button>}
-        <button disabled={saving} title="Remove from sidebar; keep history and files" onClick={() => { if (menuItem.remove) void run(menuItem.remove); else { toggle("hidden",menu!); setMenu(null); } }} className="w-full text-left px-3 py-2 rounded-xl hover:bg-white/5 text-zinc-400">Remove</button>
+        <button role="menuitem" disabled={saving} onClick={() => { setRename(menu); setDraft(menuItem.name); }} className="w-full text-left px-3 py-2 rounded-xl hover:bg-white/5 focus-visible:bg-white/5">Rename</button>
+        {menuSection === "bots" && !props.pinnedBotIds.includes(menuItem.id) && <button role="menuitem" onClick={() => void run(() => props.onTogglePin(props.bots.find(b => b.id === menuItem.id)!))} className="w-full text-left px-3 py-2 rounded-xl hover:bg-white/5 focus-visible:bg-white/5">Pin to sidebar</button>}
+        <button role="menuitem" disabled={saving} title="Remove from sidebar; keep history and files" onClick={() => { if (menuItem.remove) void run(menuItem.remove); else { toggle("hidden",menu!); setMenu(null); } }} className="w-full text-left px-3 py-2 rounded-xl hover:bg-white/5 focus-visible:bg-white/5 text-zinc-400">Remove from sidebar</button>
+        {menuItem.destroy && <button role="menuitem" disabled={saving} onClick={() => void deleteItem(menuItem)} className="w-full text-left px-3 py-2 rounded-xl hover:bg-red-500/15 focus-visible:bg-red-500/15 text-red-300">Delete chat…</button>}
       </>}
     </div>, props.customizationHost)}
+    {confirmElement}
     <div data-sidebar-scroll className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden sidebar-scroll-mask space-y-5 pt-4 pb-20">
     {layout.sections.filter(section => (layout.view === "all" ? !layout.hidden.includes(section) : layout.view === section)).map(section => {
       const rows = sorted(section).filter(item => !layout.hidden.includes(`${section}:${item.id}`)); const closed = layout.collapsed.includes(section);
@@ -123,10 +146,10 @@ export function SidebarSections(props: AppSidebarProps & { customizationHost: HT
         </div>
         <Collapse open={!closed} id={`sidebar-${section}`}><div className="min-w-0 space-y-1">
           {rows.length === 0 && <p className="px-3 py-3 text-xs text-zinc-500">{section === "bots" ? "Add a bot from your library." : section === "projects" ? "Add a folder when you're ready." : "Your conversations will appear here."}</p>}
-          {rows.map((item,index) => { const key = `${section}:${item.id}`; return <div key={key} data-sidebar-item={item.id} className={`min-w-0 rounded-[13px] transition-[background-color,opacity] ${drag.source?.id === item.id && drag.source.kind === "item" ? "opacity-40" : ""} ${drag.source?.kind === "item" && drag.over === item.id ? "bg-white/[0.09]" : item.active ? "bg-[#222]" : "hover:bg-[#171717]"}`}>
+          {rows.map(item => { const key = `${section}:${item.id}`; return <div key={key} data-sidebar-item={item.id} className={`min-w-0 rounded-[13px] transition-[background-color,opacity] ${drag.source?.id === item.id && drag.source.kind === "item" ? "opacity-40" : ""} ${drag.source?.kind === "item" && drag.over === item.id ? "bg-white/[0.09]" : item.active ? "bg-[#222]" : "hover:bg-[#171717]"}`}>
             <div className="flex min-w-0 items-center group relative">
               <button {...drag.bind({ kind: "item", section, id: item.id })} title={`Drag to reorder ${item.name}`} aria-label={`Open ${item.name}`} aria-current={item.active ? "page" : undefined} onClick={() => { setMenu(null); item.open(); }} onContextMenu={e => { e.preventDefault(); openMenu(key,e.clientX,e.clientY); }} onKeyDown={e => { if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) { e.preventDefault(); moveItem(section,item.id,e.key === "ArrowUp" ? -1 : 1); } }} className="flex flex-1 min-w-0 items-center w-full gap-3 px-2.5 py-2.5 text-left rounded-[13px]"><span className="w-10 h-10 shrink-0 flex items-center justify-center">{item.icon}</span><span className="min-w-0 flex-1"><span className="block truncate text-[16px] font-medium leading-[1.3] text-[#eee]">{item.name}</span><span className="block truncate text-[14px] leading-[1.35] mt-0.5 text-[#9b9b9b]">{item.detail}</span></span></button>
-              <button data-sidebar-options title={`Options for ${item.name}`} aria-expanded={menu===key} onClick={e => { const rect = e.currentTarget.getBoundingClientRect(); openMenu(key,rect.right-210,rect.bottom+4); }} className="absolute right-1 top-2 p-2 rounded-lg bg-[#1c1c1c] text-zinc-400 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 aria-expanded:opacity-100 hover:bg-white/5"><MoreHorizontal size={16}/></button>
+              <button data-sidebar-options title={`Options for ${item.name}`} aria-label={`Options for ${item.name}`} aria-haspopup="menu" aria-expanded={menu===key} onClick={e => { const rect = e.currentTarget.getBoundingClientRect(); openMenu(key,rect.right-210,rect.bottom+4); }} className="absolute right-1 top-2 p-2 rounded-lg bg-[#1c1c1c] text-zinc-400 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 aria-expanded:opacity-100 hover:bg-white/5"><MoreHorizontal size={16}/></button>
             </div>
           </div>; })}
         </div></Collapse>

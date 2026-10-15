@@ -12,6 +12,11 @@ import type { BotProfile, ChatThread } from "../../lib/types";
 type SavedScreen = { text: string; offset: number; cols: number; rows: number };
 const isLive = (session: TerminalSessionInfo) => session.status === "running" || session.status === "queued";
 const supportsControl = (bot?: BotProfile) => bot && !bot.archived && (bot.cliDriver === "claude" || bot.cliDriver === "custom");
+const OUTPUT_POLL_MIN_MS = 80;
+const OUTPUT_POLL_MAX_MS = 1000;
+const OUTPUT_POLL_ERROR_MS = 2000;
+const READ_CHUNK_BYTES = 65536;
+const MAX_QUEUED_INPUT_BYTES = 65536;
 
 export function TerminalPanel({ open, chat, bots, workflowActive, onClose }: {
   open: boolean; chat: ChatThread; bots: BotProfile[]; workflowActive: boolean; onClose: () => void;
@@ -78,10 +83,12 @@ export function TerminalPanel({ open, chat, bots, workflowActive, onClose }: {
       if (snapshot.activeWorkflowChatIds.includes(chatId)) {
         await stopOmniChat(chatId);
         const deadline = Date.now() + 15_000;
+        let wait = 250;
         while ((await getOmniSnapshot()).activeWorkflowChatIds.includes(chatId)) {
           if (!stillViewing()) return;
           if (Date.now() > deadline) throw new Error("The workflow is still stopping. Wait for it to finish, then retry.");
-          await new Promise(resolve => setTimeout(resolve, 100));
+          await new Promise(resolve => setTimeout(resolve, wait));
+          wait = Math.min(1000, wait * 1.5);
         }
       }
       if (!stillViewing()) return;
@@ -165,6 +172,8 @@ function TerminalScreen({ session, open, screens, onError }: { session: Terminal
   const [historyTrimmed, setHistoryTrimmed] = useState(false);
   const queuedInputBytes = useRef(0);
   const resizeChain = useRef(Promise.resolve());
+  /** Set by the output poller; input calls it so echoes appear without waiting for a backed-off poll. */
+  const pollSoon = useRef<() => void>(() => {});
 
   useEffect(() => {
     if (!container.current) return;
@@ -177,14 +186,15 @@ function TerminalScreen({ session, open, screens, onError }: { session: Terminal
     term.open(container.current); terminal.current = term; fit.current = fitAddon; search.current = searchAddon;
     offset.current = saved?.offset ?? 0;
     if (saved) term.write(saved.text);
-    const send = (data: number[]) => {
+    const send = (data: Uint8Array) => {
       if (currentSession.current.mode !== "interactive" || currentSession.current.status !== "running") return;
-      if (queuedInputBytes.current + data.length > 65536) { onError("Terminal input is busy. Wait before pasting more text (64 KiB maximum)."); return; }
+      if (queuedInputBytes.current + data.length > MAX_QUEUED_INPUT_BYTES) { onError("Terminal input is busy. Wait before pasting more text (64 KiB maximum)."); return; }
       queuedInputBytes.current += data.length;
-      inputChain.current = inputChain.current.then(() => writeTerminal(session.id, data)).catch(error => onError(String(error))).finally(() => { queuedInputBytes.current -= data.length; });
+      inputChain.current = inputChain.current.then(() => writeTerminal(session.id, data)).then(() => pollSoon.current()).catch(error => onError(String(error))).finally(() => { queuedInputBytes.current -= data.length; });
     };
-    const data = term.onData(value => send(Array.from(new TextEncoder().encode(value))));
-    const binary = term.onBinary(value => send(Array.from(value, char => char.charCodeAt(0))));
+    const data = term.onData(value => send(new TextEncoder().encode(value)));
+    // onBinary delivers one byte per UTF-16 code unit (e.g. mouse reports), not text to UTF-8 encode.
+    const binary = term.onBinary(value => send(Uint8Array.from(value, char => char.charCodeAt(0) & 0xff)));
     const selection = term.onSelectionChange(() => setHasSelection(term.hasSelection()));
     // App shortcuts must not steal control sequences from an interactive CLI.
     const stopKeys = (event: KeyboardEvent) => { if (event.key !== "`") event.stopPropagation(); };
@@ -192,6 +202,8 @@ function TerminalScreen({ session, open, screens, onError }: { session: Terminal
     const element = container.current;
     return () => {
       element.removeEventListener("keydown", stopKeys); data.dispose(); binary.dispose(); selection.dispose(); terminal.current = null;
+      // Disposal waits for the write flush below; detach now so a remount never shows two screens.
+      term.element?.remove();
       // Flush any in-flight parser writes before saving the matching byte offset.
       term.write("", () => {
         screens.set(session.id, { text: serialize.serialize(), offset: offset.current, cols: term.cols, rows: term.rows });
@@ -228,19 +240,34 @@ function TerminalScreen({ session, open, screens, onError }: { session: Terminal
     const term = terminal.current;
     if (!open || !term) return;
     let disposed = false;
-    let timer: ReturnType<typeof setTimeout>;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let polling = false;
+    let pollAgain = false;
+    // Back off while a live process is quiet; any output or keystroke snaps back to the fast rate.
+    let delay = OUTPUT_POLL_MIN_MS;
+    const schedule = (ms: number) => { clearTimeout(timer); timer = setTimeout(() => void poll(), ms); };
     const poll = async () => {
+      if (polling) { pollAgain = true; return; }
+      polling = true;
       try {
         const result = await readTerminal(session.id, offset.current);
         if (disposed) return;
         if (result.truncated) { term.reset(); setHistoryTrimmed(true); }
-        await new Promise<void>(resolve => term.write(new Uint8Array(result.data), () => { offset.current = result.offset; resolve(); }));
+        await new Promise<void>(resolve => term.write(result.data, () => { offset.current = result.offset; resolve(); }));
         if (disposed) return;
-        timer = setTimeout(poll, isLive(currentSession.current) || result.data.length === 65536 ? 80 : 1000);
-      } catch (error) { if (!disposed) { onError(String(error)); timer = setTimeout(poll, 2000); } }
+        if (result.data.length > 0 || pollAgain) delay = OUTPUT_POLL_MIN_MS;
+        else delay = isLive(currentSession.current) ? Math.min(OUTPUT_POLL_MAX_MS, Math.round(delay * 1.5)) : OUTPUT_POLL_MAX_MS;
+        schedule(result.data.length === READ_CHUNK_BYTES ? 0 : delay);
+      } catch (error) {
+        if (!disposed) { onError(String(error)); schedule(OUTPUT_POLL_ERROR_MS); }
+      } finally {
+        polling = false;
+        pollAgain = false;
+      }
     };
+    pollSoon.current = () => { if (disposed) return; delay = OUTPUT_POLL_MIN_MS; if (polling) pollAgain = true; else schedule(OUTPUT_POLL_MIN_MS); };
     void poll();
-    return () => { disposed = true; clearTimeout(timer); };
+    return () => { disposed = true; clearTimeout(timer); pollSoon.current = () => {}; };
   }, [open, session.id, onError]);
 
   useEffect(() => { if (open && session.mode === "interactive" && session.status === "running") terminal.current?.focus(); }, [open, session.id, session.mode, session.status]);

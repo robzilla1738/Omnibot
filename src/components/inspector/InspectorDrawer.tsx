@@ -24,7 +24,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import {
   getComputerOverview,
   getGitFileDiff,
@@ -32,11 +32,8 @@ import {
   openLocalItem,
 } from "../../lib/omni-bridge";
 import type {
-  BotColor,
   BotProfile,
-  BotShape,
   ChatThread,
-  CliDriverKind,
   CliHarnessInfo,
   ComputerActivityEntry,
   GitRepoStatus,
@@ -46,12 +43,37 @@ import type {
   SystemOverview,
   WorkspaceEntry,
 } from "../../lib/types";
-import {
-  BOT_COLORS,
-  BOT_SHAPES,
-  BotCharacterAvatar,
-} from "../icons/BotCharacterAvatar";
+import { BotCharacterAvatar } from "../icons/BotCharacterAvatar";
 import type { OmniHubSection } from "../modals/OmniHubModal";
+import { useConfirm } from "../ui/Dialog";
+import { errorMessage, useNotices } from "../ui/Notices";
+
+/** Enter commits through blur; Escape restores the saved value and skips the blur commit. */
+function useInlineEdit(saved: string, commit: (value: string) => void) {
+  const [draft, setDraft] = useState(saved);
+  const cancelled = useRef(false);
+  useEffect(() => { setDraft(saved); }, [saved]);
+  return {
+    value: draft,
+    onChange: (event: { target: { value: string } }) => setDraft(event.target.value),
+    onBlur: () => {
+      if (cancelled.current) { cancelled.current = false; return; }
+      const next = draft.trim();
+      if (next && next !== saved) commit(next);
+      else setDraft(saved);
+    },
+    onKeyDown: (event: KeyboardEvent<HTMLInputElement>) => {
+      if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); }
+      else if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        cancelled.current = true;
+        setDraft(saved);
+        event.currentTarget.blur();
+      }
+    },
+  };
+}
 
 export type InspectorTab = "details" | "git" | "computer";
 
@@ -129,18 +151,16 @@ export function InspectorDrawer({
   onRescan,
   onOpenOmniHub,
 }: InspectorDrawerProps) {
+  const { runAction } = useNotices();
+  const { confirm, confirmElement } = useConfirm();
+  const act = (label: string, action: () => Promise<unknown>) => { void runAction(label, action); };
   const [editingTitle, setEditingTitle] = useState(false);
-  const [titleDraft, setTitleDraft] = useState(chat.title);
+  const titleEdit = useInlineEdit(chat.title, title => act("Couldn’t rename the chat", () => onUpdateChat({ chatId: chat.id, title })));
   const disclosureId = useId();
   const [customizeAvatarOpen, setCustomizeAvatarOpen] = useState(false);
   const [swarmMembersOpen, setSwarmMembersOpen] = useState(false);
-  const [botNameDraft, setBotNameDraft] = useState(activeBot.name);
-  const [botRoleDraft, setBotRoleDraft] = useState(activeBot.roleTitle);
-
-  useEffect(() => {
-    setBotNameDraft(activeBot.name);
-    setBotRoleDraft(activeBot.roleTitle);
-  }, [activeBot.id, activeBot.name, activeBot.roleTitle]);
+  const botNameEdit = useInlineEdit(activeBot.name, name => act(`Couldn’t rename ${activeBot.name}`, () => onUpsertBot({ ...activeBot, name })));
+  const botRoleEdit = useInlineEdit(activeBot.roleTitle, roleTitle => act(`Couldn’t update ${activeBot.name}`, () => onUpsertBot({ ...activeBot, roleTitle })));
 
   useEffect(() => {
     if (openStudioSignal && openStudioSignal > 0) {
@@ -155,6 +175,7 @@ export function InspectorDrawer({
   const [selectedDiffContent, setSelectedDiffContent] = useState<string>("");
   const [commitMessage, setCommitMessage] = useState("");
   const [committing, setCommitting] = useState(false);
+  const [gitError, setGitError] = useState("");
 
   const [systemOverview, setSystemOverview] = useState<SystemOverview | null>(
     null
@@ -163,10 +184,6 @@ export function InspectorDrawer({
   const [workspaceInput, setWorkspaceInput] = useState(
     preferences.workspaceRoot
   );
-
-  useEffect(() => {
-    setTitleDraft(chat.title);
-  }, [chat.title]);
 
   useEffect(() => {
     setWorkspaceInput(preferences.workspaceRoot);
@@ -184,7 +201,7 @@ export function InspectorDrawer({
   useEffect(() => {
     if (!open) return;
     if (activeTab === "computer") {
-      loadComputerData();
+      void loadComputerData();
     }
   }, [open, activeTab, loadComputerData]);
 
@@ -206,16 +223,48 @@ export function InspectorDrawer({
   };
 
   const handleCommitAll = async () => {
-    if (!commitMessage.trim()) return;
+    if (!commitMessage.trim() || committing) return;
     setCommitting(true);
+    setGitError("");
     try {
       await onCommitGit(commitMessage.trim());
       setCommitMessage("");
       setSelectedDiffFile(null);
+    } catch (error) {
+      setGitError(`Commit failed: ${errorMessage(error)}`);
     } finally {
       setCommitting(false);
     }
   };
+
+  const handleDiscardFile = async (filePath: string) => {
+    const confirmed = await confirm({
+      title: "Discard changes?",
+      message: <>All uncommitted changes to <code className="text-zinc-100 break-all">{filePath}</code> will be lost. This can’t be undone.</>,
+      confirmLabel: "Discard changes",
+      destructive: true,
+    });
+    if (!confirmed) return;
+    setGitError("");
+    try {
+      await onDiscardGitFile(filePath);
+      if (selectedDiffFile === filePath) setSelectedDiffFile(null);
+    } catch (error) {
+      setGitError(`Couldn’t discard ${filePath}: ${errorMessage(error)}`);
+    }
+  };
+
+  const handleClearChat = async () => {
+    const confirmed = await confirm({
+      title: "Clear conversation history?",
+      message: `All ${chat.messages.length} messages in “${chat.isPrimary ? activeBot.name : chat.title}” will be permanently removed. Bot memory and project files are kept.`,
+      confirmLabel: "Clear history",
+      destructive: true,
+    });
+    if (confirmed) act("Couldn’t clear the conversation", () => onClearChat(chat.id));
+  };
+
+  const openItem = (path: string, revealInFinder: boolean) => act(`Couldn’t open ${path}`, () => openLocalItem(path, { revealInFinder }));
 
   const installedHarnesses = harnesses.filter((h) => h.installed);
   const activeProjectName =
@@ -246,6 +295,7 @@ export function InspectorDrawer({
           <button
             type="button"
             onClick={onClose}
+            aria-label="Close inspector"
             title="Close inspector (Cmd+I)"
             className="w-10 h-10 rounded-full bg-[#1f1f1f] hover:bg-[#272727] border border-white/[0.06] flex items-center justify-center text-zinc-200 hover:text-white active:scale-95 transition-colors"
           >
@@ -277,22 +327,10 @@ export function InspectorDrawer({
             <input
               type="text"
               autoFocus
-              value={titleDraft}
-              onChange={(e) => setTitleDraft(e.target.value)}
-              onBlur={() => {
-                setEditingTitle(false);
-                if (titleDraft.trim()) {
-                  onUpdateChat({ chatId: chat.id, title: titleDraft.trim() });
-                }
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  setEditingTitle(false);
-                  if (titleDraft.trim()) {
-                    onUpdateChat({ chatId: chat.id, title: titleDraft.trim() });
-                  }
-                }
-              }}
+              aria-label="Chat title"
+              maxLength={120}
+              {...titleEdit}
+              onBlur={() => { titleEdit.onBlur(); setEditingTitle(false); }}
               className="mt-1.5 w-60 bg-[#1f1f1f] border border-white/10 rounded-xl px-3 py-1.5 text-[13.5px] text-center text-zinc-100 focus:outline-none"
             />
           ) : (
@@ -383,53 +421,15 @@ export function InspectorDrawer({
                     </label>
                     <input
                       type="text"
-                      value={botNameDraft}
-                      onChange={(e) => setBotNameDraft(e.target.value)}
-                      onBlur={() => {
-                        if (
-                          botNameDraft.trim() &&
-                          botNameDraft.trim() !== activeBot.name
-                        ) {
-                          onUpsertBot({
-                            ...activeBot,
-                            name: botNameDraft.trim(),
-                          });
-                        }
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && botNameDraft.trim()) {
-                          onUpsertBot({
-                            ...activeBot,
-                            name: botNameDraft.trim(),
-                          });
-                        }
-                      }}
+                      aria-label="Bot name"
+                      {...botNameEdit}
                       placeholder="Bot name"
                       className="w-full rounded-xl bg-[#1f1f1f] border border-white/[0.08] px-3 py-1.5 text-xs text-white focus:outline-none"
                     />
                     <input
                       type="text"
-                      value={botRoleDraft}
-                      onChange={(e) => setBotRoleDraft(e.target.value)}
-                      onBlur={() => {
-                        if (
-                          botRoleDraft.trim() &&
-                          botRoleDraft.trim() !== activeBot.roleTitle
-                        ) {
-                          onUpsertBot({
-                            ...activeBot,
-                            roleTitle: botRoleDraft.trim(),
-                          });
-                        }
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && botRoleDraft.trim()) {
-                          onUpsertBot({
-                            ...activeBot,
-                            roleTitle: botRoleDraft.trim(),
-                          });
-                        }
-                      }}
+                      aria-label="Bot role"
+                      {...botRoleEdit}
                       placeholder="Role subtitle"
                       className="w-full rounded-xl bg-[#1f1f1f] border border-white/[0.08] px-3 py-1.5 text-xs text-zinc-300 focus:outline-none"
                     />
@@ -448,12 +448,12 @@ export function InspectorDrawer({
                             key={h.id}
                             type="button"
                             onClick={() =>
-                              onUpsertBot({
+                              act(`Couldn’t switch ${activeBot.name} to ${h.name}`, () => onUpsertBot({
                                 ...activeBot,
-                                cliDriver: h.kind as CliDriverKind,
+                                cliDriver: h.kind,
                                 customCommand: null,
                                 model: null,
-                              })
+                              }))
                             }
                             className={`px-2.5 py-1.5 rounded-xl text-xs font-medium flex items-center justify-between transition-colors ${
                               selected
@@ -477,9 +477,9 @@ export function InspectorDrawer({
                     <div className="pt-2 flex justify-end">
                       <button
                         type="button"
-                        onClick={async () => {
+                        onClick={() => {
                           setCustomizeAvatarOpen(false);
-                          await onDeleteBot(activeBot.id);
+                          act(`Couldn’t archive ${activeBot.name}`, () => onDeleteBot(activeBot.id));
                         }}
                         className="px-3 py-1.5 rounded-xl bg-red-500/15 hover:bg-red-500/25 text-red-300 text-xs font-medium flex items-center gap-1.5"
                       >
@@ -559,7 +559,7 @@ export function InspectorDrawer({
                           <button
                             key={b.id}
                             type="button"
-                            onClick={() => onToggleBotInChat(b.id)}
+                            onClick={() => act(`Couldn’t update chat members`, () => onToggleBotInChat(b.id))}
                             className={`w-full px-2.5 py-1.5 rounded-xl flex items-center justify-between text-xs transition-colors ${
                               inChat
                                 ? "bg-white/[0.08] text-white"
@@ -605,10 +605,10 @@ export function InspectorDrawer({
                       role="switch"
                       aria-checked={chat.useWorktrees}
                       onClick={() =>
-                        onUpdateChat({
+                        act("Couldn’t change worktree isolation", () => onUpdateChat({
                           chatId: chat.id,
                           useWorktrees: !chat.useWorktrees,
-                        })
+                        }))
                       }
                       className={`relative inline-flex h-6 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
                         chat.useWorktrees ? "bg-[#3b82f6]" : "bg-white/[0.14]"
@@ -636,11 +636,12 @@ export function InspectorDrawer({
                         <button
                           key={n}
                           type="button"
+                          aria-pressed={chat.maxSwarmTurns === n}
                           onClick={() =>
-                            onUpdateChat({
+                            act("Couldn’t change the handoff limit", () => onUpdateChat({
                               chatId: chat.id,
                               maxSwarmTurns: n,
-                            })
+                            }))
                           }
                           className={`w-7 h-7 rounded-lg text-xs font-semibold transition-colors ${
                             chat.maxSwarmTurns === n
@@ -654,12 +655,12 @@ export function InspectorDrawer({
                     </div>
                   </div>
 
-                  <button type="button" onClick={() => void onResetSessions()} className="w-full px-4 py-2.5 text-left text-xs text-zinc-400 hover:text-white">Reset CLI sessions · keep conversation history</button>
+                  <button type="button" onClick={() => act("Couldn’t reset CLI sessions", onResetSessions)} className="w-full px-4 py-2.5 text-left text-xs text-zinc-400 hover:text-white">Reset CLI sessions · keep conversation history</button>
                   <p className="px-4 pb-2 text-xs text-zinc-500">Use after changing accounts or settings outside Omnibot.</p>
                   {chat.messages.length > 0 && (
                     <button
                       type="button"
-                      onClick={() => onClearChat(chat.id)}
+                      onClick={() => void handleClearChat()}
                       className="w-full px-4 py-2.5 flex items-center justify-between text-xs text-zinc-400 hover:text-red-300 hover:bg-white/[0.02] transition-colors"
                     >
                       <span>Clear conversation history</span>
@@ -720,7 +721,7 @@ export function InspectorDrawer({
                               <span>{routineScheduleLabel(routine)}</span>
                               <button
                                 type="button"
-                                onClick={() => onRunRoutineNow(routine)}
+                                onClick={() => act(`Couldn’t run ${routine.name}`, () => onRunRoutineNow(routine))}
                                 title="Run routine with its saved bot and model"
                                 className="text-cyan-300 hover:text-white inline-flex items-center gap-0.5"
                               >
@@ -737,10 +738,10 @@ export function InspectorDrawer({
                             aria-label={`Enable ${routine.name}`}
                             aria-checked={routine.enabled}
                             onClick={() =>
-                              onUpsertRoutine({
+                              act(`Couldn’t update ${routine.name}`, () => onUpsertRoutine({
                                 ...routine,
                                 enabled: !routine.enabled,
-                              })
+                              }))
                             }
                             className={`relative inline-flex h-6 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
                               routine.enabled ? "bg-[#3b82f6]" : "bg-white/[0.14]"
@@ -838,10 +839,10 @@ export function InspectorDrawer({
                           <button
                             type="button"
                             onClick={() =>
-                              onUpsertProject({
+                              act("Couldn’t update project bots", () => onUpsertProject({
                                 ...activeProj,
                                 assignedBotIds: [],
-                              })
+                              }))
                             }
                             className="text-[11px] text-cyan-300 hover:text-white"
                           >
@@ -867,10 +868,10 @@ export function InspectorDrawer({
                                     : assignedIds.includes(b.id)
                                       ? assignedIds.filter((id) => id !== b.id)
                                       : [...assignedIds, b.id];
-                                onUpsertProject({
+                                act("Couldn’t update project bots", () => onUpsertProject({
                                   ...activeProj,
                                   assignedBotIds: nextIds,
-                                });
+                                }));
                               }}
                               className={`px-2 py-1 rounded-full text-[11px] flex items-center gap-1.5 transition-colors ${
                                 enabled
@@ -904,8 +905,9 @@ export function InspectorDrawer({
                   </div>
                   <button
                     type="button"
-                    onClick={onRescan}
+                    onClick={() => act("Couldn’t refresh Git status", onRescan)}
                     title="Refresh Git status"
+                    aria-label="Refresh Git status"
                     className="w-8 h-8 rounded-full bg-[#1f1f1f] hover:bg-[#272727] border border-white/[0.06] flex items-center justify-center text-zinc-300 hover:text-white shrink-0"
                   >
                     <RefreshCw className="w-3.5 h-3.5" />
@@ -919,15 +921,16 @@ export function InspectorDrawer({
                       value={commitMessage}
                       onChange={(e) => setCommitMessage(e.target.value)}
                       onKeyDown={(e) => {
-                        if (e.key === "Enter") handleCommitAll();
+                        if (e.key === "Enter") void handleCommitAll();
                       }}
+                      aria-label="Commit message"
                       placeholder="Commit message..."
                       className="min-w-0 flex-1 rounded-xl bg-[#1f1f1f] border border-white/[0.07] px-3 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:outline-none"
                     />
                     <button
                       type="button"
                       disabled={committing || !commitMessage.trim()}
-                      onClick={handleCommitAll}
+                      onClick={() => void handleCommitAll()}
                       className="px-3 py-1.5 rounded-xl bg-white hover:bg-zinc-200 disabled:opacity-40 text-black text-xs font-semibold flex items-center gap-1.5 shrink-0"
                     >
                       <GitCommitHorizontal className="w-3.5 h-3.5" />
@@ -935,6 +938,8 @@ export function InspectorDrawer({
                     </button>
                   </div>
                 )}
+
+                {gitError && <p role="alert" className="text-xs text-red-300 break-words">{gitError}</p>}
 
                 {gitStatus.diffStat && (
                   <pre className="font-mono text-[11px]  text-zinc-400 bg-black/40 rounded-xl p-2.5 overflow-x-auto">
@@ -960,7 +965,7 @@ export function InspectorDrawer({
                           <div className="px-3.5 py-2.5 flex items-center justify-between gap-2 hover:bg-white/[0.04] transition-colors">
                             <button
                               type="button"
-                              onClick={() => handleLoadFileDiff(f.path)}
+                              onClick={() => void handleLoadFileDiff(f.path)}
                               className="flex items-center gap-2.5 min-w-0 flex-1 text-left"
                             >
                               <FileCode2 className="w-4 h-4 text-cyan-400 shrink-0" />
@@ -982,8 +987,9 @@ export function InspectorDrawer({
                               </span>
                               <button
                                 type="button"
-                                onClick={() => onDiscardGitFile(f.path)}
+                                onClick={() => void handleDiscardFile(f.path)}
                                 title="Discard changes in this file"
+                                aria-label={`Discard changes to ${f.path}`}
                                 className="p-1 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-white/[0.06]"
                               >
                                 <RotateCcw className="w-3.5 h-3.5" />
@@ -1055,7 +1061,7 @@ export function InspectorDrawer({
                   </div>
                   <button
                     type="button"
-                    onClick={() => openLocalItem(".", { revealInFinder: false })}
+                    onClick={() => openItem(".", false)}
                     className="text-xs text-cyan-300 hover:text-cyan-200 inline-flex items-center gap-1"
                   >
                     <span>Finder</span>
@@ -1073,13 +1079,13 @@ export function InspectorDrawer({
                     />
                     <button
                       type="button"
-                      onClick={async () => {
+                      onClick={() => act("Couldn’t set the project directory", async () => {
                         await onUpdatePreferences({
                           ...preferences,
                           workspaceRoot: workspaceInput.trim(),
                         });
-                        loadComputerData();
-                      }}
+                        await loadComputerData();
+                      })}
                       className="px-3.5 py-2 rounded-xl bg-white text-black text-xs font-semibold shrink-0 active:scale-95"
                     >
                       Set
@@ -1096,7 +1102,8 @@ export function InspectorDrawer({
                   </span>
                   <button
                     type="button"
-                    onClick={loadComputerData}
+                    onClick={() => void loadComputerData()}
+                    aria-label="Refresh project files"
                     className="w-7 h-7 rounded-full bg-[#1f1f1f] hover:bg-[#272727] border border-white/[0.06] flex items-center justify-center text-zinc-300 hover:text-white"
                   >
                     <RefreshCw className="w-3.5 h-3.5" />
@@ -1107,7 +1114,7 @@ export function InspectorDrawer({
                     <button
                       key={f.path}
                       type="button"
-                      onClick={() => openLocalItem(f.path, { revealInFinder: true })}
+                      onClick={() => openItem(f.path, true)}
                       className="w-full px-3.5 py-2.5 flex items-center justify-between gap-2.5 text-[13px] text-left hover:bg-white/[0.04] transition-colors"
                     >
                       <div className="flex items-center gap-2.5 min-w-0 flex-1">
@@ -1169,6 +1176,7 @@ export function InspectorDrawer({
           className="pointer-events-none absolute bottom-0 inset-x-0 h-16 sidebar-bottom-feather z-10"
         />
       </div>
+      {confirmElement}
     </aside>
   );
 }

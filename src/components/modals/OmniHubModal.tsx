@@ -23,6 +23,9 @@ import {
 } from "lucide-react";
 import { AvatarPicker } from "../bots/AvatarPicker";
 import { useEffect, useId, useState } from "react";
+import { duplicateBot } from "../../lib/bots";
+import { Dialog, useConfirm } from "../ui/Dialog";
+import { errorMessage } from "../ui/Notices";
 import type {
   BotColor,
   BotProfile,
@@ -35,11 +38,12 @@ import type {
   WorkspaceEntry,
 } from "../../lib/types";
 import {
-  BOT_COLORS,
-  BOT_SHAPES,
   BotCharacterAvatar,
   SkillBrandIcon,
 } from "../icons/BotCharacterAvatar";
+
+const TURN_BUDGET_OPTIONS = [0.5, 1.5, 3.0, 5.0, 0];
+const formatUsdLimit = (usd: number) => (usd > 0 ? `$${usd.toFixed(2)}` : "No limit");
 
 export type OmniHubSection =
   | "bots"
@@ -68,7 +72,6 @@ export interface OmniHubModalProps {
   onUpdatePreferences: (prefs: OmniPreferences) => Promise<void>;
   onUpsertProject: (ws: WorkspaceEntry) => Promise<void>;
   onDeleteProject: (id: string) => Promise<void>;
-  onUpsertRoutine: (routine: RoutineEntry) => Promise<void>;
   onDeleteRoutine: (id: string) => Promise<void>;
   onRunRoutineNow: (routine: RoutineEntry) => Promise<void>;
   onSelectBotDirectChat: (bot: BotProfile) => void;
@@ -131,7 +134,6 @@ export function OmniHubModal({
   onUpdatePreferences,
   onUpsertProject,
   onDeleteProject,
-  onUpsertRoutine,
   onDeleteRoutine,
   onRunRoutineNow,
   onSelectBotDirectChat,
@@ -152,15 +154,18 @@ export function OmniHubModal({
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [botSaveError, setBotSaveError] = useState("");
   const [botSaving, setBotSaving] = useState(false);
-  const [botActionPending, setBotActionPending] = useState(false);
-  const [botActionError, setBotActionError] = useState("");
-  const runBotAction = async (action: () => Promise<void>) => {
-    if (botActionPending) return;
-    setBotActionPending(true); setBotActionError("");
-    try { await action(); }
-    catch (error) { setBotActionError(error instanceof Error ? error.message : String(error)); }
-    finally { setBotActionPending(false); }
+  const [hubActionPending, setHubActionPending] = useState(false);
+  const [hubActionError, setHubActionError] = useState("");
+  const { confirm, confirmElement } = useConfirm();
+  /** Runs one hub action at a time and reports its failure inline; resolves to whether it succeeded. */
+  const runHubAction = async (action: () => Promise<void>): Promise<boolean> => {
+    if (hubActionPending) return false;
+    setHubActionPending(true); setHubActionError("");
+    try { await action(); return true; }
+    catch (error) { setHubActionError(errorMessage(error)); return false; }
+    finally { setHubActionPending(false); }
   };
+  const savePreferences = (patch: Partial<OmniPreferences>) => runHubAction(() => onUpdatePreferences({ ...preferences, ...patch }));
   const [botColor, setBotColor] = useState<BotColor>("orange");
   const [botDriver, setBotDriver] = useState<CliDriverKind>("claude");
   const [botModel, setBotModel] = useState<string>("");
@@ -168,9 +173,6 @@ export function OmniHubModal({
   const [botPermission, setBotPermission] = useState<string>("auto");
   const [botCustomCommand, setBotCustomCommand] = useState("");
   const [botPrompt, setBotPrompt] = useState("");
-
-  // Memories state
-  const [newMemoryText, setNewMemoryText] = useState("");
 
   // Projects state
   const [showNewProject, setShowNewProject] = useState(false);
@@ -183,18 +185,34 @@ export function OmniHubModal({
   const [projLeadBotId, setProjLeadBotId] = useState<string>("bot-omni");
   const [projUseWorktrees, setProjUseWorktrees] = useState(false);
   const [projAutoApprove, setProjAutoApprove] = useState(false);
+  const [projSaving, setProjSaving] = useState(false);
+  const [projSaveError, setProjSaveError] = useState("");
 
   // Instructions state
   const [globalInstructionsDraft, setGlobalInstructionsDraft] = useState(
     preferences.globalInstructions
   );
   const [instructionsSaved, setInstructionsSaved] = useState(false);
+  useEffect(() => {
+    if (!instructionsSaved) return;
+    const timer = setTimeout(() => setInstructionsSaved(false), 1800);
+    return () => clearTimeout(timer);
+  }, [instructionsSaved]);
+  const [workflowBudgetDraft, setWorkflowBudgetDraft] = useState(String(preferences.workflowBudgetUsd));
+  useEffect(() => { setWorkflowBudgetDraft(String(preferences.workflowBudgetUsd)); }, [preferences.workflowBudgetUsd]);
+  const workflowBudgetValue = Number(workflowBudgetDraft);
+  const workflowBudgetValid = workflowBudgetDraft.trim() !== "" && Number.isFinite(workflowBudgetValue) && workflowBudgetValue >= 0;
+  const commitWorkflowBudget = () => {
+    if (!workflowBudgetValid) { setWorkflowBudgetDraft(String(preferences.workflowBudgetUsd)); return; }
+    if (workflowBudgetValue !== preferences.workflowBudgetUsd) void savePreferences({ workflowBudgetUsd: workflowBudgetValue });
+  };
 
   useEffect(() => {
     if (open && initialSection) {
       setSection(initialSection);
     }
   }, [open, initialSection]);
+  useEffect(() => { setHubActionError(""); }, [section]);
 
   useEffect(() => {
     setGlobalInstructionsDraft(preferences.globalInstructions);
@@ -239,20 +257,6 @@ export function OmniHubModal({
     setShowBotForm(true);
   };
 
-  const handleDuplicateBot = async (b: BotProfile) => {
-    let suffix = 2;
-    while (bots.some(bot => bot.name.toLowerCase() === `${b.name} ${suffix}`.toLowerCase())) suffix++;
-    await onUpsertBot({
-      ...b,
-      id: "",
-      name: `${b.name} ${suffix}`,
-      slug: `${b.slug}-${suffix}`,
-      isPrimary: false,
-      archived: false,
-      memories: [],
-      autoCreatedForCli: false,
-    });
-  };
 
   const handleSaveBot = async () => {
     if (!botName.trim()) return;
@@ -290,23 +294,6 @@ export function OmniHubModal({
     finally { setBotSaving(false); }
   };
 
-  const handleAddMemory = async () => {
-    const trimmed = newMemoryText.trim();
-    if (!trimmed) return;
-    setNewMemoryText("");
-    await onUpdatePreferences({
-      ...preferences,
-      sharedMemories: [...preferences.sharedMemories, trimmed],
-    });
-  };
-
-  const handleRemoveMemory = async (idx: number) => {
-    await onUpdatePreferences({
-      ...preferences,
-      sharedMemories: preferences.sharedMemories.filter((_, i) => i !== idx),
-    });
-  };
-
   const openNewProjectForm = () => {
     setEditingProjectId("");
     setProjName("");
@@ -317,6 +304,7 @@ export function OmniHubModal({
     setProjLeadBotId("bot-omni");
     setProjUseWorktrees(false);
     setProjAutoApprove(preferences.approveAllTools);
+    setProjSaveError("");
     setShowNewProject(true);
   };
 
@@ -330,11 +318,14 @@ export function OmniHubModal({
     setProjLeadBotId(p.leadBotId || "bot-omni");
     setProjUseWorktrees(Boolean(p.useWorktreesDefault));
     setProjAutoApprove(Boolean(p.approveAllTools));
+    setProjSaveError("");
     setShowNewProject(true);
   };
 
   const handleSaveProject = async () => {
-    if (!projName.trim() || !projPath.trim()) return;
+    if (!projName.trim() || !projPath.trim() || projSaving) return;
+    setProjSaving(true); setProjSaveError("");
+    try {
     await onUpsertProject({
       id: editingProjectId,
       name: projName.trim(),
@@ -348,6 +339,28 @@ export function OmniHubModal({
       approveAllTools: projAutoApprove,
     });
     setShowNewProject(false);
+    } catch (error) { setProjSaveError(errorMessage(error)); }
+    finally { setProjSaving(false); }
+  };
+
+  const handleDeleteProject = async (project: WorkspaceEntry) => {
+    const confirmed = await confirm({
+      title: `Remove project “${project.name}”?`,
+      message: <>Omnibot will forget this project and its settings. Files in <code className="text-zinc-100 break-all">{project.path}</code> are not deleted.</>,
+      confirmLabel: "Remove project",
+      destructive: true,
+    });
+    if (confirmed) await runHubAction(() => onDeleteProject(project.id));
+  };
+
+  const handleDeleteRoutine = async (routine: RoutineEntry) => {
+    const confirmed = await confirm({
+      title: `Delete routine “${routine.name}”?`,
+      message: "Its schedule and saved instructions will be removed. Past conversation history is kept.",
+      confirmLabel: "Delete routine",
+      destructive: true,
+    });
+    if (confirmed) await runHubAction(() => onDeleteRoutine(routine.id));
   };
 
   const activeSectionMeta =
@@ -390,24 +403,12 @@ export function OmniHubModal({
   };
 
   return (
-    <div
-      aria-hidden={!open}
-      inert={!open}
-      className={`fixed inset-0 z-50 flex items-center justify-center p-6 select-none transition-opacity duration-250 spring-transition ${
-        open
-          ? "bg-black/65 backdrop-blur-md opacity-100 pointer-events-auto"
-          : "bg-black/65 backdrop-blur-md opacity-0 pointer-events-none"
-      }`}
-      onClick={onClose}
+    <Dialog
+      open={open}
+      onClose={onClose}
+      label="Omnibot Hub"
+      className="w-full max-w-[920px] h-[80vh] max-h-[700px] rounded-[24px] bg-[#121212] border border-white/[0.08] shadow-[0_28px_90px_rgba(0,0,0,0.85)] flex overflow-hidden"
     >
-      <div
-        className={`w-full max-w-[920px] h-[80vh] max-h-[700px] rounded-[24px] bg-[#121212] border border-white/[0.08] shadow-[0_28px_90px_rgba(0,0,0,0.85)] flex overflow-hidden transition-[opacity,scale,translate] duration-250 spring-transition ${
-          open
-            ? "scale-100 opacity-100 translate-y-0"
-            : "scale-[0.985] opacity-0 translate-y-1"
-        }`}
-        onClick={(e) => e.stopPropagation()}
-      >
         {/* Left Navigation Rail */}
         <div className="w-[244px] shrink-0 bg-[#0e0e0e] p-4 flex flex-col justify-between">
           <div className="space-y-4">
@@ -435,6 +436,7 @@ export function OmniHubModal({
                   <button
                     key={item.id}
                     type="button"
+                    aria-current={active ? "page" : undefined}
                     onClick={() => setSection(item.id)}
                     className={`w-full px-3 py-2.5 rounded-xl flex items-center justify-between gap-2 text-[13.5px] font-medium transition-all duration-200 spring-transition ${
                       active
@@ -476,6 +478,7 @@ export function OmniHubModal({
 
             <button
               type="button"
+              aria-label="Close Omnibot Hub"
               onClick={onClose}
               className="w-8 h-8 rounded-full liquid-glass-chip flex items-center justify-center text-zinc-300 hover:text-white shrink-0 active:scale-95"
             >
@@ -484,6 +487,7 @@ export function OmniHubModal({
           </div>
 
           <div key={section} className="motion-view stable-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-7 space-y-5">
+            {hubActionError && <p role="alert" className="rounded-xl bg-red-500/10 px-3 py-2 text-sm text-red-300 break-words">{hubActionError}</p>}
             {section === "updates" && <AppUpdates />}
             {section === "bots" && (
               <div className="space-y-4">
@@ -660,7 +664,6 @@ export function OmniHubModal({
                     </div>
                   </div></Collapse>
 
-                {botActionError && <p role="alert" className="text-sm text-red-300">{botActionError}</p>}
                 <p className="text-xs text-zinc-500 mb-3">Archiving preserves conversations and memory. Duplicating copies settings with fresh memory. Tool detection does not verify authentication.</p>
                 <div className="grid grid-cols-2 gap-3.5">
                   {bots.map((b) => (
@@ -695,8 +698,8 @@ export function OmniHubModal({
                           <button
                             type="button"
                             aria-label={b.archived ? `Restore ${b.name}` : `Archive ${b.name}`}
-                            disabled={botActionPending}
-                            onClick={() => void runBotAction(() => b.archived ? onUpsertBot({ ...b, archived: false }) : onDeleteBot(b.id))}
+                            disabled={hubActionPending}
+                            onClick={() => void runHubAction(() => b.archived ? onUpsertBot({ ...b, archived: false }) : onDeleteBot(b.id))}
                             className="text-zinc-500 hover:text-red-400 p-1"
                           >
                             {b.archived ? <span className="text-xs">Restore</span> : <Trash2 className="w-3.5 h-3.5" />}
@@ -706,11 +709,11 @@ export function OmniHubModal({
 
                       {!b.isPrimary && !b.archived && <button
                         type="button"
-                        aria-label={`${preferences.pinnedBotIds?.includes(b.id) ? "Unpin" : "Pin"} ${b.name} ${preferences.pinnedBotIds?.includes(b.id) ? "from" : "to"} sidebar`}
-                        aria-pressed={preferences.pinnedBotIds?.includes(b.id) ?? false}
+                        aria-label={`${preferences.pinnedBotIds.includes(b.id) ? "Unpin" : "Pin"} ${b.name} ${preferences.pinnedBotIds.includes(b.id) ? "from" : "to"} sidebar`}
+                        aria-pressed={preferences.pinnedBotIds.includes(b.id)}
                         onClick={() => void onTogglePin(b)}
                         className="flex items-center gap-2 text-xs text-zinc-400 hover:text-white w-fit"
-                      >{preferences.pinnedBotIds?.includes(b.id) ? <PinOff size={13} /> : <Pin size={13} />}{preferences.pinnedBotIds?.includes(b.id) ? "Unpin from sidebar" : "Pin to sidebar"}</button>}
+                      >{preferences.pinnedBotIds.includes(b.id) ? <PinOff size={13} /> : <Pin size={13} />}{preferences.pinnedBotIds.includes(b.id) ? "Unpin from sidebar" : "Pin to sidebar"}</button>}
                       <div className="flex items-center gap-2 pt-1">
                         <button
                           type="button"
@@ -724,8 +727,8 @@ export function OmniHubModal({
                         </button>
                         <button
                           type="button"
-                          disabled={botActionPending}
-                          onClick={() => void runBotAction(() => handleDuplicateBot(b))}
+                          disabled={hubActionPending}
+                          onClick={() => void runHubAction(() => onUpsertBot(duplicateBot(b, bots)))}
                           title={`Clone @${b.name} into another Bot running on ${b.cliDriver}`}
                           className="px-2.5 py-1.5 rounded-xl liquid-glass-chip text-xs text-zinc-200 hover:text-white inline-flex items-center gap-1"
                         >
@@ -780,6 +783,7 @@ export function OmniHubModal({
                     <div className="grid grid-cols-2 gap-3">
                       <input
                         type="text"
+                        aria-label="Project name"
                         value={projName}
                         onChange={(e) => setProjName(e.target.value)}
                         placeholder="Project name (e.g. My app)"
@@ -787,6 +791,7 @@ export function OmniHubModal({
                       />
                       <input
                         type="text"
+                        aria-label="Project folder path"
                         value={projPath}
                         onChange={(e) => setProjPath(e.target.value)}
                         placeholder="/Users/you/Projects/my-app"
@@ -912,19 +917,19 @@ export function OmniHubModal({
                       className="w-full rounded-xl bg-black/40 border border-white/10 p-3 text-[13px] text-white focus:outline-none resize-none"
                     />
 
+                    {projSaveError && <p role="alert" className="text-sm text-red-300 break-words">{projSaveError}</p>}
                     <div className="flex justify-end gap-2">
                       <button
                         type="button"
-                        onClick={handleSaveProject}
-                        className="px-4 py-1.5 rounded-full bg-white text-black text-xs font-semibold"
+                        onClick={() => void handleSaveProject()}
+                        disabled={projSaving || !projName.trim() || !projPath.trim()}
+                        className="px-4 py-1.5 rounded-full bg-white text-black text-xs font-semibold disabled:opacity-40"
                       >
-                        Save Project Configuration
+                        {projSaving ? "Saving…" : "Save Project Configuration"}
                       </button>
                     </div>
                   </div></Collapse>
 
-                {botActionError && <p role="alert" className="text-sm text-red-300">{botActionError}</p>}
-                <p className="text-xs text-zinc-500 mb-3">Archiving preserves conversations and memory. Duplicating copies settings with fresh memory. Tool detection does not verify authentication.</p>
                 <div className="grid grid-cols-2 gap-3.5">
                   {projects.map((proj) => {
                     const isActive = preferences.workspaceRoot === proj.path;
@@ -947,7 +952,9 @@ export function OmniHubModal({
                               {projects.length > 1 && (
                                 <button
                                   type="button"
-                                  onClick={() => onDeleteProject(proj.id)}
+                                  aria-label={`Remove project ${proj.name}`}
+                                  disabled={hubActionPending}
+                                  onClick={() => void handleDeleteProject(proj)}
                                   className="text-zinc-500 hover:text-red-400 p-1"
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
@@ -979,12 +986,7 @@ export function OmniHubModal({
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
-                            onClick={() =>
-                              onUpdatePreferences({
-                                ...preferences,
-                                workspaceRoot: proj.path,
-                              })
-                            }
+                            onClick={() => void savePreferences({ workspaceRoot: proj.path })}
                             className={`flex-1 py-1.5 rounded-xl text-xs font-medium ${
                               isActive
                                 ? "bg-emerald-500/20 text-emerald-300 border border-emerald-400/30"
@@ -1016,6 +1018,7 @@ export function OmniHubModal({
                   <Search className="w-4 h-4 text-zinc-400 shrink-0" />
                   <input
                     type="text"
+                    aria-label="Filter skills"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder="Filter local agent skills..."
@@ -1023,8 +1026,6 @@ export function OmniHubModal({
                   />
                 </div>
 
-                {botActionError && <p role="alert" className="text-sm text-red-300">{botActionError}</p>}
-                <p className="text-xs text-zinc-500 mb-3">Archiving preserves conversations and memory. Duplicating copies settings with fresh memory. Tool detection does not verify authentication.</p>
                 <div className="grid grid-cols-2 gap-3.5">
                   {skills
                     .filter(
@@ -1088,10 +1089,9 @@ export function OmniHubModal({
                     <div className="flex items-center gap-2.5 shrink-0">
                       <button
                         type="button"
-                        onClick={() => {
-                          onRunRoutineNow(r);
-                          onClose();
-                        }}
+                        aria-label={`Run ${r.name} now`}
+                        disabled={hubActionPending}
+                        onClick={() => void runHubAction(async () => { await onRunRoutineNow(r); onClose(); })}
                         className="p-1.5 rounded-lg liquid-glass-chip text-zinc-300 hover:text-white"
                       >
                         <Play className="w-3.5 h-3.5" />
@@ -1099,7 +1099,9 @@ export function OmniHubModal({
                       <span className="text-xs text-zinc-500">{routineScheduleLabel(r)}</span>
                       <button
                         type="button"
-                        onClick={() => onDeleteRoutine(r.id)}
+                        aria-label={`Delete routine ${r.name}`}
+                        disabled={hubActionPending}
+                        onClick={() => void handleDeleteRoutine(r)}
                         className="p-1.5 rounded-lg text-zinc-500 hover:text-red-400"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -1124,13 +1126,9 @@ export function OmniHubModal({
                     </div>
                     <button
                       type="button"
+                      disabled={hubActionPending}
                       onClick={async () => {
-                        await onUpdatePreferences({
-                          ...preferences,
-                          globalInstructions: globalInstructionsDraft.trim(),
-                        });
-                        setInstructionsSaved(true);
-                        setTimeout(() => setInstructionsSaved(false), 1800);
+                        if (await savePreferences({ globalInstructions: globalInstructionsDraft.trim() })) setInstructionsSaved(true);
                       }}
                       className="px-4 py-1.5 rounded-full bg-white text-black text-xs font-semibold hover:bg-zinc-200"
                     >
@@ -1139,6 +1137,7 @@ export function OmniHubModal({
                   </div>
                   <textarea
                     rows={4}
+                    aria-label="Global team instructions"
                     value={globalInstructionsDraft}
                     onChange={(e) => setGlobalInstructionsDraft(e.target.value)}
                     className="w-full rounded-xl bg-black/40 border border-white/10 p-3 text-[13.5px] text-zinc-100 focus:outline-none resize-none"
@@ -1159,12 +1158,8 @@ export function OmniHubModal({
                     type="button"
                     role="switch"
                     aria-checked={preferences.approveAllTools}
-                    onClick={() =>
-                      onUpdatePreferences({
-                        ...preferences,
-                        approveAllTools: !preferences.approveAllTools,
-                      })
-                    }
+                    aria-label="Auto-approve local CLI tool execution"
+                    onClick={() => void savePreferences({ approveAllTools: !preferences.approveAllTools })}
                     className={`relative inline-flex h-6 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
                       preferences.approveAllTools ? "bg-[#3b82f6]" : "bg-white/[0.14]"
                     }`}
@@ -1183,13 +1178,12 @@ export function OmniHubModal({
                     ["trustCursorBotHomes", "Trust bot homes in Cursor", "Let Cursor work in bot home folders created by Omnibot. Project folders still require their own trust approval. Tool permissions remain unchanged."],
                   ] as const).map(([key, label, description]) => <div key={key} className="px-4 py-3 flex items-center justify-between gap-4">
                     <div><div className="text-[13.5px] font-semibold text-white">{label}</div><p className="text-xs text-zinc-400">{description}</p></div>
-                    <button type="button" role="switch" aria-label={label} aria-checked={preferences[key] ?? false} disabled={botActionPending}
-                      onClick={() => void runBotAction(() => onUpdatePreferences({ ...preferences, [key]: !preferences[key] }))}
+                    <button type="button" role="switch" aria-label={label} aria-checked={preferences[key]} disabled={hubActionPending}
+                      onClick={() => void savePreferences({ [key]: !preferences[key] })}
                       className={`relative inline-flex h-6 w-10 shrink-0 rounded-full border-2 border-transparent transition-colors ${preferences[key] ? "bg-zinc-200" : "bg-white/[0.14]"}`}>
                       <span className={`inline-block h-5 w-5 rounded-full shadow transition ${preferences[key] ? "translate-x-4 bg-zinc-800" : "translate-x-0 bg-white"}`} />
                     </button>
                   </div>)}
-                  {botActionError && <p role="alert" className="px-4 pb-3 text-xs text-red-300">{botActionError}</p>}
                 </div>
 
                 {/* Token & Swarm Loop Guardrails */}
@@ -1206,24 +1200,18 @@ export function OmniHubModal({
                     <button
                       type="button"
                       role="switch"
-                      aria-checked={preferences.preventHandoffLoops ?? true}
-                      onClick={() =>
-                        onUpdatePreferences({
-                          ...preferences,
-                          preventHandoffLoops: !(
-                            preferences.preventHandoffLoops ?? true
-                          ),
-                        })
-                      }
+                      aria-label="Prevent ping-pong handoff loops"
+                      aria-checked={preferences.preventHandoffLoops}
+                      onClick={() => void savePreferences({ preventHandoffLoops: !preferences.preventHandoffLoops })}
                       className={`relative inline-flex h-6 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                        (preferences.preventHandoffLoops ?? true)
+                        preferences.preventHandoffLoops
                           ? "bg-[#3b82f6]"
                           : "bg-white/[0.14]"
                       }`}
                     >
                       <span
                         className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition ${
-                          (preferences.preventHandoffLoops ?? true)
+                          preferences.preventHandoffLoops
                             ? "translate-x-4"
                             : "translate-x-0"
                         }`}
@@ -1243,24 +1231,18 @@ export function OmniHubModal({
                     <button
                       type="button"
                       role="switch"
-                      aria-checked={preferences.onlyExplicitHandoffs ?? false}
-                      onClick={() =>
-                        onUpdatePreferences({
-                          ...preferences,
-                          onlyExplicitHandoffs: !(
-                            preferences.onlyExplicitHandoffs ?? false
-                          ),
-                        })
-                      }
+                      aria-label="Require explicit handoff tags only"
+                      aria-checked={preferences.onlyExplicitHandoffs}
+                      onClick={() => void savePreferences({ onlyExplicitHandoffs: !preferences.onlyExplicitHandoffs })}
                       className={`relative inline-flex h-6 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                        (preferences.onlyExplicitHandoffs ?? false)
+                        preferences.onlyExplicitHandoffs
                           ? "bg-[#3b82f6]"
                           : "bg-white/[0.14]"
                       }`}
                     >
                       <span
                         className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition ${
-                          (preferences.onlyExplicitHandoffs ?? false)
+                          preferences.onlyExplicitHandoffs
                             ? "translate-x-4"
                             : "translate-x-0"
                         }`}
@@ -1282,14 +1264,10 @@ export function OmniHubModal({
                         <button
                           key={n}
                           type="button"
-                          onClick={() =>
-                            onUpdatePreferences({
-                              ...preferences,
-                              maxContextMessages: n,
-                            })
-                          }
+                          aria-pressed={preferences.maxContextMessages === n}
+                          onClick={() => void savePreferences({ maxContextMessages: n })}
                           className={`px-2.5 py-1 rounded-lg text-xs font-semibold ${
-                            (preferences.maxContextMessages ?? 6) === n
+                            preferences.maxContextMessages === n
                               ? "bg-white text-black"
                               : "bg-[#1f1f1f] text-zinc-400 hover:text-white"
                           }`}
@@ -1309,32 +1287,28 @@ export function OmniHubModal({
                         Automatically stops a CLI turn if reported cost exceeds this threshold
                       </p>
                     </div>
-                    <div className="flex items-center gap-1">
-                      {[0.5, 1.5, 3.0, 5.0].map((usd) => (
+                    <div className="flex items-center gap-1" role="group" aria-label="Reported cost limit per turn">
+                      {TURN_BUDGET_OPTIONS.map((usd) => (
                         <button
                           key={usd}
                           type="button"
-                          onClick={() =>
-                            onUpdatePreferences({
-                              ...preferences,
-                              maxTurnBudgetUsd: usd,
-                            })
-                          }
-                          className={`px-2.5 py-1 rounded-lg text-xs  font-semibold ${
-                            (preferences.maxTurnBudgetUsd ?? 1.5) === usd
+                          aria-pressed={preferences.maxTurnBudgetUsd === usd}
+                          onClick={() => void savePreferences({ maxTurnBudgetUsd: usd })}
+                          className={`px-2.5 py-1 rounded-lg text-xs whitespace-nowrap font-semibold ${
+                            preferences.maxTurnBudgetUsd === usd
                               ? "bg-white text-black"
                               : "bg-[#1f1f1f] text-zinc-400 hover:text-white"
                           }`}
                         >
-                          ${usd.toFixed(2)}
+                          {formatUsdLimit(usd)}
                         </button>
                       ))}
                     </div>
                   </div>
 
                   <label className="px-4 py-3 flex items-center justify-between gap-4 text-sm">
-                    <span>Workflow reported-cost limit (USD)<span className="block text-xs text-zinc-400">Stops queued work after reported costs reach this amount; not a provider spending cap.</span></span>
-                    <input aria-label="Workflow cost limit" type="number" min="0.01" step="0.25" className="w-24 rounded bg-white/10 p-2" value={preferences.workflowBudgetUsd ?? 3.75} onChange={e => { const value = Number(e.target.value); if (value > 0) void onUpdatePreferences({ ...preferences, workflowBudgetUsd: value }); }} />
+                    <span>Workflow reported-cost limit (USD)<span className="block text-xs text-zinc-400">Stops queued work after reported costs reach this amount; not a provider spending cap. Enter 0 for no limit.</span></span>
+                    <input aria-label="Workflow cost limit" aria-invalid={!workflowBudgetValid} type="number" min="0" step="0.25" inputMode="decimal" className={`w-24 rounded bg-white/10 p-2 ${workflowBudgetValid ? "" : "ring-1 ring-red-400"}`} value={workflowBudgetDraft} onChange={e => setWorkflowBudgetDraft(e.target.value)} onBlur={commitWorkflowBudget} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); commitWorkflowBudget(); } }} />
                   </label>
                   <div className="px-4 py-3 flex items-center justify-between gap-4">
                     <div>
@@ -1350,14 +1324,10 @@ export function OmniHubModal({
                         <button
                           key={cnt}
                           type="button"
-                          onClick={() =>
-                            onUpdatePreferences({
-                              ...preferences,
-                              maxParallelBots: cnt,
-                            })
-                          }
+                          aria-pressed={preferences.maxParallelBots === cnt}
+                          onClick={() => void savePreferences({ maxParallelBots: cnt })}
                           className={`px-2.5 py-1 rounded-lg text-xs font-semibold ${
-                            (preferences.maxParallelBots ?? 3) === cnt
+                            preferences.maxParallelBots === cnt
                               ? "bg-white text-black"
                               : "bg-[#1f1f1f] text-zinc-400 hover:text-white"
                           }`}
@@ -1372,7 +1342,7 @@ export function OmniHubModal({
             )}
           </div>
         </div>
-      </div>
-    </div>
+      {confirmElement}
+    </Dialog>
   );
 }

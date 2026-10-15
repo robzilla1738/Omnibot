@@ -16,6 +16,11 @@ import type {
 } from "./types";
 
 let cachedServerBaseUrl = "http://127.0.0.1:4321";
+let serverDiscovered = false;
+let apiTokenPromise: Promise<string> | null = null;
+
+const DEFAULT_TIMEOUT_MS = 15_000;
+const LONG_TIMEOUT_MS = 120_000;
 
 export function isTauriRuntime(): boolean {
   return (
@@ -24,14 +29,36 @@ export function isTauriRuntime(): boolean {
   );
 }
 
-async function httpJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${cachedServerBaseUrl}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers ?? {}),
-    },
+/** The debug backend accepts the dev origin without a token, so browser mode never sends one. */
+function apiToken(): Promise<string | null> {
+  if (!isTauriRuntime()) return Promise.resolve(null);
+  apiTokenPromise ??= invoke<string>("omni_api_token").catch(error => {
+    apiTokenPromise = null;
+    throw error;
   });
+  return apiTokenPromise;
+}
+
+async function httpJson<T>(path: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, ...requestInit } = init ?? {};
+  const token = await apiToken();
+  let res: Response;
+  try {
+    res = await fetch(`${cachedServerBaseUrl}${path}`, {
+      ...requestInit,
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...requestInit.headers,
+      },
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "TimeoutError") {
+      throw new Error("Omnibot didn’t respond in time. Try again.");
+    }
+    throw error;
+  }
   if (!res.ok) {
     const txt = await res.text().catch(() => "Request failed");
     throw new Error(txt || `HTTP ${res.status}`);
@@ -39,28 +66,46 @@ async function httpJson<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+function rememberServer(snap: OmniSnapshot, fallbackBaseUrl = cachedServerBaseUrl): OmniSnapshot {
+  cachedServerBaseUrl = snap.serverBaseUrl || fallbackBaseUrl;
+  return snap;
+}
+
+/** The dev server may bind any of 15 ports; probe them together and keep the first that answers. */
+async function discoverServer(): Promise<OmniSnapshot> {
+  const winner = new AbortController();
+  const probes = Array.from({ length: 15 }, async (_, index) => {
+    const candidate = `http://127.0.0.1:${4321 + index}`;
+    const res = await fetch(`${candidate}/api/snapshot`, {
+      signal: AbortSignal.any([winner.signal, AbortSignal.timeout(2000)]),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return rememberServer((await res.json()) as OmniSnapshot, candidate);
+  });
+  try {
+    return await Promise.any(probes);
+  } catch {
+    throw new Error("Could not reach the Omnibot local backend.");
+  } finally {
+    winner.abort();
+  }
+}
+
 export async function getOmniSnapshot(): Promise<OmniSnapshot> {
   if (isTauriRuntime()) {
-    const snap = await invoke<OmniSnapshot>("omni_snapshot");
-    if (snap.serverBaseUrl) cachedServerBaseUrl = snap.serverBaseUrl;
+    return rememberServer(await invoke<OmniSnapshot>("omni_snapshot"));
+  }
+  if (!serverDiscovered) {
+    const snap = await discoverServer();
+    serverDiscovered = true;
     return snap;
   }
-  for (const port of Array.from({ length: 15 }, (_, index) => 4321 + index)) {
-    try {
-      const candidate = `http://127.0.0.1:${port}`;
-      const res = await fetch(`${candidate}/api/snapshot`, { signal: AbortSignal.timeout(2000) });
-      if (res.ok) {
-        const snap = (await res.json()) as OmniSnapshot;
-        cachedServerBaseUrl = snap.serverBaseUrl || candidate;
-        return snap;
-      }
-    } catch {
-      // Try next candidate port
-    }
+  try {
+    return rememberServer(await httpJson<OmniSnapshot>("/api/snapshot"));
+  } catch (error) {
+    serverDiscovered = false;
+    throw error;
   }
-  const snap = await httpJson<OmniSnapshot>("/api/snapshot");
-  if (snap.serverBaseUrl) cachedServerBaseUrl = snap.serverBaseUrl;
-  return snap;
 }
 
 export async function retryOmniStorage(): Promise<OmniSnapshot> {
@@ -71,7 +116,7 @@ export async function rescanOmniEnvironment(): Promise<OmniSnapshot> {
   if (isTauriRuntime()) {
     return invoke<OmniSnapshot>("omni_rescan");
   }
-  return httpJson<OmniSnapshot>("/api/rescan", { method: "POST" });
+  return httpJson<OmniSnapshot>("/api/rescan", { method: "POST", timeoutMs: LONG_TIMEOUT_MS });
 }
 
 export interface SendMessageParams {
@@ -276,16 +321,6 @@ export async function listLocalFiles(
   );
 }
 
-export async function readLocalFile(path: string): Promise<string> {
-  if (isTauriRuntime()) {
-    return invoke<string>("omni_read_local_file", { path });
-  }
-  const res = await httpJson<{ content: string }>(
-    `/api/computer/read?path=${encodeURIComponent(path)}`
-  );
-  return res.content;
-}
-
 export async function openLocalItem(
   target: string,
   options?: { appName?: string; revealInFinder?: boolean }
@@ -316,7 +351,7 @@ export async function getGitFileDiff(filePath: string, chatId: string, taskId?: 
   return res.diff;
 }
 export async function commitGitChanges(message: string, chatId: string, taskId?: string): Promise<OmniSnapshot> {
-  return httpJson<OmniSnapshot>("/api/git/commit", { method: "POST", body: JSON.stringify({ message, chatId, taskId }) });
+  return httpJson<OmniSnapshot>("/api/git/commit", { method: "POST", body: JSON.stringify({ message, chatId, taskId }), timeoutMs: LONG_TIMEOUT_MS });
 }
 export async function discardGitFile(filePath: string, chatId: string, taskId?: string): Promise<OmniSnapshot> {
   return httpJson<OmniSnapshot>("/api/git/discard", { method: "POST", body: JSON.stringify({ filePath, chatId, taskId }) });
@@ -331,43 +366,94 @@ export async function testCliHarness(
   return httpJson<CliHarnessTestResult>("/api/harness/test", {
     method: "POST",
     body: JSON.stringify({ kind }),
+    timeoutMs: LONG_TIMEOUT_MS,
   });
 }
 
+export type EventChannelStatus = "connecting" | "connected" | "disconnected";
+
 export function subscribeOmniEvents(
-  onEvent: (event: OmniStreamEvent) => void
+  onEvent: (event: OmniStreamEvent) => void,
+  onStatus: (status: EventChannelStatus) => void
 ): () => void {
   let disposed = false;
   let unlistenTauri: (() => void) | null = null;
   let sse: EventSource | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let reconnectDelay = 1000;
 
+  const connectSse = async () => {
+    const token = await apiToken().catch(() => null);
+    if (disposed) return;
+    const url = `${cachedServerBaseUrl}/api/events${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+    const source = new EventSource(url);
+    sse = source;
+    source.onopen = () => {
+      reconnectDelay = 1000;
+      onStatus("connected");
+      onEvent({ type: "state-updated", chatId: null });
+    };
+    source.onmessage = (msg) => {
+      try {
+        onEvent(JSON.parse(msg.data) as OmniStreamEvent);
+      } catch {
+        // Ignore malformed SSE frame
+      }
+    };
+    source.onerror = () => {
+      onStatus("disconnected");
+      // The browser retries transient drops itself but gives up after a rejected response.
+      if (source.readyState !== EventSource.CLOSED || disposed) return;
+      reconnectTimer = setTimeout(() => void connectSse(), reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
+    };
+  };
+
+  onStatus("connecting");
   if (isTauriRuntime()) {
     listen<OmniStreamEvent>("omni-stream-event", (ev) => {
       onEvent(ev.payload);
     })
       .then((unsub) => {
         if (disposed) unsub();
-        else unlistenTauri = unsub;
+        else {
+          unlistenTauri = unsub;
+          onStatus("connected");
+        }
       })
-      .catch(() => undefined);
+      .catch(() => {
+        if (!disposed) onStatus("disconnected");
+      });
   } else if (typeof EventSource !== "undefined") {
-    sse = new EventSource(`${cachedServerBaseUrl}/api/events`);
-    sse.onopen = () => onEvent({ type: "state-updated", chatId: null });
-    sse.onmessage = (msg) => {
-      try {
-        const parsed = JSON.parse(msg.data) as OmniStreamEvent;
-        onEvent(parsed);
-      } catch {
-        // Ignore malformed SSE frame
-      }
-    };
+    void connectSse();
+  } else {
+    onStatus("disconnected");
   }
 
   return () => {
     disposed = true;
+    clearTimeout(reconnectTimer);
     unlistenTauri?.();
     sse?.close();
   };
+}
+
+/** Opens model-provided links outside the app webview; other schemes are refused. */
+export async function openExternalUrl(url: string): Promise<void> {
+  if (!isSafeExternalUrl(url)) throw new Error("Only web and email links can be opened.");
+  if (isTauriRuntime()) {
+    await invoke("omni_open_external_url", { url });
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+export function isSafeExternalUrl(url: string): boolean {
+  try {
+    return ["http:", "https:", "mailto:"].includes(new URL(url).protocol);
+  } catch {
+    return false;
+  }
 }
 
 export interface SetupInput {
@@ -381,7 +467,7 @@ export interface SetupInput {
 
 export async function completeOmniSetup(input: SetupInput): Promise<OmniSnapshot> {
   if (isTauriRuntime()) return invoke<OmniSnapshot>("omni_complete_setup", { input });
-  return httpJson<OmniSnapshot>("/api/setup", { method: "POST", body: JSON.stringify(input) });
+  return httpJson<OmniSnapshot>("/api/setup", { method: "POST", body: JSON.stringify(input), timeoutMs: LONG_TIMEOUT_MS });
 }
 
 export async function pinOmniBot(botId: string, pinned: boolean): Promise<OmniSnapshot> {
@@ -410,18 +496,35 @@ export interface TerminalSessionInfo {
 export function listTerminals(chatId: string): Promise<TerminalSessionInfo[]> {
   return httpJson(`/api/terminal/list?chatId=${encodeURIComponent(chatId)}`);
 }
-export function readTerminal(id: string, offset: number): Promise<{ data: number[]; offset: number; truncated: boolean; status: string }> {
-  return httpJson(`/api/terminal/output?id=${encodeURIComponent(id)}&offset=${offset}`);
+export async function readTerminal(id: string, offset: number): Promise<{ data: Uint8Array; offset: number; truncated: boolean; status: string }> {
+  const result = await httpJson<{ data: string; offset: number; truncated: boolean; status: string }>(`/api/terminal/output?id=${encodeURIComponent(id)}&offset=${offset}`);
+  return { ...result, data: base64ToBytes(result.data) };
 }
 export function startTerminal(chatId: string, botId: string): Promise<TerminalSessionInfo> {
-  return httpJson("/api/terminal/start", { method: "POST", body: JSON.stringify({ chatId, botId, cols: 80, rows: 24 }) });
+  return httpJson("/api/terminal/start", { method: "POST", body: JSON.stringify({ chatId, botId, cols: 80, rows: 24 }), timeoutMs: LONG_TIMEOUT_MS });
 }
-export function writeTerminal(id: string, data: number[]): Promise<void> {
-  return httpJson("/api/terminal/write", { method: "POST", body: JSON.stringify({ id, data }) });
+export function writeTerminal(id: string, data: Uint8Array): Promise<void> {
+  return httpJson("/api/terminal/write", { method: "POST", body: JSON.stringify({ id, data: bytesToBase64(data) }) });
 }
 export function resizeTerminal(id: string, cols: number, rows: number): Promise<void> {
   return httpJson("/api/terminal/resize", { method: "POST", body: JSON.stringify({ id, cols, rows }) });
 }
 export function stopTerminal(id: string): Promise<void> {
   return httpJson("/api/terminal/stop", { method: "POST", body: JSON.stringify({ id }) });
+}
+
+export function base64ToBytes(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+export function bytesToBase64(bytes: Uint8Array): string {
+  // Chunk to stay under the engine's argument limit without quadratic string concatenation.
+  const chunks: string[] = [];
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    chunks.push(String.fromCharCode(...bytes.subarray(i, i + 0x8000)));
+  }
+  return btoa(chunks.join(""));
 }

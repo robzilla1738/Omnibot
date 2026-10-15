@@ -3,7 +3,6 @@ import {
   Blocks,
   TerminalSquare,
   Copy,
-  Palette,
   Pin,
   PinOff,
   Settings2,
@@ -14,6 +13,9 @@ import {
 } from "lucide-react";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { duplicateBot } from "../../lib/bots";
+import { useNotices } from "../ui/Notices";
+import { useMenu } from "../ui/useMenu";
 import type {
   ActiveBotRun,
   BotProfile,
@@ -28,6 +30,7 @@ const DEFAULT_EXPANDED_WIDTH = 290;
 const MIN_EXPANDED_WIDTH = 248;
 const MAX_EXPANDED_WIDTH = 420;
 const SNAP_THRESHOLD = 165;
+const KEYBOARD_RESIZE_STEP = 16;
 
 export interface AppSidebarProps {
   workspaces: WorkspaceEntry[];
@@ -52,10 +55,9 @@ export interface AppSidebarProps {
   onSelectBotDirectChat: (bot: BotProfile) => void;
   onSelectChat: (chatId: string) => void;
   onNewChatOrSwarm: () => void;
-  onNewGroupChat: () => void;
   onNewBot: () => void;
   onOpenSearch: () => void;
-  onDeleteChat: (chatId: string, e: React.MouseEvent) => void;
+  onDeleteChat: (chatId: string) => Promise<void>;
   onUpdateChat: (params: { chatId: string; title?: string }) => Promise<void>;
   onUpsertBot: (bot: BotProfile) => Promise<void>;
   onDeleteBot: (botId: string) => Promise<void>;
@@ -94,8 +96,10 @@ export function AppSidebar(props: AppSidebarProps) {
     onDeleteBot,
     onCustomizeBot,
   } = props;
+  const { runAction } = useNotices();
   const sidebarRef = useRef<HTMLElement>(null);
   const [sidebarCustomization, setSidebarCustomization] = useState(false);
+  const closeCustomization = useCallback(() => setSidebarCustomization(false), []);
   const [expandedWidth, setExpandedWidth] = useState(DEFAULT_EXPANDED_WIDTH);
   const installedHarnesses = harnesses.filter(harness => harness.installed);
   const dockHarnesses = installedHarnesses.slice(0, expandedWidth < 280 ? 2 : expandedWidth < 360 ? 3 : 4);
@@ -108,21 +112,16 @@ export function AppSidebar(props: AppSidebarProps) {
 
   // Right-click Context Menu State
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
+  const closeContextMenu = useCallback(() => setContextMenu(null), []);
+  const contextMenuKeys = useMenu(contextMenu !== null, closeContextMenu);
 
   const currentWidth = collapsed ? COLLAPSED_WIDTH : expandedWidth;
 
   useEffect(() => {
     if (!contextMenu) return;
     const closeMenu = () => setContextMenu(null);
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setContextMenu(null);
-    };
     window.addEventListener("click", closeMenu);
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("click", closeMenu);
-      window.removeEventListener("keydown", onKeyDown);
-    };
+    return () => window.removeEventListener("click", closeMenu);
   }, [contextMenu]);
 
   const openBotContextMenu = (e: React.MouseEvent, bot: BotProfile) => {
@@ -134,17 +133,29 @@ export function AppSidebar(props: AppSidebarProps) {
     setContextMenu({ kind: "bot", bot, x, y });
   };
 
-  const handleDuplicateBot = async (bot: BotProfile) => {
+  const handleDuplicateBot = (bot: BotProfile) => {
     setContextMenu(null);
-    const count = bots.filter((b) => b.cliDriver === bot.cliDriver).length;
-    await onUpsertBot({
-      ...bot,
-      id: "",
-      name: `${bot.name} ${count + 1}`,
-      slug: `${bot.slug}-${count + 1}`,
-      isPrimary: false,
-      autoCreatedForCli: false,
-    });
+    void runAction(`Couldn’t duplicate ${bot.name}`, () => onUpsertBot(duplicateBot(bot, [primaryBot, ...bots])));
+  };
+
+  const handleResizeKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onCollapsedChange(!collapsed);
+      return;
+    }
+    const delta = e.key === "ArrowRight" ? KEYBOARD_RESIZE_STEP : e.key === "ArrowLeft" ? -KEYBOARD_RESIZE_STEP : 0;
+    if (!delta) return;
+    e.preventDefault();
+    if (collapsed) {
+      if (delta > 0) onCollapsedChange(false);
+      return;
+    }
+    if (delta < 0 && expandedWidth <= MIN_EXPANDED_WIDTH) {
+      onCollapsedChange(true);
+      return;
+    }
+    setExpandedWidth(width => Math.max(MIN_EXPANDED_WIDTH, Math.min(MAX_EXPANDED_WIDTH, width + delta)));
   };
 
   const handlePointerDown = useCallback(
@@ -361,7 +372,7 @@ export function AppSidebar(props: AppSidebarProps) {
             : "opacity-100 translate-x-0"
         }`}
       >
-        {!setupMode && <SidebarSections {...props} customizationHost={sidebarRef.current} customizationOpen={sidebarCustomization} onCloseCustomization={() => setSidebarCustomization(false)} />}
+        {!setupMode && <SidebarSections {...props} customizationHost={sidebarRef.current} customizationOpen={sidebarCustomization} onCloseCustomization={closeCustomization} />}
       </div>
 
       {/* Bottom Progressive Blur & Soft Vignette Feather */}
@@ -434,85 +445,81 @@ export function AppSidebar(props: AppSidebarProps) {
       {/* Right-Click Context Menu Popover */}
       {contextMenu && (
         <div
+          ref={contextMenuKeys.menuRef}
+          role="menu"
+          aria-label={`${contextMenu.bot.name} options`}
+          tabIndex={-1}
+          onKeyDown={contextMenuKeys.onKeyDown}
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={(e) => e.stopPropagation()}
           className="motion-menu fixed z-50 w-52 rounded-2xl liquid-glass-modal p-1.5 shadow-[0_18px_50px_rgba(0,0,0,0.85)] border border-white/[0.1] space-y-0.5"
         >
-          <>
-              <div className="px-2.5 py-1.5 flex items-center gap-2 mb-1">
-                <BotCharacterAvatar bot={contextMenu.bot} size={22} />
-                <div className="min-w-0">
-                  <div className="text-xs font-semibold text-white truncate">
-                    {contextMenu.bot.name}
-                  </div>
-                  <div className="text-[10.5px]  text-zinc-400 truncate">
-                    {contextMenu.bot.cliDriver}
-                  </div>
-                </div>
+          <div className="px-2.5 py-1.5 flex items-center gap-2 mb-1">
+            <BotCharacterAvatar bot={contextMenu.bot} size={22} />
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-white truncate">
+                {contextMenu.bot.name}
               </div>
-              {!contextMenu.bot.isPrimary && <button type="button" onClick={() => { onTogglePin(contextMenu.bot); setContextMenu(null); }}
-                className="w-full px-2.5 py-2 rounded-xl flex items-center gap-2.5 text-[13px] text-zinc-200 hover:bg-white/[0.08]">
-                {pinnedBotIds.includes(contextMenu.bot.id) ? <PinOff size={14} /> : <Pin size={14} />}
-                {pinnedBotIds.includes(contextMenu.bot.id) ? "Unpin from sidebar" : "Pin to sidebar"}
-              </button>}
-              <button
-                type="button"
-                onClick={() => { onCustomizeBot(contextMenu.bot); setContextMenu(null); }}
-                className="w-full px-2.5 py-1.5 rounded-xl flex items-center gap-2.5 text-xs text-zinc-200 hover:text-white hover:bg-white/[0.08] transition-colors"
-              >
-                <Pencil className="w-3.5 h-3.5 text-zinc-400" />
-                <span>Rename &amp; Edit Role</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const target = contextMenu.bot;
-                  setContextMenu(null);
-                  onCustomizeBot(target);
-                }}
-                className="w-full px-2.5 py-1.5 rounded-xl flex items-center gap-2.5 text-xs text-zinc-200 hover:text-white hover:bg-white/[0.08] transition-colors"
-              >
-                <Palette className="w-3.5 h-3.5 text-cyan-400" />
-                <span>Customize Shape &amp; CLI</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleDuplicateBot(contextMenu.bot)}
-                className="w-full px-2.5 py-1.5 rounded-xl flex items-center gap-2.5 text-xs text-zinc-200 hover:text-white hover:bg-white/[0.08] transition-colors"
-              >
-                <Copy className="w-3.5 h-3.5 text-zinc-400" />
-                <span>Duplicate Bot ({contextMenu.bot.cliDriver})</span>
-              </button>
-              {!contextMenu.bot.isPrimary && (
-                <>
-                  <div className="my-1 " />
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      const id = contextMenu.bot.id;
-                      setContextMenu(null);
-                      await onDeleteBot(id);
-                    }}
-                    className="w-full px-2.5 py-1.5 rounded-xl flex items-center gap-2.5 text-xs text-red-400 hover:text-red-300 hover:bg-red-500/15 transition-colors"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    <span>Archive Bot</span>
-                  </button>
-                </>
-              )}
-            </>
-
+              <div className="text-[10.5px]  text-zinc-400 truncate">
+                {contextMenu.bot.cliDriver}
+              </div>
+            </div>
+          </div>
+          {!contextMenu.bot.isPrimary && <button type="button" role="menuitem" onClick={() => { void onTogglePin(contextMenu.bot); setContextMenu(null); }}
+            className="w-full px-2.5 py-2 rounded-xl flex items-center gap-2.5 text-[13px] text-zinc-200 hover:bg-white/[0.08] focus-visible:bg-white/[0.08]">
+            {pinnedBotIds.includes(contextMenu.bot.id) ? <PinOff size={14} /> : <Pin size={14} />}
+            {pinnedBotIds.includes(contextMenu.bot.id) ? "Unpin from sidebar" : "Pin to sidebar"}
+          </button>}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => { const target = contextMenu.bot; setContextMenu(null); onCustomizeBot(target); }}
+            className="w-full px-2.5 py-1.5 rounded-xl flex items-center gap-2.5 text-xs text-zinc-200 hover:text-white hover:bg-white/[0.08] focus-visible:bg-white/[0.08] transition-colors"
+          >
+            <Pencil className="w-3.5 h-3.5 text-zinc-400" />
+            <span>Edit bot…</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => handleDuplicateBot(contextMenu.bot)}
+            className="w-full px-2.5 py-1.5 rounded-xl flex items-center gap-2.5 text-xs text-zinc-200 hover:text-white hover:bg-white/[0.08] focus-visible:bg-white/[0.08] transition-colors"
+          >
+            <Copy className="w-3.5 h-3.5 text-zinc-400" />
+            <span>Duplicate bot</span>
+          </button>
+          {!contextMenu.bot.isPrimary && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                const target = contextMenu.bot;
+                setContextMenu(null);
+                void runAction(`Couldn’t archive ${target.name}`, () => onDeleteBot(target.id));
+              }}
+              className="w-full mt-1 px-2.5 py-1.5 rounded-xl flex items-center gap-2.5 text-xs text-red-400 hover:text-red-300 hover:bg-red-500/15 focus-visible:bg-red-500/15 transition-colors"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>Archive bot</span>
+            </button>
+          )}
         </div>
       )}
 
       {/* Interactive Click & Drag Resize Handle along the right edge */}
       <div
         role="separator"
+        tabIndex={0}
         aria-orientation="vertical"
-        aria-label="Drag or click to resize or toggle sidebar"
+        aria-label="Resize sidebar"
+        aria-valuemin={COLLAPSED_WIDTH}
+        aria-valuemax={MAX_EXPANDED_WIDTH}
+        aria-valuenow={currentWidth}
+        aria-description="Use the left and right arrow keys to resize, or Enter to collapse or expand."
         title="Drag to resize · Click to toggle sidebar (Cmd+B)"
         onPointerDown={handlePointerDown}
-        className="absolute top-0 right-0 bottom-0 w-2.5 cursor-col-resize z-30"
+        onKeyDown={handleResizeKey}
+        className="absolute top-0 right-0 bottom-0 w-2.5 cursor-col-resize z-30 focus-visible:bg-white/20"
       />
     </aside>
   );

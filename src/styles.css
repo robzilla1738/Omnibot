@@ -306,6 +306,17 @@
   text-decoration: underline;
 }
 
+.omni-prose .omni-blocked-image {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 6px;
+  border: 1px dashed rgba(255, 255, 255, 0.2);
+  color: #a1a1aa;
+  font-size: 0.85em;
+}
+
 .omni-prose h1,
 .omni-prose h2,
 .omni-prose h3 {
@@ -365,12 +376,14 @@ select {
   font-size: 0.9em;
 }
 
-/* Mouse focus stays quiet; keyboard focus remains visible without a heavy halo. */
+/* Mouse focus stays quiet; keyboard focus uses a ring with at least 3:1 contrast on the dark surfaces. */
+:root { --focus-ring: rgba(140, 241, 251, 0.85); }
 button:focus, [role="button"]:focus, a:focus, summary:focus {
   outline: none;
 }
-button:focus-visible, [role="button"]:focus-visible, a:focus-visible, summary:focus-visible {
-  outline: 1px solid rgba(255, 255, 255, 0.3);
+button:focus-visible, [role="button"]:focus-visible, [role="menuitem"]:focus-visible, [role="option"]:focus-visible,
+[role="separator"]:focus-visible, a:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 input:focus, textarea:focus, select:focus {
@@ -378,8 +391,11 @@ input:focus, textarea:focus, select:focus {
   border-color: rgba(255, 255, 255, 0.22);
   box-shadow: none;
 }
+input:focus-visible, textarea:focus-visible, select:focus-visible {
+  border-color: rgba(140, 241, 251, 0.6);
+}
 input[type="checkbox"]:focus-visible, input[type="radio"]:focus-visible {
-  outline: 1px solid rgba(255, 255, 255, 0.3);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -500,8 +516,17 @@ input, textarea, select {
   0%, 70%, 100% { opacity: .35; }
   35% { opacity: 1; }
 }
+.bot-avatar-eyes {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: bot-blink 6s linear infinite;
+}
+@keyframes bot-blink {
+  0%, 96.5%, 100% { transform: scaleY(1); }
+  97.7% { transform: scaleY(0.16); }
+}
 @media (prefers-reduced-motion: reduce) {
-  .bot-avatar-working > :is(svg, img), .thinking-dots i { animation: none; }
+  .bot-avatar-working > :is(svg, img), .thinking-dots i, .bot-avatar-eyes { animation: none; }
 }
 
 .sidebar-native-menu { appearance: auto; color-scheme: dark; background: transparent; border: 0; border-radius: 8px; min-height: 32px; padding: 4px 6px; }

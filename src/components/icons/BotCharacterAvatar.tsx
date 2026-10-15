@@ -16,17 +16,14 @@ import {
   Code2,
   FileCode2,
   FolderGit2,
-  GitBranch,
-  Globe,
   Palette,
   ShieldCheck,
-  Terminal,
   Star,
 } from "lucide-react";
 import { avatarSource } from "../../lib/avatar";
 import type React from "react";
-import { useEffect, useId, useMemo, useState } from "react";
-import type { BotColor, BotShape, CliDriverKind } from "../../lib/types";
+import { useId, useMemo } from "react";
+import type { BotColor, BotShape, CliDriverKind, OpenString } from "../../lib/types";
 
 
 export const BOT_SHAPES: Array<{ id: BotShape; label: string }> = [
@@ -473,13 +470,13 @@ export interface BotCharacterAvatarProps {
   bot?: {
     name?: string;
     avatarImage?: string | null;
-    shape?: BotShape | string;
-    color?: BotColor | string;
+    shape?: OpenString<BotShape>;
+    color?: OpenString<BotColor>;
     isPrimary?: boolean;
     cliDriver?: CliDriverKind;
   };
-  shape?: BotShape | string;
-  color?: BotColor | string;
+  shape?: OpenString<BotShape>;
+  color?: OpenString<BotColor>;
   isPrimary?: boolean;
   cliDriver?: CliDriverKind;
   size?: number;
@@ -488,6 +485,15 @@ export interface BotCharacterAvatarProps {
   showCliBadge?: boolean;
   useHeroMascot?: boolean;
   className?: string;
+}
+
+const BLINK_CYCLE_MS = 6000;
+
+// A per-instance phase offset keeps avatars on screen from blinking in unison.
+function blinkDelayFor(seed: string): number {
+  let hash = 0;
+  for (let i = 0; i < seed.length; i += 1) hash = (hash * 31 + seed.charCodeAt(i)) | 0;
+  return Math.abs(hash) % BLINK_CYCLE_MS;
 }
 
 /**
@@ -518,19 +524,7 @@ export function BotCharacterAvatar({
     isPrimary && rawShape === "omni-prism" ? "blob" : rawShape;
   const color = propColor ?? bot?.color ?? "cyan";
 
-  const [isBlinking, setIsBlinking] = useState(false);
-
-  useEffect(() => {
-    let timer: ReturnType<typeof setTimeout>;
-    const scheduleBlink = () => {
-      timer = setTimeout(() => {
-        setIsBlinking(true);
-        timer = setTimeout(() => { setIsBlinking(false); scheduleBlink(); }, 145);
-      }, 2800 + Math.random() * 4200);
-    };
-    scheduleBlink();
-    return () => clearTimeout(timer);
-  }, []);
+  const blinkDelay = useMemo(() => blinkDelayFor(gradId), [gradId]);
 
   const palette = useMemo(
     () => BOT_COLORS.find((c) => c.id === color) ?? BOT_COLORS[0],
@@ -542,7 +536,7 @@ export function BotCharacterAvatar({
     [effectiveShape]
   );
 
-  const eyeHeight = isBlinking ? 6 : isStreaming ? 32 : 38;
+  const eyeHeight = isStreaming ? 32 : 38;
   const eyeY = CENTER - eyeHeight / 2 - 4;
   const eyeOffsetX = isStreaming ? 4 : 0;
 
@@ -570,10 +564,11 @@ export function BotCharacterAvatar({
         {/* Two Solid Dark Vertical Capsule Eyes */}
         <g
           style={{
-            transition: "transform 160ms ease, height 120ms ease",
+            transition: "transform 160ms ease",
             transform: `translate(${eyeOffsetX}px, 0px)`,
           }}
         >
+          <g className="bot-avatar-eyes" style={{ animationDelay: `-${blinkDelay}ms` }}>
           <rect
             x={CENTER - 35}
             y={eyeY}
@@ -590,6 +585,7 @@ export function BotCharacterAvatar({
             rx={9}
             fill="#09090B"
           />
+          </g>
         </g>
       </svg>}
 
@@ -632,7 +628,7 @@ export function CliProviderGlyph({
   size = 15,
   className = "",
 }: {
-  driver: CliDriverKind | string;
+  driver: OpenString<CliDriverKind>;
   size?: number;
   className?: string;
 }): React.ReactElement {
@@ -686,7 +682,7 @@ export function CliProviderGlyph({
 }
 
 export function CliBrandBadge({ driver, size = 42, rounded = "rounded-xl" }: {
-  driver: CliDriverKind | string;
+  driver: OpenString<CliDriverKind>;
   size?: number;
   rounded?: string;
 }): React.ReactElement {
