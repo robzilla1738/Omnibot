@@ -17,6 +17,7 @@ async function mockBackend(page: Page, state: OmniSnapshot, sendStatus = 200) {
   await page.route("**/api/**", async route => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/snapshot") return route.fulfill({ json: state });
+    if (path === "/api/preferences") { Object.assign(state.preferences, route.request().postDataJSON()); return route.fulfill({ json: state }); }
     if (path === "/api/rescan") return route.fulfill({ json: state });
     if (path === "/api/setup") {
       const input = route.request().postDataJSON();
@@ -115,7 +116,8 @@ test("new chats default to one bot and save its selected CLI model without runni
   await page.getByRole("combobox", { name: "Test Bot model", exact: true }).selectOption("fixture-small");
   await page.getByRole("button", { name: "Start chat", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "New chat", exact: true })).toHaveCount(0);
-  expect(state.bots[0].model).toBe("fixture-small");
+  expect(state.bots[0].model).toBeNull();
+  expect(created).toMatchObject({ modelOverrides: { "bot-a": "fixture-small" } });
   expect(created).toMatchObject({ participantBotIds: ["bot-a"], useWorktrees: false });
   expect(sends).toHaveLength(0);
 });
@@ -355,11 +357,14 @@ test("author hover reveals the provider logo and opens that bot's settings in pl
   state.chats[0].messages = [{ ...message("Reply from teammate"), authorBotId: "bot-b", authorName: "Teammate" }];
   await mockBackend(page, state);
   const author = page.getByRole("button", { name: "Open Teammate settings", exact: true });
-  const badge = page.locator(".provider-hover-badge");
+  const badge = page.locator("span.provider-hover-badge");
+  const usage = page.locator("div.provider-hover-badge");
   await page.mouse.move(0, 0);
   await expect(badge).toHaveCSS("opacity", "0");
+  await expect(usage).toHaveCSS("opacity", "0");
   await author.hover();
   await expect(badge).toHaveCSS("opacity", "1");
+  await expect(usage).toHaveCSS("opacity", "1");
   await expect(badge.locator("svg")).toHaveCount(1);
   await author.click();
   await expect(page.getByText("Teammate · Character & CLI", { exact: true })).toBeVisible();
@@ -627,7 +632,7 @@ test("Bots view opens a persistent bot conversation without taking over a one-of
   await expect(sidebar.getByRole("button", { name: "Open Helper", exact: true })).toHaveCount(0);
   await views.getByRole("button", { name: "Bots", exact: true }).click();
   await sidebar.getByRole("button", { name: "Open Helper", exact: true }).click();
-  expect(requests).toEqual([expect.objectContaining({ botHome: true, participantBotIds: ["helper"] })]);
+  await expect.poll(() => requests).toEqual([expect.objectContaining({ botHome: true, participantBotIds: ["helper"] })]);
   await expect(sidebar.getByRole("button", { name: "Open Helper", exact: true })).toHaveAttribute("aria-current", "page");
   await expect(page.getByText("Ask Helper for help with anything you’re working on.")).toBeVisible();
   await views.getByRole("button", { name: "Chats", exact: true }).click();
@@ -681,4 +686,250 @@ test("app updates explain availability in the browser without offering an unusab
   await expect(page.getByText("Update checks are available in the installed macOS app.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Check for updates", exact: true })).toBeDisabled();
   await expect(page.getByRole("checkbox", { name: "Automatically check for updates" })).toHaveCount(0);
+});
+
+test("failed chat creation keeps model choices local and preserves the draft", async ({ page }) => {
+  const state = snapshot(); state.bots[0].model = "original";
+  state.harnesses = [{ id: "custom", kind: "custom", name: "Fixture", binaryName: "fixture", installed: true, models: ["original", "chat-only"], description: "", installHint: "", authHint: "", supportsJsonStream: false, supportsSessionResume: false }];
+  await mockBackend(page, state);
+  let profileWrites = 0;
+  await page.route("**/api/bot/upsert", async route => { profileWrites++; await route.fulfill({ json: state }); });
+  await page.route("**/api/chat/create", route => route.fulfill({ status: 400, body: "Project folder unavailable" }));
+  await page.keyboard.press("Control+n");
+  await page.getByRole("combobox", { name: "Test Bot model", exact: true }).selectOption("chat-only");
+  await page.getByRole("button", { name: "Start chat", exact: true }).click();
+  await expect(page.getByText("Project folder unavailable", { exact: true })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Test Bot model", exact: true })).toHaveValue("chat-only");
+  expect(profileWrites).toBe(0); expect(state.bots[0].model).toBe("original");
+});
+
+test("archived bots can be restored without deleting their conversation", async ({ page }) => {
+  const state = snapshot();
+  state.bots.push({ ...state.bots[0], id: "helper", name: "Helper", slug: "helper", isPrimary: false });
+  state.chats.push({ ...state.chats[0], id: "helper-home", isPrimary: false, isBotHome: true, ownerBotId: "helper", workspacePath: null, participantBotIds: ["helper"], messages: [message("Keep this history")] });
+  await mockBackend(page, state);
+  await page.route("**/api/bot/delete", async route => { state.bots[1].archived = true; await route.fulfill({ json: state }); });
+  const library = page.getByRole("complementary", { name: "Sidebar" }).getByRole("button", { name: "Bot library", exact: true });
+  await library.click();
+  await page.getByRole("button", { name: "Archive Helper", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Restore Helper", exact: true })).toBeVisible();
+  expect(state.chats[1].messages[0].text).toBe("Keep this history");
+  await page.getByRole("button", { name: "Restore Helper", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Archive Helper", exact: true })).toBeVisible();
+  expect(state.bots[1].archived).toBe(false);
+});
+
+test("personal home with helpers reopens the same owner conversation", async ({ page }) => {
+  const state = snapshot();
+  state.bots.push({ ...state.bots[0], id: "helper", name: "Helper", isPrimary: false });
+  state.chats.push({ ...state.chats[0], id: "helper-home", title: "Helper", isPrimary: false, isBotHome: true, ownerBotId: "helper", isGroup: false, workspacePath: null, participantBotIds: ["helper", "bot-a"], messages: [message("Existing delegated conversation")] });
+  await mockBackend(page, state);
+  let creates = 0;
+  await page.route("**/api/chat/create", route => { creates++; return route.fulfill({ status: 500, body: "Must reuse existing home" }); });
+  const sidebar = page.getByRole("complementary", { name: "Sidebar" });
+  await sidebar.getByRole("group", { name: "Sidebar views" }).getByRole("button", { name: "Bots", exact: true }).click();
+  await sidebar.getByRole("button", { name: "Open Helper", exact: true }).click();
+  await expect(page.locator("p").filter({ hasText: /^Existing delegated conversation$/ })).toBeVisible(); expect(creates).toBe(0);
+});
+
+test("recipient preview hides the obvious bot and shows a different recipient", async ({ page }) => {
+  const state = snapshot();
+  state.chats[0].tasks = [{ id: "t", workflowId: "w", botId: "bot-a", instructions: "Review the change", mode: "sequential", status: "skipped", reason: "The previous sequential task failed." }];
+  await mockBackend(page, state);
+  await page.route("**/api/chat/preview", route => route.fulfill({ json: { botIds: ["bot-a"], parallel: false, prompt: "Review" } }));
+  await page.getByPlaceholder(/^Message /).fill("Review");
+  await expect(page.getByLabel("Recipient preview")).toHaveCount(0);
+  await page.route("**/api/chat/preview", route => route.fulfill({ json: { botIds: ["other-bot"], parallel: false, prompt: "Review" } }));
+  await page.getByPlaceholder(/^Message /).fill("Review with another bot");
+  await expect(page.getByLabel("Recipient preview")).toHaveText("To: other-bot");
+});
+
+test("long conversations render recent messages first and retain access to earlier history", async ({ page }) => {
+  const state = snapshot();
+  state.chats[0].messages = Array.from({ length: 500 }, (_, index) => ({ ...message(`History entry ${index + 1}`), id: `history-${index}` }));
+  await mockBackend(page, state);
+  await expect(page.locator("p").filter({ hasText: /^History entry 500$/ })).toBeVisible();
+  await expect(page.locator("p").filter({ hasText: /^History entry 1$/ })).toHaveCount(0);
+  await page.getByRole("button", { name: "Load earlier messages (300 remaining)", exact: true }).click();
+  await page.getByRole("button", { name: "Load earlier messages (100 remaining)", exact: true }).click();
+  await expect(page.locator("p").filter({ hasText: /^History entry 1$/ })).toHaveCount(1);
+  expect(state.chats[0].messages).toHaveLength(500);
+});
+
+test("terminal panel follows output, expands, searches, and hides without stopping the process", async ({ page }) => {
+  const state = snapshot(); state.bots[0].cliDriver = "codex";
+  await mockBackend(page, state);
+  let stopped = 0;
+  const terminal = { id: "run-1", chatId: "room", botId: "bot-a", botName: "Test Bot", mode: "output", status: "running", cwd: "/tmp/project", startedAtMs: 1, exitCode: null, error: null, resumed: false };
+  const bytes = Array.from(new TextEncoder().encode("Starting local tools\r\n\x1b[32mREADY: live process output\x1b[0m\r\n"));
+  await page.route("**/api/terminal/**", route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/list")) return route.fulfill({ json: [terminal] });
+    if (url.pathname.endsWith("/output")) { const offset = Number(url.searchParams.get("offset")); return route.fulfill({ json: { data: bytes.slice(offset), offset: bytes.length, truncated: false, status: "running" } }); }
+    if (url.pathname.endsWith("/stop")) { stopped++; return route.fulfill({ json: null }); }
+    return route.fulfill({ status: 400, body: "Unexpected terminal mutation" });
+  });
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  const panel = page.getByRole("complementary", { name: "Bot terminal", exact: true });
+  await expect(panel).toBeVisible();
+  await panel.getByRole("button", { name: "Run logs", exact: true }).click();
+  await expect(panel.getByRole("tab", { name: /Test Bot/ })).toBeVisible();
+  await expect(panel.locator(".xterm-accessibility-tree")).toContainText("READY: live process output");
+  await panel.getByRole("textbox", { name: "Search terminal output" }).fill("READY");
+  await page.screenshot({ path: "test-results/terminal-split.png" });
+  await panel.getByRole("button", { name: "Expand terminal", exact: true }).click();
+  await expect(panel).toHaveClass(/terminal-expanded/);
+  await page.screenshot({ path: "test-results/terminal-output.png" });
+  await panel.getByRole("button", { name: "Hide terminal" }).click();
+  await expect(panel).toBeHidden();
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await panel.getByRole("button", { name: "Run logs", exact: true }).click();
+  await expect(panel.locator(".xterm-accessibility-tree")).toContainText("READY: live process output");
+  expect(stopped).toBe(0);
+});
+
+test("terminal opens the interactive CLI by default, stops automation, and reuses the session after hiding", async ({ page }) => {
+  const state = snapshot(); state.bots[0].permissionMode = "auto"; state.activeWorkflowChatIds = ["room"];
+  await mockBackend(page, state);
+  const sessions: Record<string, unknown>[] = [];
+  const writes: number[] = [];
+  let stops = 0; let resizes = 0; let stoppedWorkflow = false;
+  await page.route("**/api/chat/stop", route => { stoppedWorkflow = true; state.activeWorkflowChatIds = []; return route.fulfill({ json: state }); });
+  await page.route("**/api/terminal/**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/list")) return route.fulfill({ json: sessions });
+    if (url.pathname.endsWith("/start")) {
+      expect(stoppedWorkflow).toBe(true);
+      const session = { id: "pty-1", chatId: "room", botId: "bot-a", botName: "Test Bot", mode: "interactive", status: "running", cwd: "/tmp/project", startedAtMs: 1, exitCode: null, error: null, resumed: false };
+      sessions.push(session); return route.fulfill({ json: session });
+    }
+    if (url.pathname.endsWith("/output")) { const bytes = Array.from(new TextEncoder().encode("Interactive fixture ready\r\n$ ")); return route.fulfill({ json: { data: bytes.slice(Number(url.searchParams.get("offset"))), offset: bytes.length, truncated: false, status: "running" } }); }
+    if (url.pathname.endsWith("/resize")) { resizes++; return route.fulfill({ json: null }); }
+    if (url.pathname.endsWith("/write")) { writes.push(...route.request().postDataJSON().data); return route.fulfill({ json: null }); }
+    if (url.pathname.endsWith("/stop")) { stops++; sessions[0].status = "stopped"; return route.fulfill({ json: null }); }
+    return route.fulfill({ status: 400, body: "Unexpected terminal request" });
+  });
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  const panel = page.getByRole("complementary", { name: "Bot terminal", exact: true });
+  await expect(panel.getByText("Automation paused for this chat")).toBeVisible();
+  await expect(panel.locator(".xterm-accessibility-tree")).toContainText("Interactive fixture ready");
+  await panel.locator(".xterm-helper-textarea").focus();
+  await page.keyboard.type("echo hello");
+  await page.keyboard.press("Enter");
+  await expect.poll(() => new TextDecoder().decode(new Uint8Array(writes))).toBe("echo hello\r");
+  await expect.poll(() => resizes).toBeGreaterThan(0);
+  await page.keyboard.press("Control+k");
+  await expect.poll(() => writes.at(-1)).toBe(11);
+  await page.keyboard.press("Meta+Backquote");
+  await expect(panel).toBeHidden();
+  expect(stops).toBe(0);
+  await page.keyboard.press("Meta+Backquote");
+  await expect(panel).toBeVisible();
+  await panel.getByRole("button", { name: "End control", exact: true }).click();
+  await expect.poll(() => stops).toBe(1);
+  await page.waitForTimeout(1000);
+  expect(sessions).toHaveLength(1);
+});
+
+test("unsupported terminal adapters explain live output without enabling takeover", async ({ page }) => {
+  const state = snapshot(); state.bots[0].cliDriver = "codex";
+  await mockBackend(page, state);
+  await page.route("**/api/terminal/list?**", route => route.fulfill({ json: [] }));
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await expect(page.getByText(/This bot’s output is available in Run logs/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open interactive CLI", exact: true })).toBeDisabled();
+});
+
+test("terminal startup errors stay visible without a retry loop", async ({ page }) => {
+  const state = snapshot(); state.bots[0].permissionMode = "auto";
+  await mockBackend(page, state);
+  let starts = 0;
+  await page.route("**/api/terminal/**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/list")) return route.fulfill({ json: [] });
+    if (path.endsWith("/start")) { starts++; return route.fulfill({ status: 400, body: "CLI command is unavailable" }); }
+    return route.fulfill({ status: 400, body: "Unexpected request" });
+  });
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("CLI command is unavailable");
+  await page.waitForTimeout(1600);
+  expect(starts).toBe(1);
+  await page.getByRole("button", { name: "Retry connection", exact: true }).click();
+  await expect.poll(() => starts).toBe(2);
+});
+
+
+test("saved team summary preference is applied after reloading the chat", async ({ page }) => {
+  const state = snapshot();
+  state.preferences.summarizeTeamResults = true;
+  const sends = await mockBackend(page, state);
+  await page.reload();
+  await expect(page.getByText("Ask the first speaker to summarize team results (one extra turn)")).toHaveCount(0);
+  await page.getByPlaceholder(/^Message /).fill("Review together");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect.poll(() => sends.length).toBe(1);
+  expect(sends[0]).toMatchObject({ summarize: true });
+});
+
+
+test("team summary and Cursor home trust settings are remembered and can be turned off", async ({ page }) => {
+  const state = snapshot();
+  await mockBackend(page, state);
+  const openSettings = async () => {
+    await page.getByRole("complementary", { name: "Sidebar" }).getByRole("button", { name: "Bot library", exact: true }).click();
+    await page.getByRole("button", { name: "Team Rules & Trust", exact: true }).click();
+  };
+  await openSettings();
+  for (const name of ["Summarize team results", "Trust bot homes in Cursor"]) {
+    const toggle = page.getByRole("switch", { name, exact: true });
+    await expect(toggle).toHaveAttribute("aria-checked", "false");
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-checked", "true");
+  }
+  await page.reload();
+  await openSettings();
+  for (const name of ["Summarize team results", "Trust bot homes in Cursor"]) {
+    const toggle = page.getByRole("switch", { name, exact: true });
+    await expect(toggle).toHaveAttribute("aria-checked", "true");
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-checked", "false");
+  }
+});
+
+
+test("repository reviews select a project and preserve the prompt before sending", async ({ page }) => {
+  const state = snapshot(); state.chats[0].workspacePath = null;
+  state.workspaces = [{ id: "project", name: "Website", path: "/tmp/website", description: "", instructions: "" }];
+  const sends = await mockBackend(page, state);
+  let created: Record<string, unknown> | undefined;
+  await page.route("**/api/chat/create", async route => {
+    created = route.request().postDataJSON();
+    const chat = { ...state.chats[0], id: "work", isPrimary: false, title: "Website work", workspacePath: created!.workspacePath, workspaceId: "project" };
+    state.chats.push(chat as typeof state.chats[0]);
+    await route.fulfill({ json: { chat, snapshot: state } });
+  });
+  const prompt = "Inspect recent commits and uncommitted diffs in the active workspace.";
+  await page.getByPlaceholder(/^Message /).fill(prompt);
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "New chat", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start chat", exact: true })).toBeDisabled();
+  expect(sends).toHaveLength(0);
+  await page.getByRole("combobox", { name: "Chat project", exact: true }).selectOption("/tmp/website");
+  await page.getByRole("button", { name: "Start chat", exact: true }).click();
+  await expect(page.getByPlaceholder(/^Message /)).toHaveValue(prompt);
+  expect(created).toMatchObject({ workspacePath: "/tmp/website", participantBotIds: ["bot-a"] });
+  expect(state.chats[0].workspacePath).toBeNull();
+  expect(sends).toHaveLength(0);
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect.poll(() => sends.length).toBe(1);
+  expect(sends[0]).toMatchObject({ chatId: "work", text: prompt });
+});
+
+test("general Git questions in personal space do not require a project", async ({ page }) => {
+  const state = snapshot(); state.chats[0].workspacePath = null;
+  const sends = await mockBackend(page, state);
+  await page.getByPlaceholder(/^Message /).fill("What does git status mean?");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect.poll(() => sends.length).toBe(1);
+  await expect(page.getByRole("dialog", { name: "New chat", exact: true })).toBeHidden();
 });

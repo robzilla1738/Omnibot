@@ -64,6 +64,7 @@ export type BotColor =
   | "black";
 
 export interface BotProfile {
+  archived?: boolean;
   id: string;
   name: string;
   slug: string;
@@ -128,7 +129,22 @@ export interface ChatMessage {
   createdAtMs: number;
 }
 
+export interface WorkflowTask {
+  id: string;
+  workflowId: string;
+  botId: string;
+  fromBotId?: string | null;
+  instructions: string;
+  mode: string;
+  status: string;
+  reason?: string | null;
+  workspacePath?: string | null;
+}
+
 export interface ChatThread {
+  ownerBotId?: string | null;
+  modelOverrides?: Record<string, string | null>;
+  tasks?: WorkflowTask[];
   isBotHome?: boolean;
   id: string;
   title: string;
@@ -160,6 +176,8 @@ export interface WorkspaceEntry {
 }
 
 export interface RoutineEntry {
+  workflowId?: string | null;
+  runStatus?: string | null;
   id: string;
   name: string;
   cron?: string;
@@ -175,6 +193,8 @@ export interface RoutineEntry {
 }
 
 export interface CliHarnessInfo {
+  supportsPlan?: boolean;
+  supportsEffort?: boolean;
   id: string;
   kind: CliDriverKind;
   name: string;
@@ -264,6 +284,9 @@ export interface ActiveBotRun {
 }
 
 export interface OmniPreferences {
+  summarizeTeamResults?: boolean;
+  trustCursorBotHomes?: boolean;
+  workflowBudgetUsd?: number;
   onboardingCompleted?: boolean;
   pinnedBotIds?: string[];
   workspaceRoot: string;
@@ -281,6 +304,9 @@ export interface OmniPreferences {
 }
 
 export interface OmniSnapshot {
+  instanceId?: string;
+  revision?: number;
+  storageError?: string | null;
   serverPort: number;
   serverBaseUrl: string;
   preferences: OmniPreferences;

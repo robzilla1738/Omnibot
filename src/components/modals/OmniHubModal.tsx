@@ -93,7 +93,7 @@ const HUB_SECTIONS: Array<{
   {
     id: "memories",
     label: "Memory",
-    subtitle: "Persistent facts injected across every Bot and Group chat",
+    subtitle: "Personal notes, project knowledge, and explicitly shared preferences",
   },
   {
     id: "skills",
@@ -152,11 +152,21 @@ export function OmniHubModal({
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [botSaveError, setBotSaveError] = useState("");
   const [botSaving, setBotSaving] = useState(false);
+  const [botActionPending, setBotActionPending] = useState(false);
+  const [botActionError, setBotActionError] = useState("");
+  const runBotAction = async (action: () => Promise<void>) => {
+    if (botActionPending) return;
+    setBotActionPending(true); setBotActionError("");
+    try { await action(); }
+    catch (error) { setBotActionError(error instanceof Error ? error.message : String(error)); }
+    finally { setBotActionPending(false); }
+  };
   const [botColor, setBotColor] = useState<BotColor>("orange");
   const [botDriver, setBotDriver] = useState<CliDriverKind>("claude");
   const [botModel, setBotModel] = useState<string>("");
   const [botEffort, setBotEffort] = useState<string>("high");
   const [botPermission, setBotPermission] = useState<string>("auto");
+  const [botCustomCommand, setBotCustomCommand] = useState("");
   const [botPrompt, setBotPrompt] = useState("");
 
   // Memories state
@@ -196,6 +206,7 @@ export function OmniHubModal({
     setBotAvatarImage(null);
     setBotSaveError("");
     setEditingBotId("");
+    setBotCustomCommand("");
     setBotName("");
     setBotRole("Specialized Coding Teammate");
     setBotDesc("");
@@ -223,20 +234,22 @@ export function OmniHubModal({
     setBotModel(b.model ?? "");
     setBotEffort(b.reasoningEffort || "high");
     setBotPermission(b.permissionMode || "auto");
+    setBotCustomCommand(b.customCommand ?? "");
     setBotPrompt(b.systemPrompt);
     setShowBotForm(true);
   };
 
   const handleDuplicateBot = async (b: BotProfile) => {
-    const sameProviderCount = bots.filter(
-      (x) => x.cliDriver === b.cliDriver
-    ).length;
+    let suffix = 2;
+    while (bots.some(bot => bot.name.toLowerCase() === `${b.name} ${suffix}`.toLowerCase())) suffix++;
     await onUpsertBot({
       ...b,
       id: "",
-      name: `${b.name} ${sameProviderCount + 1}`,
-      slug: `${b.slug}-${sameProviderCount + 1}`,
+      name: `${b.name} ${suffix}`,
+      slug: `${b.slug}-${suffix}`,
       isPrimary: false,
+      archived: false,
+      memories: [],
       autoCreatedForCli: false,
     });
   };
@@ -247,6 +260,7 @@ export function OmniHubModal({
     setBotSaving(true); setBotSaveError("");
     try { await onUpsertBot({
       id: editingBotId,
+      archived: existing?.archived ?? false,
       name: botName.trim(),
       slug:
         existing?.slug ||
@@ -268,7 +282,7 @@ export function OmniHubModal({
       systemPrompt: botPrompt.trim(),
       memories: existing?.memories ?? [],
       autoCreatedForCli: existing?.autoCreatedForCli ?? false,
-      customCommand: existing?.customCommand ?? null,
+      customCommand: botCustomCommand.trim() || null,
       maxTurnBudgetUsd: existing?.maxTurnBudgetUsd ?? null,
     });
     setShowBotForm(false);
@@ -548,6 +562,8 @@ export function OmniHubModal({
                             onClick={() => {
                               setBotDriver(h.kind);
                               setBotModel("");
+                              setBotPermission("auto");
+                              setBotCustomCommand("");
                             }}
                             className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-colors ${
                               botDriver === h.kind
@@ -561,6 +577,8 @@ export function OmniHubModal({
                       </div>
                     </div>
 
+                    <p className="text-xs text-zinc-500">{installedHarnesses.some(h => h.kind === botDriver) ? "CLI detected" : "CLI not detected"} · Authentication not verified{botDriver === "ollama" && !botModel ? " · Choose an installed model before running" : ""}</p>
+                    <details className="text-xs text-zinc-400"><summary className="cursor-pointer">Advanced command settings</summary><label className="block mt-2">Custom executable and arguments<input aria-label="Custom CLI command" value={botCustomCommand} onChange={e => setBotCustomCommand(e.target.value)} placeholder="Optional command override" className="block w-full mt-1 rounded bg-white/5 p-2" /></label><p className="mt-1">The selected adapter still controls command flags. Changing the adapter clears this override.</p></details>
                     {/* Model, Effort & Permission Row */}
                     <div className="grid grid-cols-3 gap-3">
                       <BotModelSelect label="Default model" value={botModel || null} harness={installedHarnesses.find(h => h.kind === botDriver)} onChange={model => setBotModel(model ?? "")} />
@@ -572,6 +590,8 @@ export function OmniHubModal({
                           {(["low", "medium", "high"] as const).map((lvl) => (
                             <button
                               key={lvl}
+                              disabled={!installedHarnesses.find(h => h.kind === botDriver)?.supportsEffort}
+                              title="Reasoning effort is available only for adapters that support it"
                               type="button"
                               onClick={() => setBotEffort(lvl)}
                               className={`py-1.5 rounded-lg text-[11px] capitalize ${
@@ -592,12 +612,14 @@ export function OmniHubModal({
                         <div className="grid grid-cols-2 gap-1">
                           {(
                             [
-                              { id: "auto", label: "Auto Edit" },
+                              { id: "auto", label: "CLI permissions" },
                               { id: "plan", label: "Plan Only" },
                             ] as const
                           ).map((pm) => (
                             <button
                               key={pm.id}
+                              disabled={pm.id === "plan" && !installedHarnesses.find(h => h.kind === botDriver)?.supportsPlan}
+                              title={pm.id === "plan" ? "Available only when this adapter supports plan mode" : "Use this CLI's configured permissions"}
                               type="button"
                               onClick={() => setBotPermission(pm.id)}
                               className={`py-1.5 rounded-lg text-[11px] ${
@@ -638,6 +660,8 @@ export function OmniHubModal({
                     </div>
                   </div></Collapse>
 
+                {botActionError && <p role="alert" className="text-sm text-red-300">{botActionError}</p>}
+                <p className="text-xs text-zinc-500 mb-3">Archiving preserves conversations and memory. Duplicating copies settings with fresh memory. Tool detection does not verify authentication.</p>
                 <div className="grid grid-cols-2 gap-3.5">
                   {bots.map((b) => (
                     <div
@@ -670,15 +694,17 @@ export function OmniHubModal({
                         {!b.isPrimary && (
                           <button
                             type="button"
-                            onClick={() => onDeleteBot(b.id)}
+                            aria-label={b.archived ? `Restore ${b.name}` : `Archive ${b.name}`}
+                            disabled={botActionPending}
+                            onClick={() => void runBotAction(() => b.archived ? onUpsertBot({ ...b, archived: false }) : onDeleteBot(b.id))}
                             className="text-zinc-500 hover:text-red-400 p-1"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            {b.archived ? <span className="text-xs">Restore</span> : <Trash2 className="w-3.5 h-3.5" />}
                           </button>
                         )}
                       </div>
 
-                      {!b.isPrimary && <button
+                      {!b.isPrimary && !b.archived && <button
                         type="button"
                         aria-label={`${preferences.pinnedBotIds?.includes(b.id) ? "Unpin" : "Pin"} ${b.name} ${preferences.pinnedBotIds?.includes(b.id) ? "from" : "to"} sidebar`}
                         aria-pressed={preferences.pinnedBotIds?.includes(b.id) ?? false}
@@ -694,11 +720,12 @@ export function OmniHubModal({
                           }}
                           className="flex-1 py-1.5 rounded-xl bg-white text-black text-xs font-semibold hover:bg-zinc-200"
                         >
-                          Message @{b.name}
+                          {b.archived ? "View preserved conversation" : `Message @${b.name}`}
                         </button>
                         <button
                           type="button"
-                          onClick={() => handleDuplicateBot(b)}
+                          disabled={botActionPending}
+                          onClick={() => void runBotAction(() => handleDuplicateBot(b))}
                           title={`Clone @${b.name} into another Bot running on ${b.cliDriver}`}
                           className="px-2.5 py-1.5 rounded-xl liquid-glass-chip text-xs text-zinc-200 hover:text-white inline-flex items-center gap-1"
                         >
@@ -896,6 +923,8 @@ export function OmniHubModal({
                     </div>
                   </div></Collapse>
 
+                {botActionError && <p role="alert" className="text-sm text-red-300">{botActionError}</p>}
+                <p className="text-xs text-zinc-500 mb-3">Archiving preserves conversations and memory. Duplicating copies settings with fresh memory. Tool detection does not verify authentication.</p>
                 <div className="grid grid-cols-2 gap-3.5">
                   {projects.map((proj) => {
                     const isActive = preferences.workspaceRoot === proj.path;
@@ -994,6 +1023,8 @@ export function OmniHubModal({
                   />
                 </div>
 
+                {botActionError && <p role="alert" className="text-sm text-red-300">{botActionError}</p>}
+                <p className="text-xs text-zinc-500 mb-3">Archiving preserves conversations and memory. Duplicating copies settings with fresh memory. Tool detection does not verify authentication.</p>
                 <div className="grid grid-cols-2 gap-3.5">
                   {skills
                     .filter(
@@ -1048,7 +1079,7 @@ export function OmniHubModal({
                   >
                     <div className="min-w-0 flex-1">
                       <div className="text-[14px] font-semibold text-zinc-100 truncate">
-                        {r.name}
+                        {r.name} {r.runStatus && <span className="text-xs text-zinc-400">· {r.runStatus}</span>}
                       </div>
                       <div className="text-xs text-zinc-400 truncate mt-0.5">
                         {r.prompt}
@@ -1144,6 +1175,21 @@ export function OmniHubModal({
                       }`}
                     />
                   </button>
+                </div>
+
+                <div className="rounded-2xl liquid-glass-card overflow-hidden">
+                  {([
+                    ["summarizeTeamResults", "Summarize team results", "Have the first bot combine the team’s results into one final response. Adds one bot turn."],
+                    ["trustCursorBotHomes", "Trust bot homes in Cursor", "Let Cursor work in bot home folders created by Omnibot. Project folders still require their own trust approval. Tool permissions remain unchanged."],
+                  ] as const).map(([key, label, description]) => <div key={key} className="px-4 py-3 flex items-center justify-between gap-4">
+                    <div><div className="text-[13.5px] font-semibold text-white">{label}</div><p className="text-xs text-zinc-400">{description}</p></div>
+                    <button type="button" role="switch" aria-label={label} aria-checked={preferences[key] ?? false} disabled={botActionPending}
+                      onClick={() => void runBotAction(() => onUpdatePreferences({ ...preferences, [key]: !preferences[key] }))}
+                      className={`relative inline-flex h-6 w-10 shrink-0 rounded-full border-2 border-transparent transition-colors ${preferences[key] ? "bg-zinc-200" : "bg-white/[0.14]"}`}>
+                      <span className={`inline-block h-5 w-5 rounded-full shadow transition ${preferences[key] ? "translate-x-4 bg-zinc-800" : "translate-x-0 bg-white"}`} />
+                    </button>
+                  </div>)}
+                  {botActionError && <p role="alert" className="px-4 pb-3 text-xs text-red-300">{botActionError}</p>}
                 </div>
 
                 {/* Token & Swarm Loop Guardrails */}
@@ -1257,7 +1303,7 @@ export function OmniHubModal({
                   <div className="px-4 py-3 flex items-center justify-between gap-4">
                     <div>
                       <div className="text-[13.5px] font-semibold text-white">
-                        Max Turn Budget Cap (USD)
+                        Reported cost limit per turn (USD)
                       </div>
                       <p className="text-xs text-zinc-400">
                         Automatically stops a CLI turn if reported cost exceeds this threshold
@@ -1286,17 +1332,21 @@ export function OmniHubModal({
                     </div>
                   </div>
 
+                  <label className="px-4 py-3 flex items-center justify-between gap-4 text-sm">
+                    <span>Workflow reported-cost limit (USD)<span className="block text-xs text-zinc-400">Stops queued work after reported costs reach this amount; not a provider spending cap.</span></span>
+                    <input aria-label="Workflow cost limit" type="number" min="0.01" step="0.25" className="w-24 rounded bg-white/10 p-2" value={preferences.workflowBudgetUsd ?? 3.75} onChange={e => { const value = Number(e.target.value); if (value > 0) void onUpdatePreferences({ ...preferences, workflowBudgetUsd: value }); }} />
+                  </label>
                   <div className="px-4 py-3 flex items-center justify-between gap-4">
                     <div>
                       <div className="text-[13.5px] font-semibold text-white">
-                        Max Concurrent Parallel Bots (@all)
+                        Max concurrent bots across all chats
                       </div>
                       <p className="text-xs text-zinc-400">
-                        Limits simultaneous CLI subprocesses in parallel group turns
+                        Tasks sharing a working folder queue automatically to avoid conflicting edits.
                       </p>
                     </div>
                     <div className="flex items-center gap-1">
-                      {[2, 3, 4, 6].map((cnt) => (
+                      {[1, 2, 3, 4, 6].map((cnt) => (
                         <button
                           key={cnt}
                           type="button"

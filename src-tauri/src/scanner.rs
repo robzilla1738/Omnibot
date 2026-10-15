@@ -135,6 +135,10 @@ impl CliDriverKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CliHarnessInfo {
+    #[serde(default)]
+    pub supports_plan: bool,
+    #[serde(default)]
+    pub supports_effort: bool,
     pub id: String,
     pub kind: CliDriverKind,
     pub name: String,
@@ -484,6 +488,8 @@ pub fn scan_local_cli_harnesses() -> Vec<CliHarnessInfo> {
                 let binary_path = find_binary(bin_candidates);
                 let installed = binary_path.is_some();
                 CliHarnessInfo {
+                    supports_plan: crate::execution::supports_plan(kind),
+                    supports_effort: matches!(kind, CliDriverKind::Claude | CliDriverKind::Codex),
                     id: kind.as_str().to_string(),
                     kind,
                     name: kind.display_name().to_string(),

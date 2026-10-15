@@ -3,9 +3,11 @@ import { isTauriRuntime } from "../../lib/omni-bridge";
 import { getChatGitStatus } from "../../lib/omni-bridge";
 import { runOmniRoutine } from "../../lib/omni-bridge";
 import type React from "react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import {
   clearOmniChat,
+  retryOmniStorage,
+  resetOmniSessions,
   completeOmniSetup,
   pinOmniBot,
   commitGitChanges,
@@ -47,12 +49,18 @@ import { SearchAndNewChatModal } from "../modals/SearchAndNewChatModal";
 import { SetupWorkspace } from "../setup/SetupWorkspace";
 import { AppSidebar } from "../sidebar/AppSidebar";
 
+const TerminalPanel = lazy(() => import("../terminal/TerminalPanel").then(module => ({ default: module.TerminalPanel })));
+
 export function DesktopShell({
   initialSnapshot,
 }: {
   initialSnapshot: OmniSnapshot;
 }) {
-  const [snapshot, setSnapshot] = useState<OmniSnapshot>(initialSnapshot);
+  const [snapshot, replaceSnapshot] = useState<OmniSnapshot>(initialSnapshot);
+  const setSnapshot = useCallback((next: OmniSnapshot) => {
+    replaceSnapshot(current => next.instanceId === current.instanceId && (next.revision ?? 0) < (current.revision ?? 0) ? current : next);
+  }, []);
+  const availableBots = useMemo(() => snapshot.bots.filter(bot => !bot.archived), [snapshot.bots]);
   const [activeChatId, setActiveChatId] = useState<string>(() => {
     const primary = initialSnapshot.chats.find((c) => c.isPrimary);
     return primary?.id ?? initialSnapshot.chats[0]?.id ?? "chat-omni-primary";
@@ -70,6 +78,9 @@ export function DesktopShell({
 
 
   // Panels & Modals
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [terminalMounted, setTerminalMounted] = useState(false);
+  const toggleTerminal = useCallback(() => { setTerminalMounted(true); setTerminalOpen(value => !value); setInspectorOpen(false); }, []);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectedBotId, setInspectedBotId] = useState<string | null>(null);
@@ -85,7 +96,11 @@ export function DesktopShell({
     open: boolean;
     mode: "search" | "new-chat" | "new-group";
     projectRequired?: boolean;
+    prompt?: string;
+    participantBotIds?: string[];
   }>({ open: false, mode: "search" });
+
+  const [projectDraft, setProjectDraft] = useState<{ chatId: string; text: string } | null>(null);
 
   // Reconcile authoritative snapshots in one queue. Mixing snapshots with deltas
   // duplicates or loses text when an HTTP response races a streaming event.
@@ -127,7 +142,9 @@ export function DesktopShell({
   useLayoutEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (setupActive) return;
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      if ((e.metaKey || e.ctrlKey) && e.key === "`") {
+        e.preventDefault(); toggleTerminal();
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setCommandModal({ open: true, mode: "search" });
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
@@ -147,7 +164,7 @@ export function DesktopShell({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [setupActive]);
+  }, [setupActive, toggleTerminal]);
 
   const primaryBot = useMemo(
     () =>
@@ -180,20 +197,22 @@ export function DesktopShell({
     [snapshot.chats, activeChatId]
   );
 
-  const [scopedGit, setScopedGit] = useState<{ chatId: string; path: string; status: OmniSnapshot["gitStatus"] } | null>(null);
+  const [scopedGit, setScopedGit] = useState<{ chatId: string; path: string; taskId?: string; status: OmniSnapshot["gitStatus"] } | null>(null);
+  const [gitTaskId, setGitTaskId] = useState<string | undefined>();
+  useEffect(() => { setGitTaskId(undefined); }, [activeChatId]);
   const [gitRevision, setGitRevision] = useState(0);
   useEffect(() => {
     if (!inspectorOpen || !activeChat?.workspacePath) return;
     let disposed = false;
-    const refresh = async () => { try { const status = await getChatGitStatus(activeChat.id); if (!disposed) setScopedGit({ chatId: activeChat.id, path: activeChat.workspacePath!, status }); } catch { /* Keep the last status until the next refresh. */ } };
+    const refresh = async () => { try { const status = await getChatGitStatus(activeChat.id, gitTaskId); if (!disposed) setScopedGit({ chatId: activeChat.id, path: activeChat.workspacePath!, taskId: gitTaskId, status }); } catch { /* Keep the last status until the next refresh. */ } };
     void refresh(); const timer = setInterval(refresh, 3000);
     return () => { disposed = true; clearInterval(timer); };
-  }, [activeChat?.id, activeChat?.workspacePath, inspectorOpen, gitRevision]);
-  const chatGit = scopedGit?.chatId === activeChat?.id && scopedGit?.path === activeChat?.workspacePath ? scopedGit.status : { isRepo: false, rootPath: activeChat?.workspacePath ?? "", branch: "", headShort: "", ahead: 0, behind: 0, changedFiles: [], diffStat: "", diffPreview: "", worktrees: [] };
+  }, [activeChat?.id, activeChat?.workspacePath, inspectorOpen, gitRevision, gitTaskId]);
+  const chatGit = scopedGit?.chatId === activeChat?.id && scopedGit?.path === activeChat?.workspacePath && scopedGit?.taskId === gitTaskId ? scopedGit.status : { isRepo: false, rootPath: activeChat?.workspacePath ?? "", branch: "", headShort: "", ahead: 0, behind: 0, changedFiles: [], diffStat: "", diffPreview: "", worktrees: [] };
 
   const activeBot = useMemo(() => {
     const project = snapshot.workspaces.find((p) => p.path === activeChat?.workspacePath);
-    const firstId = (activeChat?.isPrimary ? project?.leadBotId : undefined) ?? activeChat?.participantBotIds[0];
+    const firstId = activeChat?.ownerBotId ?? (activeChat?.isPrimary ? project?.leadBotId : undefined) ?? activeChat?.participantBotIds[0];
     return snapshot.bots.find((b) => b.id === firstId) ?? primaryBot;
   }, [activeChat, snapshot.bots, snapshot.workspaces, primaryBot]);
 
@@ -206,6 +225,7 @@ export function DesktopShell({
 
   const handleSelectBotDirectChat = useCallback(
     async (bot: BotProfile) => {
+      try {
       if (bot.isPrimary) {
         handleSelectPrimary();
         return;
@@ -213,10 +233,8 @@ export function DesktopShell({
       const existing = snapshot.chats.find(
         (c) =>
           c.isBotHome &&
-          !c.isGroup &&
           !c.isPrimary &&
-          c.participantBotIds.length === 1 &&
-          c.participantBotIds[0] === bot.id
+          (c.ownerBotId ?? c.participantBotIds[0]) === bot.id
       );
       if (existing) {
         setActiveChatId(existing.id);
@@ -230,6 +248,8 @@ export function DesktopShell({
       });
       setSnapshot(nextSnap);
       setActiveChatId(chat.id);
+
+      } catch (error) { setActionError(error instanceof Error ? error.message : String(error)); }
     },
     [snapshot.chats, handleSelectPrimary]
   );
@@ -238,19 +258,23 @@ export function DesktopShell({
     async (params: {
       title?: string;
       participantBotIds: string[];
+      modelOverrides?: Record<string, string | null>;
       useWorktrees?: boolean;
       workspacePath?: string;
       initialPrompt?: string;
+      draftPrompt?: string;
       skillSlug?: string;
     }) => {
       const { chat, snapshot: nextSnap } = await createOmniChat({
         title: params.title,
         participantBotIds: params.participantBotIds,
+        modelOverrides: params.modelOverrides,
         useWorktrees: params.useWorktrees,
         workspacePath: params.workspacePath,
       });
       setSnapshot(nextSnap);
       setActiveChatId(chat.id);
+      if (params.draftPrompt) setProjectDraft({ chatId: chat.id, text: params.draftPrompt });
 
       if (params.initialPrompt) {
         await sendOmniMessage({
@@ -335,9 +359,11 @@ export function DesktopShell({
         onNewProject={() => setOmniHubState({ open: true, section: "projects" })}
         collapsed={sidebarCollapsed}
         setupMode={setupActive}
+        terminalOpen={terminalOpen}
+        onToggleTerminal={toggleTerminal}
         onCollapsedChange={setSidebarCollapsed}
         primaryBot={setupActive ? setupPreview ?? primaryBot : primaryBot}
-        bots={snapshot.bots}
+        bots={availableBots}
         harnesses={snapshot.harnesses}
         chats={setupActive ? snapshot.chats.filter(c => c.isPrimary) : snapshot.chats}
         pinnedBotIds={setupActive ? [] : snapshot.preferences.pinnedBotIds ?? []}
@@ -379,7 +405,9 @@ export function DesktopShell({
         }}
       />
 
+      {snapshot.storageError && <div role="alert" className="fixed top-3 left-1/2 -translate-x-1/2 z-[100] rounded-xl bg-red-950 p-3 text-sm text-red-200">Changes are not saved: {snapshot.storageError}. Keep the app open. <button className="underline" onClick={() => void retryOmniStorage().then(setSnapshot).catch(error => setActionError(String(error)))}>Retry save</button></div>}
       {actionError && <div role="alert" className="fixed bottom-5 left-1/2 -translate-x-1/2 z-[100] rounded-xl bg-red-950 border border-red-400/30 px-4 py-3 text-sm text-red-200">{actionError}<button className="ml-4 underline" onClick={() => setActionError("")}>Dismiss</button></div>}
+      <div className="relative flex flex-1 min-w-0 h-full">
       {setupActive ? <SetupWorkspace
         snapshot={snapshot}
         primaryBot={primaryBot}
@@ -396,11 +424,15 @@ export function DesktopShell({
       /> : <ChatWorkspace
         key={activeChat.id}
         chat={activeChat}
-        onChooseProject={() => setCommandModal({ open: true, mode: "new-chat", projectRequired: true })}
+        initialDraft={projectDraft?.chatId === activeChat.id ? projectDraft.text : undefined}
+        summarizeTeamResults={snapshot.preferences.summarizeTeamResults ?? false}
+        onChooseProject={(prompt) => setCommandModal({ open: true, mode: activeChat.isGroup ? "new-group" : "new-chat", projectRequired: true, prompt, participantBotIds: activeChat.participantBotIds })}
         onManageTeam={openLibrary}
         onOpenMemory={() => setOmniHubState({ open: true, section: "memories" })}
         defaultSpeakerId={activeBot.id}
         workflowActive={snapshot.activeWorkflowChatIds.includes(activeChat.id)}
+        terminalControlActive={activeChat.tasks?.some(task => task.mode === "interactive" && ["queued", "running"].includes(task.status))}
+        onOpenTerminal={() => { setTerminalMounted(true); setTerminalOpen(true); setInspectorOpen(false); }}
         bots={snapshot.bots}
         harnesses={snapshot.harnesses}
         skills={snapshot.skills}
@@ -414,6 +446,7 @@ export function DesktopShell({
         }}
         onToggleInspector={() => {
           setInspectedBotId(null);
+          setTerminalOpen(false);
           setInspectorOpen((v) => {
             const next = !v;
             setSidebarCollapsed(next);
@@ -425,6 +458,7 @@ export function DesktopShell({
             chatId: activeChat.id,
             ...params,
           });
+          setProjectDraft(null);
           const next = await getOmniSnapshot();
           setSnapshot(next);
         }}
@@ -433,6 +467,9 @@ export function DesktopShell({
           setSnapshot(next);
         }}
       />}
+
+      {terminalMounted && !setupActive && <Suspense fallback={null}><TerminalPanel open={terminalOpen} chat={activeChat} bots={snapshot.bots} workflowActive={snapshot.activeWorkflowChatIds.includes(activeChat.id)} onClose={() => setTerminalOpen(false)} /></Suspense>}
+      </div>
 
       {/* Right-Hand Inspector Drawer (Opened by Clicking Bot Name Pill or Cmd+I) */}
       <InspectorDrawer
@@ -446,10 +483,13 @@ export function DesktopShell({
         chat={activeChat}
         onChooseProject={() => setCommandModal({ open: true, mode: "new-chat", projectRequired: true })}
         activeBot={snapshot.bots.find(bot => bot.id === inspectedBotId) ?? activeBot}
-        bots={snapshot.bots}
+        bots={availableBots}
         harnesses={snapshot.harnesses}
         projects={snapshot.workspaces}
         routines={snapshot.routines}
+        onResetSessions={async () => { try { setSnapshot(await resetOmniSessions(activeChat.id)); } catch (error) { setActionError(String(error)); } }}
+        gitTaskId={gitTaskId}
+        onSelectGitTask={setGitTaskId}
         gitStatus={chatGit}
         preferences={snapshot.preferences}
         computerActivity={snapshot.computerActivity}
@@ -488,12 +528,12 @@ export function DesktopShell({
         onRunRoutineNow={handleRunRoutine}
 
         onCommitGit={async (message: string) => {
-          const next = await commitGitChanges(message, activeChat.id);
+          const next = await commitGitChanges(message, activeChat.id, gitTaskId);
           setGitRevision(n => n + 1);
           setSnapshot(next);
         }}
         onDiscardGitFile={async (filePath: string) => {
-          const next = await discardGitFile(filePath, activeChat.id);
+          const next = await discardGitFile(filePath, activeChat.id, gitTaskId);
           setGitRevision(n => n + 1);
           setSnapshot(next);
         }}
@@ -511,7 +551,7 @@ export function DesktopShell({
         open={cliHarnessesOpen}
         onClose={() => setCliHarnessesOpen(false)}
         harnesses={snapshot.harnesses}
-        bots={snapshot.bots}
+        bots={availableBots}
         skills={snapshot.skills}
         mcpServers={snapshot.mcpServers}
         onRescan={async () => {
@@ -522,8 +562,8 @@ export function DesktopShell({
         onCreateBotFromTemplate={async (tpl) => {
           const next = await upsertOmniBot({
             id: "",
-            name: tpl.name,
-            slug: tpl.name.toLowerCase(),
+            name: (() => { let name = tpl.name; let suffix = 2; while (snapshot.bots.some(bot => bot.name.toLowerCase() === name.toLowerCase() || bot.slug.toLowerCase() === name.toLowerCase())) name = `${tpl.name} ${suffix++}`; return name; })(),
+            slug: "",
             roleTitle: tpl.roleTitle,
             description: tpl.description,
             shape: tpl.shape as BotShape,
@@ -607,10 +647,10 @@ export function DesktopShell({
       <SearchAndNewChatModal
         open={commandModal.open}
         projectRequired={commandModal.projectRequired}
+        initialParticipantBotIds={commandModal.participantBotIds}
         mode={commandModal.mode}
         harnesses={snapshot.harnesses}
-        onUpsertBot={async bot => { setSnapshot(await upsertOmniBot(bot)); }}
-        bots={snapshot.bots}
+        bots={availableBots}
         chats={snapshot.chats}
         skills={snapshot.skills}
         projects={snapshot.workspaces}
@@ -619,7 +659,7 @@ export function DesktopShell({
         onSelectBotDirectChat={handleSelectBotDirectChat}
         onSelectChat={setActiveChatId}
         onSelectProject={handleSelectProject}
-        onCreateSwarmOrChat={handleCreateSwarmOrChat}
+        onCreateSwarmOrChat={params => handleCreateSwarmOrChat({ ...params, draftPrompt: commandModal.prompt })}
       />
     </div>
   );

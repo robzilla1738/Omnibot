@@ -19,3 +19,7 @@ The interface uses system fonts, including SF Pro on macOS. No Apple font files 
 ## Sparkle
 
 macOS updates use [Sparkle](https://sparkle-project.org/), distributed under its BSD-style license and included third-party notices. The full distribution notice is in [licenses/Sparkle.txt](licenses/Sparkle.txt) and bundled with the app. The Rust integration uses the MIT-licensed [tauri-plugin-sparkle-updater](https://github.com/ahonn/tauri-plugin-sparkle-updater) and `sparkle-updater` crates.
+
+## Embedded terminal
+
+The terminal uses [xterm.js](https://github.com/xtermjs/xterm.js) and its Fit, Search, and Serialize addons under the MIT license. The notice is included in [licenses/xterm-MIT.txt](licenses/xterm-MIT.txt). PTY processes use [portable-pty](https://github.com/wezterm/wezterm/tree/main/pty), copyright Wez Furlong, under the MIT license; see [licenses/portable-pty-MIT.txt](licenses/portable-pty-MIT.txt). Both notices are bundled with the app.

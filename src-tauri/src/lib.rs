@@ -1,21 +1,26 @@
 pub mod computer;
 pub mod drivers;
+pub mod execution;
 pub mod git_ops;
 pub mod homes;
+pub mod lifecycle;
 pub mod models;
 pub mod orchestrator;
 pub mod routines;
+pub mod routing;
 pub mod scanner;
 pub mod server;
 pub mod setup;
 pub mod state;
+pub mod terminal;
 pub mod updates;
+mod workflow;
 
 use computer::{
     get_system_overview, list_workspace_directory, open_on_desktop, read_workspace_file,
     search_workspace_files, write_clipboard_text, LocalFileEntry, SystemOverview,
 };
-use git_ops::{git_discard_file, git_stage_and_commit, read_file_diff};
+use git_ops::read_file_diff;
 use orchestrator::{dispatch_chat_turn, SendMessageInput};
 use scanner::{test_cli_harness, CliDriverKind, CliHarnessTestResult};
 use server::{
@@ -239,55 +244,36 @@ fn omni_open_local_item(
 }
 
 #[tauri::command]
-fn omni_git_diff(state: State<'_, ManagedOmniState>, file_path: String) -> Result<String, String> {
-    let root = {
-        let guard = state
-            .0
-            .read()
-            .map_err(|_| "State lock poisoned".to_string())?;
-        guard.store.preferences.workspace_root.clone()
-    };
-    read_file_diff(&root, &file_path)
-}
-
-#[tauri::command]
-fn omni_git_commit(
-    state: State<'_, ManagedOmniState>,
-    message: String,
-) -> Result<OmniSnapshot, String> {
-    let root = {
-        let guard = state
-            .0
-            .read()
-            .map_err(|_| "State lock poisoned".to_string())?;
-        guard.store.preferences.workspace_root.clone()
-    };
-    git_stage_and_commit(&root, &message)?;
-    let guard = state
-        .0
-        .read()
-        .map_err(|_| "State lock poisoned".to_string())?;
-    Ok(guard.snapshot())
-}
-
-#[tauri::command]
-fn omni_git_discard(
+async fn omni_git_diff(
     state: State<'_, ManagedOmniState>,
     file_path: String,
+    chat_id: String,
+    task_id: Option<String>,
+) -> Result<String, String> {
+    let root = server::git_root(&state.0, Some(&chat_id), task_id.as_deref())?;
+    tokio::task::spawn_blocking(move || read_file_diff(&root, &file_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn omni_git_commit(
+    state: State<'_, ManagedOmniState>,
+    message: String,
+    chat_id: String,
+    task_id: Option<String>,
 ) -> Result<OmniSnapshot, String> {
-    let root = {
-        let guard = state
-            .0
-            .read()
-            .map_err(|_| "State lock poisoned".to_string())?;
-        guard.store.preferences.workspace_root.clone()
-    };
-    git_discard_file(&root, &file_path)?;
-    let guard = state
-        .0
-        .read()
-        .map_err(|_| "State lock poisoned".to_string())?;
-    Ok(guard.snapshot())
+    server::git_commit(state.0.clone(), chat_id, task_id, message).await
+}
+
+#[tauri::command]
+async fn omni_git_discard(
+    state: State<'_, ManagedOmniState>,
+    file_path: String,
+    chat_id: String,
+    task_id: Option<String>,
+) -> Result<OmniSnapshot, String> {
+    server::git_discard(state.0.clone(), chat_id, task_id, file_path).await
 }
 
 #[tauri::command]
@@ -314,6 +300,7 @@ pub fn run() {
         runtime.block_on(async {
             let _ = tokio::signal::ctrl_c().await;
         });
+        terminal::shutdown(&shared_state);
         return;
     }
 
@@ -322,6 +309,7 @@ pub fn run() {
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_plugin_sparkle_updater::init());
+    let shutdown_state = shared_state.clone();
     builder
         .setup(move |app| {
             let _icon_bytes = include_bytes!("../icons/icon.icns");
@@ -381,8 +369,13 @@ pub fn run() {
             omni_test_harness,
             omni_write_clipboard,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Omnibot");
+        .build(tauri::generate_context!())
+        .expect("error while building Omnibot")
+        .run(move |_, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                terminal::shutdown(&shutdown_state);
+            }
+        });
 }
 
 #[cfg(test)]

@@ -1,15 +1,17 @@
 use crate::drivers::{execute_bot_turn, DriverTurnRequest};
-use crate::git_ops::ensure_bot_worktree;
 use crate::state::{
-    now_ms, BotProfile, ChatMessage, HandoffEvent, OmniStreamEvent, SharedOmniState,
+    now_ms, BotProfile, ChatMessage, HandoffEvent, OmniStreamEvent, SharedOmniState, WorkflowTask,
 };
+use crate::workflow::{enqueue_task, run_swarm_workflow, task_status, workflow_notice};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendMessageInput {
+    #[serde(default)]
+    pub summarize: bool,
     pub chat_id: String,
     pub text: String,
     pub skill_slug: Option<String>,
@@ -23,23 +25,25 @@ pub async fn dispatch_chat_turn(
     state: SharedOmniState,
     input: SendMessageInput,
 ) -> Result<String, String> {
-    dispatch_turn(state, input, false).await
+    dispatch_turn(state, input, None).await
 }
 
 /// Saved routines keep their selected first speaker even when instructions mention teammates.
 pub async fn dispatch_routine_turn(
     state: SharedOmniState,
     input: SendMessageInput,
+    routine_id: String,
 ) -> Result<String, String> {
-    dispatch_turn(state, input, true).await
+    dispatch_turn(state, input, Some(routine_id)).await
 }
 
 async fn dispatch_turn(
     state: SharedOmniState,
     input: SendMessageInput,
-    fixed_target: bool,
+    routine_id: Option<String>,
 ) -> Result<String, String> {
-    let trimmed_text = input.text.trim().to_string();
+    let fixed_target = routine_id.is_some();
+    let mut trimmed_text = input.text.trim().to_string();
     if trimmed_text.is_empty() {
         return Err("Message text cannot be empty.".to_string());
     }
@@ -54,39 +58,23 @@ async fn dispatch_turn(
         if guard.active_workflows.contains(&input.chat_id) {
             return Err("This chat is still running. Stop it and wait for it to finish before sending again.".into());
         }
-        if let Some(id) = &input.override_bot_id {
-            if !guard.store.bots.iter().any(|b| &b.id == id) {
-                return Err("Selected bot no longer exists.".into());
-            }
+        let route = crate::routing::resolve(&guard.store, &input, fixed_target)?;
+        let target_bot_ids = route.bot_ids;
+        trimmed_text = route.prompt;
+        if routine_id
+            .as_ref()
+            .is_some_and(|id| !guard.store.routines.iter().any(|r| &r.id == id))
+        {
+            return Err("Routine no longer exists".into());
         }
         let previous_store = guard.store.clone();
         guard.cancelled_chats.remove(&input.chat_id);
 
         let all_bots = guard.store.bots.clone();
-        let active_project = guard
-            .store
-            .chats
-            .iter()
-            .find(|c| c.id == input.chat_id)
-            .and_then(|c| c.workspace_path.as_ref())
-            .and_then(|path| guard.store.workspaces.iter().find(|w| &w.path == path))
-            .cloned();
-
-        let (mentioned_ids, is_all_mention) =
-            extract_mentioned_bots(&trimmed_text, &all_bots, None);
-
+        let (mentioned_ids, _) = extract_mentioned_bots(&trimmed_text, &all_bots, None);
         let Some(chat) = guard.store.chats.iter_mut().find(|c| c.id == input.chat_id) else {
             return Err(format!("Chat '{}' not found.", input.chat_id));
         };
-
-        for mid in &mentioned_ids {
-            if !chat.participant_bot_ids.contains(mid) {
-                chat.participant_bot_ids.push(mid.clone());
-            }
-        }
-        if chat.participant_bot_ids.len() > 1 && !chat.is_primary {
-            chat.is_group = true;
-        }
 
         let user_msg = ChatMessage {
             id: user_msg_id.clone(),
@@ -134,55 +122,6 @@ async fn dispatch_turn(
             }
         }
 
-        let project_assigned_ids: Vec<String> = active_project
-            .as_ref()
-            .map(|p| p.assigned_bot_ids.clone())
-            .unwrap_or_default();
-
-        let target_bot_ids: Vec<String> = if fixed_target {
-            vec![input
-                .override_bot_id
-                .clone()
-                .ok_or("Choose a bot for this routine.")?]
-        } else if is_all_mention
-            || input.parallel_mode.unwrap_or(false)
-            || trimmed_text.starts_with("/race ")
-            || trimmed_text.starts_with("/swarm ")
-            || trimmed_text.starts_with("/group ")
-        {
-            if chat.participant_bot_ids.len() > 1 {
-                chat.participant_bot_ids.clone()
-            } else if !project_assigned_ids.is_empty() {
-                project_assigned_ids.clone()
-            } else {
-                all_bots
-                    .iter()
-                    .filter(|b| !b.is_primary)
-                    .map(|b| b.id.clone())
-                    .collect()
-            }
-        } else if !mentioned_ids.is_empty() {
-            mentioned_ids
-        } else if let Some(override_id) = &input.override_bot_id {
-            vec![override_id.clone()]
-        } else if chat.is_primary {
-            if let Some(lead_id) = active_project
-                .as_ref()
-                .and_then(|p| p.lead_bot_id.clone())
-                .filter(|id| all_bots.iter().any(|b| &b.id == id))
-            {
-                vec![lead_id]
-            } else if let Some(first) = chat.participant_bot_ids.first() {
-                vec![first.clone()]
-            } else {
-                vec!["bot-omni".to_string()]
-            }
-        } else if let Some(first) = chat.participant_bot_ids.first() {
-            vec![first.clone()]
-        } else {
-            vec!["bot-omni".to_string()]
-        };
-
         for tid in &target_bot_ids {
             if !chat.participant_bot_ids.contains(tid) {
                 chat.participant_bot_ids.push(tid.clone());
@@ -195,6 +134,9 @@ async fn dispatch_turn(
             .filter(|id| unique_targets.insert((*id).clone()))
             .filter_map(|id| all_bots.iter().find(|b| &b.id == id).cloned())
             .map(|mut b| {
+                if let Some(model) = chat.model_overrides.get(&b.id) {
+                    b.model = model.clone();
+                }
                 if resolved_override_applies(&input, &b, &target_bot_ids) {
                     if let Some(m) = &input.override_model {
                         if !m.trim().is_empty() {
@@ -211,16 +153,38 @@ async fn dispatch_turn(
             })
             .collect();
 
+        for bot in &resolved_bots {
+            if let Err(error) = crate::execution::validate(bot)
+                .and_then(|_| crate::drivers::validate_available(bot))
+            {
+                guard.store = previous_store;
+                return Err(error);
+            }
+        }
+        let chat = guard
+            .store
+            .chats
+            .iter_mut()
+            .find(|c| c.id == input.chat_id)
+            .expect("validated chat");
         let max_turns = chat.max_swarm_turns.clamp(1, 8);
-        chat.is_group = chat.participant_bot_ids.len() > 1 && !chat.is_primary;
-        let is_parallel = resolved_bots.len() > 1
-            && (is_all_mention
-                || input.parallel_mode.unwrap_or(false)
-                || trimmed_text.starts_with("/race "));
+        chat.is_group = chat.participant_bot_ids.len() > 1 && !chat.is_primary && !chat.is_bot_home;
+        let is_parallel = route.parallel;
 
         if resolved_bots.is_empty() {
             guard.store = previous_store;
             return Err("No valid bots are available for this chat.".into());
+        }
+        if let Some(id) = &routine_id {
+            let routine = guard
+                .store
+                .routines
+                .iter_mut()
+                .find(|r| &r.id == id)
+                .ok_or("Routine no longer exists")?;
+            routine.workflow_id = Some(user_msg_id.clone());
+            routine.run_status = Some("queued".into());
+            routine.last_error = None;
         }
         if let Err(error) = guard.persist() {
             guard.store = previous_store;
@@ -239,15 +203,18 @@ async fn dispatch_turn(
     let chat_id = input.chat_id.clone();
     let skill_slug = input.skill_slug.clone();
 
+    let workflow_id = user_msg_id.clone();
     tokio::spawn(async move {
         run_swarm_workflow(
             bg_state,
             chat_id,
+            workflow_id,
             trimmed_text,
             skill_slug,
             initial_bots,
             parallel_initial,
             max_swarm_turns,
+            input.summarize,
         )
         .await;
     });
@@ -267,255 +234,63 @@ fn resolved_override_applies(
         .map_or(targets.len() == 1, |id| id == &bot.id)
 }
 
-async fn run_swarm_workflow(
-    state: SharedOmniState,
-    chat_id: String,
-    original_user_prompt: String,
-    skill_slug: Option<String>,
-    initial_bots: Vec<BotProfile>,
-    parallel_initial: bool,
-    max_swarm_turns: u32,
-) {
-    let mut current_wave = initial_bots;
-    let mut run_in_parallel = parallel_initial;
-    let mut bot_turn_counts = HashMap::new();
-    let mut seen_handoff_edges = HashSet::new();
-    let mut incoming_handoff_notes: HashMap<String, String> = HashMap::new();
-    let mut cumulative_cost_usd = 0.0;
-    let (prevent_loops, max_parallel, workflow_budget) = state
-        .read()
-        .map(|g| {
-            (
-                g.store.preferences.prevent_handoff_loops,
-                g.store.preferences.max_parallel_bots.clamp(1, 6) as usize,
-                g.store.preferences.max_turn_budget_usd * 2.5,
-            )
-        })
-        .unwrap_or((true, 1, 0.0));
-
-    for hop in 0..max_swarm_turns {
-        if current_wave.is_empty() || is_cancelled(&state, &chat_id) {
-            break;
-        }
-        let mut next_ids = Vec::new();
-        let mut next_notes: HashMap<String, String> = HashMap::new();
-        let mut next_parallel = false;
-        // Parallel peers see the same committed transcript, not partial streaming replies.
-        let wave_history_end = state
-            .read()
-            .ok()
-            .and_then(|g| {
-                g.store
-                    .chats
-                    .iter()
-                    .find(|c| c.id == chat_id)
-                    .map(|c| c.messages.len())
-            })
-            .unwrap_or(0);
-        let concurrency = if run_in_parallel { max_parallel } else { 1 };
-        for batch in current_wave.chunks(concurrency) {
-            if is_cancelled(&state, &chat_id) {
-                break;
-            }
-            if cumulative_cost_usd >= workflow_budget {
-                workflow_notice(
-                    &state,
-                    &chat_id,
-                    "Swarm stopped: reported workflow cost reached the budget limit.",
-                );
-                break;
-            }
-            let history_end = if run_in_parallel {
-                wave_history_end
-            } else {
-                state
-                    .read()
-                    .ok()
-                    .and_then(|g| {
-                        g.store
-                            .chats
-                            .iter()
-                            .find(|c| c.id == chat_id)
-                            .map(|c| c.messages.len())
-                    })
-                    .unwrap_or(0)
-            };
-            let mut turns = Vec::new();
-            for bot in batch {
-                *bot_turn_counts.entry(bot.id.clone()).or_insert(0) += 1;
-                turns.push(run_single_bot_step(
-                    state.clone(),
-                    chat_id.clone(),
-                    bot.clone(),
-                    StepContext {
-                        original_user_prompt: original_user_prompt.clone(),
-                        skill_slug: if hop == 0 { skill_slug.clone() } else { None },
-                        hop,
-                        incoming_handoff_note: incoming_handoff_notes.get(&bot.id).cloned(),
-                        history_end,
-                    },
-                ));
-            }
-            for result in futures_util::future::join_all(turns).await {
-                cumulative_cost_usd += result.cost_usd.unwrap_or(0.0);
-                for (from_bot, handoff) in result.handoffs {
-                    if is_cancelled(&state, &chat_id) {
-                        break;
-                    }
-                    if hop + 1 >= max_swarm_turns {
-                        workflow_notice(
-                            &state,
-                            &chat_id,
-                            "Swarm round limit reached; further handoffs were not scheduled.",
-                        );
-                        break;
-                    }
-                    if let Some(handoff) = filter_handoff_against_loops(
-                        &from_bot.id,
-                        handoff,
-                        &bot_turn_counts,
-                        &mut seen_handoff_edges,
-                        prevent_loops,
-                    ) {
-                        record_handoff_on_message(&state, &chat_id, &from_bot.id, &handoff);
-                        next_parallel |= handoff.mode == "parallel";
-                        for id in handoff.to_bot_ids {
-                            let note = next_notes.entry(id.clone()).or_default();
-                            if !note.is_empty() {
-                                note.push_str("\n\n");
-                            }
-                            note.push_str(&format!("From @{}: {}", from_bot.name, handoff.note));
-                            if !next_ids.contains(&id) {
-                                next_ids.push(id);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if cumulative_cost_usd >= workflow_budget {
-            break;
-        }
-        if let Ok(mut guard) = state.write() {
-            if let Some(chat) = guard.store.chats.iter_mut().find(|c| c.id == chat_id) {
-                for id in &next_ids {
-                    if !chat.participant_bot_ids.contains(id) {
-                        chat.participant_bot_ids.push(id.clone());
-                    }
-                }
-                chat.is_group = chat.participant_bot_ids.len() > 1 && !chat.is_primary;
-            }
-            current_wave = next_ids
-                .iter()
-                .filter_map(|id| guard.store.bots.iter().find(|b| &b.id == id).cloned())
-                .collect();
-        } else {
-            break;
-        }
-        incoming_handoff_notes = next_notes;
-        run_in_parallel = next_parallel;
-    }
-    if let Ok(mut guard) = state.write() {
-        guard.active_workflows.remove(&chat_id);
-        guard.cancelled_chats.remove(&chat_id);
-        let _ = guard.persist();
-        guard.emit(OmniStreamEvent::StateUpdated {
-            chat_id: Some(chat_id),
-        });
-    }
+pub(crate) struct SingleBotStepResult {
+    pub(crate) status: String,
+    pub(crate) error: Option<String>,
+    pub(crate) cost_usd: Option<f64>,
+    pub(crate) handoffs: Vec<(BotProfile, HandoffEvent)>,
 }
 
-fn workflow_notice(state: &SharedOmniState, chat_id: &str, text: &str) {
-    if let Ok(mut guard) = state.write() {
-        if let Some(chat) = guard.store.chats.iter_mut().find(|c| c.id == chat_id) {
-            if let Some(mut message) = chat.messages.iter().find(|m| m.role == "user").cloned() {
-                message.id = uuid::Uuid::new_v4().to_string();
-                message.role = "system".into();
-                message.author_name = Some("Swarm coordinator".into());
-                message.text = text.into();
-                message.mentioned_bot_ids.clear();
-                message.skill_slug = None;
-                message.created_at_ms = now_ms();
-                chat.messages.push(message);
-            }
-        }
-    }
+pub(crate) struct StepContext {
+    pub(crate) allow_handoffs: bool,
+    pub(crate) task_id: String,
+    pub(crate) original_user_prompt: String,
+    pub(crate) skill_slug: Option<String>,
+    pub(crate) hop: u32,
+    pub(crate) incoming_handoff_note: Option<String>,
+    pub(crate) history_end: usize,
 }
 
-fn filter_handoff_against_loops(
-    from_bot_id: &str,
-    mut handoff: HandoffEvent,
-    bot_turn_counts: &HashMap<String, u32>,
-    seen_edges: &mut HashSet<(String, String)>,
-    prevent_loops: bool,
-) -> Option<HandoffEvent> {
-    if !prevent_loops {
-        return Some(handoff);
-    }
-
-    let mut allowed_ids = Vec::new();
-    let mut allowed_names = Vec::new();
-
-    for (idx, to_id) in handoff.to_bot_ids.iter().enumerate() {
-        let count = bot_turn_counts.get(to_id).copied().unwrap_or(0);
-        let edge = (from_bot_id.to_string(), to_id.clone());
-        // Allow at most 2 turns per Bot in a single autonomous chain and prevent repeating the same directed edge
-        if count < 2 && !seen_edges.contains(&edge) {
-            seen_edges.insert(edge);
-            allowed_ids.push(to_id.clone());
-            if let Some(name) = handoff.to_bot_names.get(idx) {
-                allowed_names.push(name.clone());
-            }
-        }
-    }
-
-    if allowed_ids.is_empty() {
-        return None;
-    }
-
-    handoff.to_bot_ids = allowed_ids;
-    handoff.to_bot_names = allowed_names;
-    Some(handoff)
-}
-
-struct SingleBotStepResult {
-    cost_usd: Option<f64>,
-    handoffs: Vec<(BotProfile, HandoffEvent)>,
-}
-
-struct StepContext {
-    original_user_prompt: String,
-    skill_slug: Option<String>,
-    hop: u32,
-    incoming_handoff_note: Option<String>,
-    history_end: usize,
-}
-
-async fn run_single_bot_step(
+pub(crate) async fn run_single_bot_step(
     state: SharedOmniState,
     chat_id: String,
     mut bot: BotProfile,
     context: StepContext,
 ) -> SingleBotStepResult {
     let StepContext {
+        allow_handoffs,
+        task_id,
         original_user_prompt,
         skill_slug,
         hop,
         incoming_handoff_note,
         history_end,
     } = context;
+    if let Err(error) = crate::execution::validate(&bot) {
+        return SingleBotStepResult {
+            status: "error".into(),
+            error: Some(error),
+            cost_usd: None,
+            handoffs: Vec::new(),
+        };
+    }
     let msg_id = format!("msg_a_{}", uuid::Uuid::new_v4());
 
     // Prepare placeholder streaming message & build delta-aware context
     if is_cancelled(&state, &chat_id) {
         return SingleBotStepResult {
+            status: "stopped".into(),
+            error: None,
             cost_usd: None,
             handoffs: Vec::new(),
         };
     }
+    let worktree_result = crate::execution::workspace(&state, &chat_id, &bot.id).await;
     let prep = {
         let Ok(mut guard) = state.write() else {
             return SingleBotStepResult {
+                status: "error".into(),
+                error: Some("Could not access chat state.".into()),
                 cost_usd: None,
                 handoffs: Vec::new(),
             };
@@ -524,7 +299,6 @@ async fn run_single_bot_step(
 
         let global_instructions = prefs.global_instructions.clone();
         let shared_memories = prefs.shared_memories.clone();
-        let data_dir = guard.data_dir.clone();
         let max_context_messages = prefs.max_context_messages.clamp(2, 24) as usize;
         let max_message_chars = prefs.max_message_chars.clamp(400, 6000);
         let turn_timeout_secs = prefs.turn_timeout_secs.clamp(30, 1800);
@@ -532,11 +306,18 @@ async fn run_single_bot_step(
         let only_explicit_handoffs = prefs.only_explicit_handoffs;
 
         let all_bots = guard.store.bots.clone();
+        let harness_identity = guard
+            .harnesses
+            .iter()
+            .find(|h| h.kind == bot.cli_driver)
+            .map(|h| (h.binary_path.clone(), h.version.clone()));
         let skills = guard.skills.clone();
         let workspaces = guard.store.workspaces.clone();
 
         let Some(chat) = guard.store.chats.iter_mut().find(|c| c.id == chat_id) else {
             return SingleBotStepResult {
+                status: "error".into(),
+                error: Some("Could not access chat state.".into()),
                 cost_usd: None,
                 handoffs: Vec::new(),
             };
@@ -547,29 +328,38 @@ async fn run_single_bot_step(
             .as_ref()
             .and_then(|path| workspaces.iter().find(|w| &w.path == path))
             .cloned();
+        let eligible_ids = active_project
+            .as_ref()
+            .map(|p| p.assigned_bot_ids.clone())
+            .unwrap_or_default();
+        let all_bots: Vec<_> = all_bots
+            .into_iter()
+            .filter(|b| {
+                !b.archived
+                    && (b.id == bot.id
+                        || chat.participant_bot_ids.contains(&b.id)
+                        || eligible_ids.contains(&b.id))
+            })
+            .collect();
         let is_home = chat.workspace_path.is_none();
         let approve_all = active_project.as_ref().is_some_and(|p| p.approve_all_tools);
         if is_home && bot.permission_mode == "bypassPermissions" {
             bot.permission_mode = "auto".into();
         }
-        let base_ws = match &chat.workspace_path {
-            Some(path) => Ok(path.clone()),
-            None => crate::homes::bot_home(&data_dir, &bot.id),
-        };
         let use_worktrees = !is_home
             && (chat.use_worktrees
-                || active_project
-                    .as_ref()
-                    .is_some_and(|p| p.use_worktrees_default && chat.is_group));
-        let worktree_result = base_ws.and_then(|base| {
-            if use_worktrees {
-                ensure_bot_worktree(&base, &chat_id, &bot.id)
-            } else {
-                Ok(base)
-            }
-        });
+                || active_project.as_ref().is_some_and(|p| {
+                    p.use_worktrees_default && chat.participant_bot_ids.len() > 1
+                }));
         let effective_cwd = worktree_result.clone().unwrap_or_default();
 
+        let fingerprint = serde_json::json!({ "bot": bot, "harness": harness_identity, "cwd": effective_cwd, "project": active_project, "instructions": global_instructions, "shared": shared_memories,
+            "roster": all_bots.iter().map(|b| (&b.id, &b.name, &b.slug)).collect::<Vec<_>>() }).to_string();
+        if chat.session_contexts.get(&bot.id) != Some(&fingerprint) {
+            chat.native_sessions.remove(&bot.id);
+            chat.last_synced_msg_index.remove(&bot.id);
+        }
+        chat.session_contexts.insert(bot.id.clone(), fingerprint);
         let resume_sid = chat.native_sessions.get(&bot.id).cloned();
         let last_synced_idx = chat
             .last_synced_msg_index
@@ -751,7 +541,7 @@ async fn run_single_bot_step(
             model_reported: false,
             input_tokens: None,
             output_tokens: None,
-            status: "streaming".to_string(),
+            status: "queued".to_string(),
             created_at_ms: now_ms(),
         };
         chat.messages.push(placeholder);
@@ -799,11 +589,47 @@ async fn run_single_bot_step(
             }
         }
         return SingleBotStepResult {
+            status: "error".into(),
+            error: Some(error),
             cost_usd: None,
             handoffs: Vec::new(),
         };
     }
 
+    let lease = crate::execution::acquire(state.clone(), &chat_id, &task_id, &cwd).await;
+    let _lease = match lease {
+        Ok(lease) => lease,
+        Err(error) => {
+            if let Ok(mut guard) = state.write() {
+                if let Some(message) = guard
+                    .store
+                    .chats
+                    .iter_mut()
+                    .find(|c| c.id == chat_id)
+                    .and_then(|c| c.messages.iter_mut().find(|m| m.id == msg_id))
+                {
+                    message.status = "stopped".into();
+                }
+            }
+            return SingleBotStepResult {
+                status: "stopped".into(),
+                error: Some(error),
+                cost_usd: None,
+                handoffs: Vec::new(),
+            };
+        }
+    };
+    if let Ok(mut guard) = state.write() {
+        if let Some(chat) = guard.store.chats.iter_mut().find(|c| c.id == chat_id) {
+            if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
+                message.status = "streaming".into();
+            }
+            if let Some(task) = chat.tasks.iter_mut().find(|t| t.id == task_id) {
+                task.workspace_path = Some(cwd.clone());
+            }
+        }
+    }
+    task_status(&state, &chat_id, &task_id, "running", None);
     let had_resume = resume_session_id.is_some();
 
     let output = execute_bot_turn(
@@ -840,20 +666,80 @@ async fn run_single_bot_step(
         }
     }
 
-    if output.status != "complete" || output.text.trim().is_empty() {
+    if output.status != "complete" || output.text.trim().is_empty() || !allow_handoffs {
         return SingleBotStepResult {
+            status: output.status.clone(),
+            error: (output.status != "complete").then(|| output.text.clone()),
             cost_usd: output.cost_usd,
             handoffs: Vec::new(),
         };
     }
 
     // Parse any outgoing `<handoff to="...">` or actionable `@BotName` directive from this Bot's reply
-    let handoffs = parse_bot_handoffs(&bot, &output.text, &all_bots, only_explicit_handoffs)
-        .into_iter()
-        .map(|h| (bot.clone(), h))
-        .collect();
+    let handoffs: Vec<_> =
+        parse_bot_handoffs(&bot, &output.text, &all_bots, only_explicit_handoffs)
+            .into_iter()
+            .map(|h| (bot.clone(), h))
+            .collect();
 
+    let actionable = crate::routing::actionable_text(&output.text);
+    let mut unresolved = Vec::new();
+    for line in actionable
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("<handoff "))
+    {
+        if let Some((header, _)) = line[9..].split_once('>') {
+            if let Some(attributes) = shlex::split(header) {
+                if let Some(target) = attributes.iter().find_map(|a| a.strip_prefix("to=")) {
+                    for name in target
+                        .split(',')
+                        .map(|name| name.trim().trim_start_matches('@'))
+                    {
+                        let count = all_bots
+                            .iter()
+                            .filter(|b| {
+                                b.id != bot.id
+                                    && (b.name.eq_ignore_ascii_case(name)
+                                        || b.slug.eq_ignore_ascii_case(name)
+                                        || b.id == name)
+                            })
+                            .count();
+                        if count != 1 {
+                            unresolved.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for recipient in unresolved {
+        let workflow_id = state
+            .read()
+            .ok()
+            .and_then(|g| {
+                g.store
+                    .chats
+                    .iter()
+                    .find(|c| c.id == chat_id)
+                    .and_then(|c| {
+                        c.tasks
+                            .iter()
+                            .find(|t| t.id == task_id)
+                            .map(|t| t.workflow_id.clone())
+                    })
+            })
+            .unwrap_or_default();
+        enqueue_task(&state, &chat_id, WorkflowTask { id: uuid::Uuid::new_v4().to_string(), workflow_id, bot_id: recipient,
+            from_bot_id: Some(bot.id.clone()), instructions: "Unresolved handoff".into(), mode: "sequential".into(), status: "skipped".into(),
+            reason: Some("Recipient is missing, ambiguous, archived, or outside this conversation's team.".into()), workspace_path: None });
+    }
+    if handoffs.is_empty() && crate::routing::actionable_text(&output.text).contains("<handoff ") {
+        workflow_notice(&state, &chat_id, "Handoff skipped: use a complete standalone block addressed to an eligible teammate's exact handle.");
+    }
     SingleBotStepResult {
+        status: output.status,
+        error: None,
         cost_usd: output.cost_usd,
         handoffs,
     }
@@ -919,48 +805,7 @@ fn extract_mentioned_bots(
     all_bots: &[BotProfile],
     exclude_bot_id: Option<&str>,
 ) -> (Vec<String>, bool) {
-    let lower = text.to_lowercase();
-    let is_all = ["@all", "@everyone", "@swarm"]
-        .iter()
-        .any(|token| contains_mention_token(&lower, token));
-
-    let mut found = Vec::new();
-    for b in all_bots {
-        if exclude_bot_id == Some(b.id.as_str()) {
-            continue;
-        }
-        let name_tok = format!("@{}", b.name.to_lowercase());
-        let slug_tok = format!("@{}", b.slug.to_lowercase());
-        if (contains_mention_token(&lower, &name_tok) || contains_mention_token(&lower, &slug_tok))
-            && !found.contains(&b.id)
-        {
-            found.push(b.id.clone());
-        }
-    }
-    (found, is_all)
-}
-
-fn contains_mention_token(haystack_lower: &str, token_lower: &str) -> bool {
-    let mut start = 0;
-    while let Some(pos) = haystack_lower[start..].find(token_lower) {
-        let abs = start + pos;
-        let before_ok = abs == 0
-            || !haystack_lower[..abs]
-                .chars()
-                .last()
-                .is_some_and(|c| c.is_alphanumeric());
-        let after_idx = abs + token_lower.len();
-        let after_ok = after_idx >= haystack_lower.len()
-            || !haystack_lower[after_idx..]
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_alphanumeric() || c == '-' || c == '_');
-        if before_ok && after_ok {
-            return true;
-        }
-        start = after_idx;
-    }
-    false
+    crate::routing::mentions(text, all_bots, exclude_bot_id)
 }
 
 fn parse_bot_handoffs(
@@ -970,24 +815,7 @@ fn parse_bot_handoffs(
     only_explicit_handoffs: bool,
 ) -> Vec<HandoffEvent> {
     // Quoted examples and code are data, not executable routing instructions.
-    let mut fence: Option<char> = None;
-    let actionable = reply_text
-        .lines()
-        .filter(|line| {
-            let line = line.trim();
-            if line.starts_with("```") || line.starts_with("~~~") {
-                let marker = line.chars().next().unwrap();
-                if fence == Some(marker) {
-                    fence = None;
-                } else if fence.is_none() {
-                    fence = Some(marker);
-                }
-                return false;
-            }
-            fence.is_none() && !line.starts_with('>')
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let actionable = crate::routing::unquoted_text(reply_text);
     let reply_text = actionable.as_str();
     let mut handoffs = Vec::new();
     let mut remaining = reply_text;
@@ -1027,7 +855,8 @@ fn parse_bot_handoffs(
             let matches: Vec<_> = all_bots
                 .iter()
                 .filter(|b| {
-                    b.id != speaking_bot.id
+                    !b.archived
+                        && b.id != speaking_bot.id
                         && (b.name.eq_ignore_ascii_case(name)
                             || b.slug.eq_ignore_ascii_case(name)
                             || b.id == name)
@@ -1127,7 +956,7 @@ fn parse_bot_handoffs(
     }]
 }
 
-fn record_handoff_on_message(
+pub(crate) fn record_handoff_on_message(
     state: &SharedOmniState,
     chat_id: &str,
     from_bot_id: &str,
@@ -1155,7 +984,7 @@ fn record_handoff_on_message(
     });
 }
 
-fn is_cancelled(state: &SharedOmniState, chat_id: &str) -> bool {
+pub(crate) fn is_cancelled(state: &SharedOmniState, chat_id: &str) -> bool {
     state
         .read()
         .map(|g| g.cancelled_chats.contains(chat_id))
@@ -1183,7 +1012,7 @@ mod tests {
         let bots = vec![bot("Lead"), bot("Pi"), bot("Piper")];
         let note = "Check the complete specification. ".repeat(30);
         let text = format!("<handoff to=\"Piper\" mode=\"parallel\">{note}</handoff>\n<handoff to=\"Pi\">Check tests</handoff>");
-        let handoffs = parse_bot_handoffs(&bots[0], &text, &bots, true);
+        let handoffs: Vec<_> = parse_bot_handoffs(&bots[0], &text, &bots, true);
         assert_eq!(handoffs.len(), 2);
         assert_eq!(handoffs[0].to_bot_ids, vec!["Piper"]);
         assert_eq!(handoffs[0].note, note.trim());
@@ -1195,6 +1024,8 @@ mod tests {
         let bots = vec![bot("Lead"), bot("Pi")];
         for text in [
             "```xml\n<handoff to=\"Pi\">Go</handoff>\n```",
+            "    <handoff to=\"Pi\">Go</handoff>",
+            "````xml\n```\n<handoff to=\"Pi\">Go</handoff>\n````",
             "> <handoff to=\"Pi\">Go</handoff>",
             "Example: `<handoff to=\"Pi\">Go</handoff>`",
             "<handoff to=\"Pi\">unfinished",
@@ -1207,39 +1038,6 @@ mod tests {
                 "{text}"
             );
         }
-    }
-
-    #[test]
-    fn repeated_edges_and_exhausted_bots_are_blocked() {
-        let bots = vec![bot("A"), bot("B")];
-        let handoff =
-            parse_bot_handoffs(&bots[0], "<handoff to=\"B\">Review</handoff>", &bots, true)
-                .remove(0);
-        let mut edges = HashSet::new();
-        assert!(filter_handoff_against_loops(
-            "A",
-            handoff.clone(),
-            &HashMap::new(),
-            &mut edges,
-            true
-        )
-        .is_some());
-        assert!(filter_handoff_against_loops(
-            "A",
-            handoff.clone(),
-            &HashMap::new(),
-            &mut edges,
-            true
-        )
-        .is_none());
-        assert!(filter_handoff_against_loops(
-            "A",
-            handoff,
-            &HashMap::from([("B".into(), 2)]),
-            &mut HashSet::new(),
-            true
-        )
-        .is_none());
     }
 
     #[tokio::test]
@@ -1383,5 +1181,167 @@ mod tests {
         let prompt = fs::read_to_string(f.dir.join("a-prompt.txt")).unwrap();
         assert!(prompt.contains("B_RESULT"));
         assert!(!prompt.contains("A_RESULT"));
+    }
+}
+
+#[cfg(test)]
+mod workflow_regressions {
+    use super::*;
+    use crate::test_support::{input, Fixture};
+
+    #[tokio::test]
+    async fn duplicate_handoffs_are_visible_and_optional_summary_runs_once() {
+        let f = Fixture::new(&["A", "B"]);
+        f.script("A", "echo '<handoff to=\"B\">Review once</handoff>'\necho '<handoff to=\"B\">Review once</handoff>'");
+        f.script("B", "echo reviewed");
+        let mut request = input("@A Begin");
+        request.summarize = true;
+        dispatch_chat_turn(f.state.clone(), request).await.unwrap();
+        f.wait().await;
+        let g = f.state.read().unwrap();
+        let tasks = &g.store.chats[0].tasks;
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|t| t.bot_id == "B" && t.status == "complete")
+                .count(),
+            1
+        );
+        assert_eq!(tasks.iter().filter(|t| t.status == "skipped").count(), 1);
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|t| t.mode == "summary" && t.status == "complete")
+                .count(),
+            1
+        );
+        assert_eq!(tasks.len(), 4);
+    }
+    #[tokio::test]
+    async fn mixed_modes_and_distinct_same_recipient_tasks_keep_their_instructions() {
+        let f = Fixture::new(&["A", "B", "C", "D"]);
+        f.script("A", "echo '<handoff to=\"B,C\" mode=\"sequential\">FIRST_TASK</handoff>'\necho '<handoff to=\"D\" mode=\"parallel\">INDEPENDENT_TASK</handoff>'\necho '<handoff to=\"B\" mode=\"sequential\">SECOND_TASK</handoff>'");
+        f.script("B", "printf '%s\\n' \"$1\" >> b-prompts\necho B_FINISHED");
+        f.script("C", "printf '%s' \"$1\" > c-prompt\necho C_FINISHED");
+        f.script("D", "echo D_FINISHED");
+        dispatch_chat_turn(f.state.clone(), input("@A Begin"))
+            .await
+            .unwrap();
+        f.wait().await;
+        assert!(fs::read_to_string(f.dir.join("c-prompt"))
+            .unwrap()
+            .contains("B_FINISHED"));
+        let prompts = fs::read_to_string(f.dir.join("b-prompts")).unwrap();
+        assert!(prompts.contains("From @A: SECOND_TASK"));
+        let g = f.state.read().unwrap();
+        assert_eq!(
+            g.store.chats[0]
+                .tasks
+                .iter()
+                .filter(|t| t.bot_id == "B" && t.status == "complete")
+                .count(),
+            2
+        );
+        assert_eq!(
+            g.store.chats[0]
+                .tasks
+                .iter()
+                .find(|t| t.bot_id == "C")
+                .unwrap()
+                .mode,
+            "sequential"
+        );
+    }
+
+    #[tokio::test]
+    async fn failure_skips_dependent_sequential_peers_but_parallel_peers_finish() {
+        for parallel in [false, true] {
+            let f = Fixture::new(&["A", "B"]);
+            f.script("A", "echo failed\nexit 1");
+            f.script("B", "touch b-ran\necho ok");
+            dispatch_chat_turn(
+                f.state.clone(),
+                input(if parallel {
+                    "/race begin"
+                } else {
+                    "/group begin"
+                }),
+            )
+            .await
+            .unwrap();
+            f.wait().await;
+            assert_eq!(f.dir.join("b-ran").exists(), parallel);
+            let g = f.state.read().unwrap();
+            assert_eq!(
+                g.store.chats[0].tasks[1].status,
+                if parallel { "complete" } else { "skipped" }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn handoff_outside_visible_team_is_reported_and_does_not_run() {
+        let f = Fixture::new(&["A", "B"]);
+        f.script("A", "echo '<handoff to=\"B\">Secret task</handoff>'");
+        f.script("B", "touch should-not-run");
+        f.state.write().unwrap().store.chats[0].participant_bot_ids = vec!["A".into()];
+        dispatch_chat_turn(f.state.clone(), input("Begin"))
+            .await
+            .unwrap();
+        f.wait().await;
+        assert!(!f.dir.join("should-not-run").exists());
+        assert!(f.state.read().unwrap().store.chats[0]
+            .tasks
+            .iter()
+            .any(|t| t.status == "skipped" && t.reason.as_deref().unwrap().contains("outside")));
+    }
+
+    #[tokio::test]
+    async fn changed_message_model_invalidates_native_session() {
+        let f = Fixture::new(&["A"]);
+        f.script(
+            "A",
+            "echo '{\"type\":\"result\",\"session_id\":\"session-one\",\"result\":\"ok\"}'",
+        );
+        dispatch_chat_turn(f.state.clone(), input("First"))
+            .await
+            .unwrap();
+        f.wait().await;
+        let first = f.state.read().unwrap().store.chats[0].session_contexts["A"].clone();
+        let mut next = input("Second");
+        next.override_model = Some("different-model".into());
+        dispatch_chat_turn(f.state.clone(), next).await.unwrap();
+        f.wait().await;
+        let g = f.state.read().unwrap();
+        assert_ne!(first, g.store.chats[0].session_contexts["A"]);
+        assert_eq!(
+            g.store.chats[0].messages.last().unwrap().model.as_deref(),
+            Some("different-model")
+        );
+    }
+
+    #[tokio::test]
+    async fn cost_limit_skips_queued_work_and_missing_cost_does_not_invent_a_limit() {
+        let f = Fixture::new(&["A", "B"]);
+        f.script(
+            "A",
+            "echo '{\"type\":\"result\",\"result\":\"done\",\"total_cost_usd\":2}'",
+        );
+        f.script("B", "touch should-not-run");
+        {
+            let mut g = f.state.write().unwrap();
+            g.store.preferences.workflow_budget_usd = 1.0;
+            g.store.preferences.max_turn_budget_usd = 5.0;
+        }
+        dispatch_chat_turn(f.state.clone(), input("/group begin"))
+            .await
+            .unwrap();
+        f.wait().await;
+        assert!(!f.dir.join("should-not-run").exists());
+        assert!(f.state.read().unwrap().store.chats[0].tasks[1]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("budget"));
     }
 }

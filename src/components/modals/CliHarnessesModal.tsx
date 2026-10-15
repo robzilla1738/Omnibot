@@ -129,6 +129,15 @@ export function CliHarnessesModal({
   onCreateBotFromTemplate,
   onStartChatWithSkill,
 }: CliHarnessesModalProps) {
+  const [creationError, setCreationError] = useState("");
+  const [creating, setCreating] = useState(false);
+  const createTemplate = async (template: Parameters<CliHarnessesModalProps["onCreateBotFromTemplate"]>[0]) => {
+    if (creating) return;
+    setCreating(true); setCreationError("");
+    try { await onCreateBotFromTemplate(template); }
+    catch (error) { setCreationError(error instanceof Error ? error.message : String(error)); }
+    finally { setCreating(false); }
+  };
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState<CategoryFilter>("All");
   const [rescanning, setRescanning] = useState(false);
@@ -225,6 +234,8 @@ export function CliHarnessesModal({
         }`}
         onClick={(e) => e.stopPropagation()}
       >
+        {creationError && <p role="alert" className="text-sm text-red-300 p-3">{creationError}</p>}
+        {creating && <p role="status" className="text-xs text-zinc-400 p-3">Creating bot…</p>}
         {/* Top Header Row */}
         <div className="shrink-0 px-7 pt-5 pb-3.5 flex items-center justify-between">
           <div>
@@ -387,7 +398,7 @@ export function CliHarnessesModal({
                             type="button"
                             onClick={() => {
                               const nextIdx = providerBots.length + 1;
-                              onCreateBotFromTemplate({
+                              createTemplate({
                                 name: `${h.name.split(" ")[0]} ${nextIdx}`,
                                 roleTitle: `${h.name} Specialist #${nextIdx}`,
                                 description: `Additional Bot instance running on ${h.name} (${h.binaryName})`,
@@ -484,7 +495,7 @@ export function CliHarnessesModal({
                         <button
                           type="button"
                           onClick={() =>
-                            onCreateBotFromTemplate({
+                            createTemplate({
                               name: tpl.name,
                               roleTitle: tpl.roleTitle,
                               description: tpl.description,

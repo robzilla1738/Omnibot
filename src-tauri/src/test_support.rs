@@ -32,6 +32,11 @@ impl Fixture {
         .unwrap();
         let (event_tx, _) = tokio::sync::broadcast::channel(512);
         let state = Arc::new(RwLock::new(OmniRuntimeState {
+            instance_id: uuid::Uuid::new_v4().to_string(),
+            revision: std::sync::atomic::AtomicU64::new(1),
+            storage_error: None,
+            execution_slots: HashMap::new(),
+            terminals: HashMap::new(),
             server_port: 4321,
             store_lock: None,
             data_dir: dir.join("state"),
@@ -84,7 +89,7 @@ pub fn bot(name: &str) -> BotProfile {
     serde_json::from_value(json!({
         "id":name,"name":name,"slug":name.to_lowercase(),"roleTitle":"Tester", "description":"",
         "shape":"blob","color":"cyan","isPrimary":false,"cliDriver":"custom","model":null,
-        "reasoningEffort":"low","permissionMode":"plan","systemPrompt":"","memories":[],
+        "reasoningEffort":"low","permissionMode":"auto","systemPrompt":"","memories":[],
         "autoCreatedForCli":false
     }))
     .unwrap()
@@ -92,6 +97,7 @@ pub fn bot(name: &str) -> BotProfile {
 
 pub fn input(text: &str) -> crate::orchestrator::SendMessageInput {
     crate::orchestrator::SendMessageInput {
+        summarize: false,
         chat_id: "room".into(),
         text: text.into(),
         skill_slug: None,

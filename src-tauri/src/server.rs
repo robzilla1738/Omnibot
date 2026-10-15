@@ -59,17 +59,36 @@ pub async fn spawn_local_server(
     let runtime_state = OmniRuntimeState::load(bound_port, event_tx.clone())?;
     let shared: SharedOmniState = Arc::new(RwLock::new(runtime_state));
 
-    let app = Router::new()
+    let app = local_router(shared.clone(), bound_port);
+
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    Ok((bound_port, shared, event_tx))
+}
+
+pub fn local_router(shared: SharedOmniState, bound_port: u16) -> Router {
+    Router::new()
         .route("/api/snapshot", get(http_snapshot))
+        .route("/api/terminal/list", get(crate::terminal::http_list))
+        .route("/api/terminal/start", post(crate::terminal::http_start))
+        .route("/api/terminal/output", get(crate::terminal::http_output))
+        .route("/api/terminal/write", post(crate::terminal::http_write))
+        .route("/api/terminal/resize", post(crate::terminal::http_resize))
+        .route("/api/terminal/stop", post(crate::terminal::http_stop))
+        .route("/api/storage/retry", post(http_retry_storage))
         .route("/api/rescan", post(http_rescan))
         .route("/api/setup", post(crate::setup::http_complete_setup))
         .route("/api/bot/pin", post(crate::setup::http_pin_bot))
         .route("/api/events", get(http_sse_events))
         .route("/api/chat/send", post(http_send_message))
+        .route("/api/chat/preview", post(http_preview_message))
         .route("/api/chat/stop", post(http_stop_chat))
         .route("/api/chat/create", post(http_create_chat))
         .route("/api/chat/update", post(http_update_chat))
         .route("/api/chat/clear", post(http_clear_chat))
+        .route("/api/chat/reset-sessions", post(http_reset_sessions))
         .route("/api/chat/delete", post(http_delete_chat))
         .route("/api/bot/upsert", post(http_upsert_bot))
         .route("/api/bot/delete", post(http_delete_bot))
@@ -94,18 +113,14 @@ pub async fn spawn_local_server(
             bound_port,
             local_request_only,
         ))
-        .with_state(shared.clone());
-
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-
-    Ok((bound_port, shared, event_tx))
+        .with_state(shared)
 }
 
-const APP_ORIGINS: [&str; 4] = [
+const APP_ORIGINS: [&str; 6] = [
     "http://localhost:1420",
     "http://127.0.0.1:1420",
+    "http://localhost:1422",
+    "http://127.0.0.1:1422",
     "tauri://localhost",
     "http://tauri.localhost",
 ];
@@ -154,6 +169,18 @@ fn require_idle(guard: &OmniRuntimeState, chat_id: &str) -> Result<(), String> {
     }
 }
 
+async fn http_retry_storage(State(state): State<SharedOmniState>) -> axum::response::Response {
+    let mut guard = match state.write() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "State lock poisoned").into_response()
+        }
+    };
+    guard.save_execution();
+    guard.emit(OmniStreamEvent::StateUpdated { chat_id: None });
+    Json(guard.snapshot()).into_response()
+}
+
 async fn http_snapshot(State(state): State<SharedOmniState>) -> impl IntoResponse {
     match state.read() {
         Ok(guard) => Json(guard.snapshot()).into_response(),
@@ -187,6 +214,20 @@ async fn http_sse_events(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+async fn http_preview_message(
+    State(state): State<SharedOmniState>,
+    Json(input): Json<SendMessageInput>,
+) -> axum::response::Response {
+    match state
+        .read()
+        .map_err(|_| "State lock poisoned".to_string())
+        .and_then(|g| crate::routing::resolve(&g.store, &input, false))
+    {
+        Ok(plan) => Json(plan).into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
+    }
+}
+
 async fn http_send_message(
     State(state): State<SharedOmniState>,
     Json(input): Json<SendMessageInput>,
@@ -213,7 +254,6 @@ pub fn stop_chat_runs(state: &SharedOmniState, chat_id: &str) -> Result<OmniSnap
         .map_err(|_| "State lock poisoned".to_string())?;
     guard.cancelled_chats.insert(chat_id.to_string());
     // Keep runs visible until the child processes have actually stopped.
-    guard.persist()?;
     guard.emit(OmniStreamEvent::StateUpdated {
         chat_id: Some(chat_id.to_string()),
     });
@@ -233,6 +273,8 @@ async fn http_stop_chat(
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateChatInput {
+    #[serde(default)]
+    pub model_overrides: HashMap<String, Option<String>>,
     pub bot_home: Option<bool>,
     pub title: Option<String>,
     pub subtitle: Option<String>,
@@ -267,9 +309,18 @@ pub fn create_chat_thread(
     participants.retain(|id| seen.insert(id.clone()));
     if participants
         .iter()
-        .any(|id| !guard.store.bots.iter().any(|b| &b.id == id))
+        .any(|id| !guard.store.bots.iter().any(|b| &b.id == id && !b.archived))
     {
         return Err("Unknown participant bot.".into());
+    }
+    for (id, model) in &input.model_overrides {
+        if !participants.contains(id)
+            || model
+                .as_ref()
+                .is_some_and(|m| m.len() > 256 || m.chars().any(char::is_control))
+        {
+            return Err("Choose a valid model for a chat participant.".into());
+        }
     }
     let workspace = if let Some(id) = &input.workspace_id {
         Some(
@@ -302,12 +353,10 @@ pub fn create_chat_thread(
         if participants.len() != 1 || workspace_path.is_some() {
             return Err("A bot conversation needs one bot and no fixed project.".into());
         }
-        if let Some(existing) = guard
-            .store
-            .chats
-            .iter()
-            .find(|c| (c.is_bot_home || c.is_primary) && c.participant_bot_ids == participants)
-        {
+        if let Some(existing) = guard.store.chats.iter().find(|c| {
+            (c.is_bot_home || c.is_primary)
+                && c.owner_bot_id.as_ref().or(c.participant_bot_ids.first()) == participants.first()
+        }) {
             return Ok((existing.clone(), guard.snapshot()));
         }
     }
@@ -358,6 +407,10 @@ pub fn create_chat_thread(
     };
 
     let chat = ChatThread {
+        owner_bot_id: is_bot_home.then(|| participants[0].clone()),
+        model_overrides: input.model_overrides,
+        session_contexts: HashMap::new(),
+        tasks: Vec::new(),
         is_bot_home,
         id: format!("chat_{}", uuid::Uuid::new_v4()),
         title: input
@@ -444,7 +497,7 @@ pub fn update_chat_thread(
         if ids.is_empty()
             || ids
                 .iter()
-                .any(|id| !guard.store.bots.iter().any(|b| &b.id == id))
+                .any(|id| !guard.store.bots.iter().any(|b| &b.id == id && !b.archived))
         {
             return Err("Select existing participant bots.".into());
         }
@@ -458,7 +511,7 @@ pub fn update_chat_thread(
         .store
         .chats
         .iter()
-        .any(|c| c.id == input.chat_id && c.is_primary)
+        .any(|c| c.id == input.chat_id && (c.is_primary || c.is_bot_home))
         && (input.workspace_path.as_ref().is_some_and(|p| !p.is_empty())
             || input.use_worktrees == Some(true))
     {
@@ -481,11 +534,19 @@ pub fn update_chat_thread(
     }
     if let Some(pids) = input.participant_bot_ids {
         if !pids.is_empty() {
-            if !chat.is_primary && pids != chat.participant_bot_ids {
-                chat.is_bot_home = false;
+            let mut pids = pids;
+            if let Some(owner) = &chat.owner_bot_id {
+                if !pids.contains(owner) {
+                    pids.insert(0, owner.clone());
+                }
             }
-            chat.is_group = pids.len() > 1 && !chat.is_primary;
+            let mut seen = std::collections::HashSet::new();
+            pids.retain(|id| seen.insert(id.clone()));
+            chat.is_group = pids.len() > 1 && !chat.is_bot_home && !chat.is_primary;
             chat.participant_bot_ids = pids;
+            chat.native_sessions.clear();
+            chat.session_contexts.clear();
+            chat.last_synced_msg_index.clear();
         }
     }
     if input
@@ -548,17 +609,49 @@ pub fn clear_chat_thread(state: &SharedOmniState, id: &str) -> Result<OmniSnapsh
         .write()
         .map_err(|_| "State lock poisoned".to_string())?;
     require_idle(&guard, id)?;
+    let previous = guard.store.clone();
     if let Some(chat) = guard.store.chats.iter_mut().find(|c| c.id == id) {
         chat.messages.clear();
+        chat.tasks.clear();
+        chat.session_contexts.clear();
         chat.native_sessions.clear();
         chat.last_synced_msg_index.clear();
         chat.updated_at_ms = now_ms();
     }
-    guard.persist()?;
+    guard.persist_or_restore(previous)?;
     guard.emit(OmniStreamEvent::StateUpdated {
         chat_id: Some(id.to_string()),
     });
     Ok(guard.snapshot())
+}
+
+async fn http_reset_sessions(
+    State(state): State<SharedOmniState>,
+    Json(input): Json<IdInput>,
+) -> axum::response::Response {
+    let result = (|| {
+        let mut guard = state.write().map_err(|_| "State lock poisoned")?;
+        require_idle(&guard, &input.id)?;
+        let previous = guard.store.clone();
+        let chat = guard
+            .store
+            .chats
+            .iter_mut()
+            .find(|c| c.id == input.id)
+            .ok_or("Chat not found")?;
+        chat.native_sessions.clear();
+        chat.session_contexts.clear();
+        chat.last_synced_msg_index.clear();
+        guard.persist_or_restore(previous)?;
+        guard.emit(OmniStreamEvent::StateUpdated {
+            chat_id: Some(input.id),
+        });
+        Ok::<_, String>(guard.snapshot())
+    })();
+    match result {
+        Ok(snapshot) => Json(snapshot).into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
+    }
 }
 
 async fn http_clear_chat(
@@ -576,8 +669,22 @@ pub fn delete_chat_thread(state: &SharedOmniState, id: &str) -> Result<OmniSnaps
         .write()
         .map_err(|_| "State lock poisoned".to_string())?;
     require_idle(&guard, id)?;
+    if guard.store.chats.iter().any(|c| c.id == id && c.is_primary) {
+        return Err("The main conversation cannot be deleted. Use Clear history instead.".into());
+    }
+    let previous = guard.store.clone();
     guard.store.chats.retain(|c| c.is_primary || c.id != id);
-    guard.persist()?;
+    for routine in &mut guard.store.routines {
+        if routine.chat_id.as_deref() == Some(id) {
+            routine.enabled = false;
+            routine.chat_id = None;
+            routine.last_error = Some(
+                "The target chat was deleted. Choose another chat before enabling this routine."
+                    .into(),
+            );
+        }
+    }
+    guard.persist_or_restore(previous)?;
     guard.emit(OmniStreamEvent::StateUpdated { chat_id: None });
     Ok(guard.snapshot())
 }
@@ -600,18 +707,7 @@ pub fn upsert_bot_profile(
         .write()
         .map_err(|_| "State lock poisoned".to_string())?;
     crate::state::validate_avatar_image(bot.avatar_image.as_deref())?;
-    if bot.name.trim().is_empty() {
-        return Err("Bot name cannot be empty.".into());
-    }
-    if guard
-        .store
-        .bots
-        .iter()
-        .any(|b| b.id != bot.id && b.name.eq_ignore_ascii_case(bot.name.trim()))
-    {
-        return Err("Bot names must be unique so handoffs have one recipient.".into());
-    }
-    bot.name = bot.name.trim().to_string();
+    crate::lifecycle::validate_profile(&guard.store, &mut bot)?;
     if bot
         .max_turn_budget_usd
         .is_some_and(|b| !b.is_finite() || b <= 0.0)
@@ -619,13 +715,25 @@ pub fn upsert_bot_profile(
         return Err("Bot budget must be a positive finite number.".into());
     }
     for chat in &guard.store.chats {
-        if chat.participant_bot_ids.contains(&bot.id) {
+        let project_member = guard.store.workspaces.iter().any(|p| {
+            Some(&p.path) == chat.workspace_path.as_ref() && p.assigned_bot_ids.contains(&bot.id)
+        });
+        if chat.participant_bot_ids.contains(&bot.id) || project_member {
             require_idle(&guard, &chat.id)?;
         }
     }
     let previous_store = guard.store.clone();
     if let Some(existing) = guard.store.bots.iter().find(|b| b.id == bot.id) {
         bot.is_primary = existing.is_primary;
+        if bot.is_primary {
+            bot.archived = false;
+        }
+        if existing.cli_driver != bot.cli_driver {
+            bot.custom_command = None;
+            if bot.model == existing.model {
+                bot.model = None;
+            }
+        }
         if existing.name != bot.name
             || existing.role_title != bot.role_title
             || existing.permission_mode != bot.permission_mode
@@ -644,44 +752,6 @@ pub fn upsert_bot_profile(
     } else {
         bot.is_primary = false;
     }
-    if bot.id.trim().is_empty() {
-        bot.id = format!("bot_custom_{}", uuid::Uuid::new_v4());
-    }
-    let base_slug = if bot.slug.trim().is_empty() {
-        bot.name
-            .to_lowercase()
-            .chars()
-            .map(|c| if c.is_alphanumeric() { c } else { '-' })
-            .collect::<String>()
-            .trim_matches('-')
-            .to_string()
-    } else {
-        bot.slug
-            .to_lowercase()
-            .chars()
-            .map(|c| if c.is_alphanumeric() { c } else { '-' })
-            .collect::<String>()
-            .trim_matches('-')
-            .to_string()
-    };
-    let clean_base = if base_slug.is_empty() {
-        "bot".to_string()
-    } else {
-        base_slug
-    };
-    let mut candidate_slug = clean_base.clone();
-    let mut suffix = 2u32;
-    while guard
-        .store
-        .bots
-        .iter()
-        .any(|b| b.id != bot.id && b.slug.eq_ignore_ascii_case(&candidate_slug))
-    {
-        candidate_slug = format!("{clean_base}-{suffix}");
-        suffix += 1;
-    }
-    bot.slug = candidate_slug;
-
     guard.store.dismissed_bot_ids.retain(|d| d != &bot.id);
     if let Some(existing) = guard.store.bots.iter_mut().find(|b| b.id == bot.id) {
         *existing = bot.clone();
@@ -689,8 +759,11 @@ pub fn upsert_bot_profile(
         for chat in &mut guard.store.chats {
             if !chat.is_group
                 && (chat.is_primary || chat.is_bot_home)
-                && chat.participant_bot_ids.len() == 1
-                && chat.participant_bot_ids[0] == bot.id
+                && chat
+                    .owner_bot_id
+                    .as_ref()
+                    .or(chat.participant_bot_ids.first())
+                    == Some(&bot.id)
             {
                 chat.title = bot.name.clone();
                 chat.subtitle = format!("{} · {}", bot.role_title, bot.cli_driver.display_name());
@@ -702,6 +775,10 @@ pub fn upsert_bot_profile(
         if !guard.store.chats.iter().any(|c| c.id == direct_id) {
             let max_turns = guard.store.preferences.default_max_swarm_turns;
             guard.store.chats.push(ChatThread {
+                owner_bot_id: Some(bot.id.clone()),
+                model_overrides: HashMap::new(),
+                session_contexts: HashMap::new(),
+                tasks: Vec::new(),
                 is_bot_home: true,
                 id: direct_id,
                 title: bot.name.clone(),
@@ -746,47 +823,42 @@ pub fn delete_bot_profile(state: &SharedOmniState, id: &str) -> Result<OmniSnaps
         return Err("The primary coordinator cannot be deleted.".into());
     }
     for chat in &guard.store.chats {
-        if chat.participant_bot_ids.iter().any(|b| b == id) {
+        let project_member = guard.store.workspaces.iter().any(|p| {
+            Some(&p.path) == chat.workspace_path.as_ref()
+                && p.assigned_bot_ids.iter().any(|b| b == id)
+        });
+        if chat.participant_bot_ids.iter().any(|b| b == id) || project_member {
             require_idle(&guard, &chat.id)?;
         }
     }
-    for workspace in &mut guard.store.workspaces {
-        workspace.assigned_bot_ids.retain(|b| b != id);
-        if workspace.lead_bot_id.as_deref() == Some(id) {
-            workspace.lead_bot_id = None;
+    let previous = guard.store.clone();
+    let bot = guard
+        .store
+        .bots
+        .iter_mut()
+        .find(|b| b.id == id)
+        .ok_or("Bot not found")?;
+    bot.archived = true;
+    for project in &mut guard.store.workspaces {
+        project.assigned_bot_ids.retain(|bot_id| bot_id != id);
+        if project.lead_bot_id.as_deref() == Some(id) {
+            project.lead_bot_id = None;
         }
     }
     guard
         .store
         .preferences
         .pinned_bot_ids
-        .retain(|bot_id| bot_id != id);
-    guard.store.routines.retain(|r| r.bot_id != id);
-    for chat in &mut guard.store.chats {
-        chat.native_sessions.remove(id);
-        chat.last_synced_msg_index.remove(id);
-    }
-    if !guard.store.dismissed_bot_ids.contains(&id.to_string()) {
-        guard.store.dismissed_bot_ids.push(id.to_string());
-    }
-    guard.store.bots.retain(|b| b.is_primary || b.id != id);
-    guard.store.chats.retain(|c| {
-        c.is_primary
-            || !(!c.is_group && c.participant_bot_ids.len() == 1 && c.participant_bot_ids[0] == id)
-    });
-    for c in &mut guard.store.chats {
-        c.participant_bot_ids.retain(|bid| bid != id);
-        if c.participant_bot_ids.is_empty() {
-            c.participant_bot_ids.push("bot-omni".to_string());
+        .retain(|bid| bid != id);
+    for routine in &mut guard.store.routines {
+        if routine.bot_id == id {
+            routine.enabled = false;
+            routine.last_error = Some(
+                "The selected bot is archived. Restore it before enabling this routine.".into(),
+            );
         }
     }
-    for w in &mut guard.store.workspaces {
-        w.assigned_bot_ids.retain(|bid| bid != id);
-        if w.lead_bot_id.as_deref() == Some(id) {
-            w.lead_bot_id = Some("bot-omni".to_string());
-        }
-    }
-    guard.persist()?;
+    guard.persist_or_restore(previous)?;
     guard.emit(OmniStreamEvent::StateUpdated { chat_id: None });
     Ok(guard.snapshot())
 }
@@ -808,6 +880,9 @@ pub fn update_omni_preferences(
     let mut guard = state
         .write()
         .map_err(|_| "State lock poisoned".to_string())?;
+    if !prefs.workflow_budget_usd.is_finite() || prefs.workflow_budget_usd <= 0.0 {
+        return Err("Workflow budget must be a positive finite number.".into());
+    }
     prefs.default_max_swarm_turns = prefs.default_max_swarm_turns.clamp(1, 8);
     prefs.max_context_messages = prefs.max_context_messages.clamp(2, 24);
     prefs.max_message_chars = prefs.max_message_chars.clamp(400, 6000);
@@ -817,6 +892,17 @@ pub fn update_omni_preferences(
         prefs.max_turn_budget_usd = 1.50;
     }
 
+    if !guard.active_workflows.is_empty()
+        && (guard.store.preferences.workflow_budget_usd != prefs.workflow_budget_usd
+            || guard.store.preferences.max_turn_budget_usd != prefs.max_turn_budget_usd
+            || guard.store.preferences.max_parallel_bots != prefs.max_parallel_bots
+            || guard.store.preferences.only_explicit_handoffs != prefs.only_explicit_handoffs
+            || guard.store.preferences.max_context_messages != prefs.max_context_messages
+            || guard.store.preferences.max_message_chars != prefs.max_message_chars
+            || guard.store.preferences.turn_timeout_secs != prefs.turn_timeout_secs)
+    {
+        return Err("Finish running chats before changing execution limits.".into());
+    }
     let previous = guard.store.clone();
     if guard.store.preferences.shared_memories != prefs.shared_memories
         || guard.store.preferences.global_instructions != prefs.global_instructions
@@ -868,6 +954,11 @@ pub fn upsert_workspace_entry(
     if ws.id.trim().is_empty() {
         ws.id = format!("ws_{}", uuid::Uuid::new_v4());
     }
+    for id in ws.assigned_bot_ids.iter().chain(ws.lead_bot_id.iter()) {
+        if !guard.store.bots.iter().any(|b| &b.id == id && !b.archived) {
+            return Err("Choose existing, active project bots.".into());
+        }
+    }
     let existing = guard.store.workspaces.iter().find(|p| p.id == ws.id);
     let old_path = existing.map(|p| p.path.clone());
     let context_changed = existing.is_some_and(|p| {
@@ -875,10 +966,14 @@ pub fn upsert_workspace_entry(
             || p.memories != ws.memories
             || p.instructions != ws.instructions
             || p.approve_all_tools != ws.approve_all_tools
+            || p.use_worktrees_default != ws.use_worktrees_default
+            || p.assigned_bot_ids != ws.assigned_bot_ids
+            || p.lead_bot_id != ws.lead_bot_id
     });
-    if context_changed {
+    if context_changed || existing.is_none() {
         for chat in &guard.store.chats {
             if chat.workspace_id.as_ref() == Some(&ws.id)
+                || chat.workspace_path.as_deref() == Some(&ws.path)
                 || (old_path.is_some() && chat.workspace_path == old_path)
             {
                 require_idle(&guard, &chat.id)?;
@@ -980,6 +1075,8 @@ pub fn upsert_routine_entry(
         routine.id = format!("routine_{}", uuid::Uuid::new_v4());
     }
     if let Some(existing) = guard.store.routines.iter().find(|r| r.id == routine.id) {
+        routine.workflow_id = existing.workflow_id.clone();
+        routine.run_status = existing.run_status.clone();
         routine.last_run_ms = existing.last_run_ms;
         routine.last_attempt_ms = existing.last_attempt_ms;
         routine.last_error = existing.last_error.clone();
@@ -1015,8 +1112,9 @@ pub fn delete_routine_entry(state: &SharedOmniState, id: &str) -> Result<OmniSna
     let mut guard = state
         .write()
         .map_err(|_| "State lock poisoned".to_string())?;
+    let previous = guard.store.clone();
     guard.store.routines.retain(|r| r.id != id);
-    guard.persist()?;
+    guard.persist_or_restore(previous)?;
     guard.emit(OmniStreamEvent::StateUpdated { chat_id: None });
     Ok(guard.snapshot())
 }
@@ -1042,6 +1140,7 @@ async fn http_computer_overview(State(state): State<SharedOmniState>) -> impl In
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PathQuery {
+    task_id: Option<String>,
     chat_id: Option<String>,
     path: Option<String>,
     query: Option<String>,
@@ -1118,27 +1217,85 @@ async fn http_open_item(
     }
 }
 
-fn git_root(state: &SharedOmniState, chat_id: Option<&str>) -> Result<String, String> {
+pub fn git_root(
+    state: &SharedOmniState,
+    chat_id: Option<&str>,
+    task_id: Option<&str>,
+) -> Result<String, String> {
     let guard = state.read().map_err(|_| "State lock poisoned")?;
-    match chat_id {
-        Some(id) => guard
-            .store
-            .chats
+    let id = chat_id.ok_or("Select a chat before inspecting Git.")?;
+    let chat = guard
+        .store
+        .chats
+        .iter()
+        .find(|c| c.id == id)
+        .ok_or("Chat not found")?;
+    if let Some(task_id) = task_id {
+        return chat
+            .tasks
             .iter()
-            .find(|c| c.id == id)
-            .ok_or("Chat not found")?
-            .workspace_path
-            .clone()
-            .ok_or("Choose a project for this chat.".into()),
-        None => Ok(guard.store.preferences.workspace_root.clone()),
+            .find(|t| t.id == task_id)
+            .and_then(|t| t.workspace_path.clone())
+            .ok_or("This task has no working folder.".into());
     }
+    chat.workspace_path
+        .clone()
+        .ok_or("Choose a project for this chat.".into())
 }
+
+pub async fn git_commit(
+    state: SharedOmniState,
+    chat_id: String,
+    task_id: Option<String>,
+    message: String,
+) -> Result<OmniSnapshot, String> {
+    let root = git_root(&state, Some(&chat_id), task_id.as_deref())?;
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let _lease = crate::execution::acquire(state.clone(), &chat_id, &operation_id, &root).await?;
+    tokio::task::spawn_blocking(move || git_stage_and_commit(&root, &message))
+        .await
+        .map_err(|e| e.to_string())??;
+    let guard = state.read().map_err(|_| "State lock poisoned")?;
+    guard.emit(OmniStreamEvent::StateUpdated {
+        chat_id: Some(chat_id),
+    });
+    Ok(guard.snapshot())
+}
+
+pub async fn git_discard(
+    state: SharedOmniState,
+    chat_id: String,
+    task_id: Option<String>,
+    file_path: String,
+) -> Result<OmniSnapshot, String> {
+    let root = git_root(&state, Some(&chat_id), task_id.as_deref())?;
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let _lease = crate::execution::acquire(state.clone(), &chat_id, &operation_id, &root).await?;
+    tokio::task::spawn_blocking(move || git_discard_file(&root, &file_path))
+        .await
+        .map_err(|e| e.to_string())??;
+    let guard = state.read().map_err(|_| "State lock poisoned")?;
+    guard.emit(OmniStreamEvent::StateUpdated {
+        chat_id: Some(chat_id),
+    });
+    Ok(guard.snapshot())
+}
+
 async fn http_git_status(
     State(state): State<SharedOmniState>,
     Query(q): Query<PathQuery>,
 ) -> axum::response::Response {
-    match git_root(&state, q.chat_id.as_deref()) {
-        Ok(root) => Json(crate::git_ops::inspect_git_status(&root)).into_response(),
+    match git_root(&state, q.chat_id.as_deref(), q.task_id.as_deref()) {
+        Ok(root) => {
+            match tokio::task::spawn_blocking(move || crate::git_ops::inspect_git_status(&root))
+                .await
+            {
+                Ok(status) => Json(status).into_response(),
+                Err(error) => {
+                    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+                }
+            }
+        }
         Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
     }
 }
@@ -1147,12 +1304,16 @@ async fn http_git_diff(
     State(state): State<SharedOmniState>,
     Query(q): Query<PathQuery>,
 ) -> impl IntoResponse {
-    let root = match git_root(&state, q.chat_id.as_deref()) {
+    let root = match git_root(&state, q.chat_id.as_deref(), q.task_id.as_deref()) {
         Ok(root) => root,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
     let file_path = q.path.unwrap_or_default();
-    match read_file_diff(&root, &file_path) {
+    match tokio::task::spawn_blocking(move || read_file_diff(&root, &file_path))
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r)
+    {
         Ok(diff) => Json(serde_json::json!({ "diff": diff })).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
@@ -1161,6 +1322,7 @@ async fn http_git_diff(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GitCommitBody {
+    task_id: Option<String>,
     chat_id: Option<String>,
     message: String,
 }
@@ -1169,22 +1331,23 @@ async fn http_git_commit(
     State(state): State<SharedOmniState>,
     Json(body): Json<GitCommitBody>,
 ) -> impl IntoResponse {
-    let root = match git_root(&state, body.chat_id.as_deref()) {
-        Ok(root) => root,
-        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
-    };
-    if let Err(e) = git_stage_and_commit(&root, &body.message) {
-        return (StatusCode::BAD_REQUEST, e).into_response();
-    }
-    match state.read() {
-        Ok(guard) => Json(guard.snapshot()).into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "State lock poisoned").into_response(),
+    match git_commit(
+        state,
+        body.chat_id.unwrap_or_default(),
+        body.task_id,
+        body.message,
+    )
+    .await
+    {
+        Ok(snapshot) => Json(snapshot).into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
     }
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GitDiscardBody {
+    task_id: Option<String>,
     chat_id: Option<String>,
     file_path: String,
 }
@@ -1193,16 +1356,16 @@ async fn http_git_discard(
     State(state): State<SharedOmniState>,
     Json(body): Json<GitDiscardBody>,
 ) -> impl IntoResponse {
-    let root = match git_root(&state, body.chat_id.as_deref()) {
-        Ok(root) => root,
-        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
-    };
-    if let Err(e) = git_discard_file(&root, &body.file_path) {
-        return (StatusCode::BAD_REQUEST, e).into_response();
-    }
-    match state.read() {
-        Ok(guard) => Json(guard.snapshot()).into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "State lock poisoned").into_response(),
+    match git_discard(
+        state,
+        body.chat_id.unwrap_or_default(),
+        body.task_id,
+        body.file_path,
+    )
+    .await
+    {
+        Ok(snapshot) => Json(snapshot).into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
     }
 }
 
@@ -1264,6 +1427,54 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn real_http_lifecycle_executes_fake_cli_and_preserves_archived_history() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let f = Fixture::new(&["A"]);
+        f.script("A", "echo HTTP_FIXTURE_RESULT");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = local_router(f.state.clone(), port);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        async fn request(port: u16, path: &str, body: &str) -> String {
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            stream.write_all(format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).await.unwrap();
+            String::from_utf8(bytes).unwrap()
+        }
+        let result = request(
+            port,
+            "/api/chat/send",
+            r#"{"chatId":"room","text":"Run fixture"}"#,
+        )
+        .await;
+        assert!(result.starts_with("HTTP/1.1 200"), "{result}");
+        f.wait().await;
+        let result = request(port, "/api/bot/delete", r#"{"id":"A"}"#).await;
+        assert!(result.starts_with("HTTP/1.1 200"), "{result}");
+        let snapshot: OmniSnapshot =
+            serde_json::from_str(result.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert!(snapshot.bots[0].archived);
+        assert!(snapshot.chats[0]
+            .messages
+            .iter()
+            .any(|m| m.text == "HTTP_FIXTURE_RESULT"));
+        assert_eq!(snapshot.chats[0].tasks[0].status, "complete");
+        assert!(request(
+            port,
+            "/api/chat/send",
+            r#"{"chatId":"room","text":"Do not run"}"#
+        )
+        .await
+        .starts_with("HTTP/1.1 400"));
+        server.abort();
+    }
+
     #[test]
     fn control_api_rejects_foreign_origins_and_rebinding_hosts() {
         let mut h = axum::http::HeaderMap::new();
@@ -1308,6 +1519,7 @@ mod tests {
     fn personal_chats_never_inherit_global_project_and_explicit_projects_register() {
         let f = Fixture::new(&["A"]);
         let input = |path: Option<String>| CreateChatInput {
+            model_overrides: HashMap::new(),
             bot_home: None,
             title: None,
             subtitle: None,
@@ -1318,13 +1530,13 @@ mod tests {
         };
         let (home, _) = create_chat_thread(&f.state, input(None)).unwrap();
         assert!(home.workspace_path.is_none() && home.workspace_id.is_none());
-        assert!(git_root(&f.state, Some(&home.id)).is_err());
+        assert!(git_root(&f.state, Some(&home.id), None).is_err());
         let (work, _) =
             create_chat_thread(&f.state, input(Some(f.dir.to_string_lossy().into_owned())))
                 .unwrap();
         assert!(work.workspace_id.is_some());
         assert_eq!(
-            git_root(&f.state, Some(&work.id)).unwrap(),
+            git_root(&f.state, Some(&work.id), None).unwrap(),
             std::fs::canonicalize(&f.dir).unwrap().to_string_lossy()
         );
         assert!(create_chat_thread(
@@ -1382,6 +1594,7 @@ mod tests {
     fn bot_conversations_are_unique_and_do_not_reuse_or_rename_tasks() {
         let f = Fixture::new(&["A"]);
         let request = |home| CreateChatInput {
+            model_overrides: HashMap::new(),
             bot_home: Some(home),
             title: Some("A task".into()),
             subtitle: None,

@@ -1,6 +1,7 @@
 import { SidebarSections } from "./SidebarSections";
 import {
   Blocks,
+  TerminalSquare,
   Copy,
   Palette,
   Pin,
@@ -35,6 +36,8 @@ export interface AppSidebarProps {
   onNewProject: () => void;
   collapsed: boolean;
   setupMode?: boolean;
+  terminalOpen?: boolean;
+  onToggleTerminal?: () => void;
   onCollapsedChange: (collapsed: boolean) => void;
   primaryBot: BotProfile;
   bots: BotProfile[];
@@ -212,12 +215,16 @@ export function AppSidebar(props: AppSidebarProps) {
       return false;
     }
     return (
-      activeChatObj.participantBotIds.length === 1 &&
-      activeChatObj.participantBotIds[0] === bot.id
+      (activeChatObj.ownerBotId ?? activeChatObj.participantBotIds[0]) === bot.id
     );
   };
 
   const isPrimaryStreaming = activeRuns.some((r) => r.botId === primaryBot.id);
+  const terminalButton = <button type="button" aria-label="Toggle terminal" aria-pressed={props.terminalOpen} title="Terminal (⌘`)" onClick={props.onToggleTerminal}
+    className={`flex items-center justify-center gap-2.5 rounded-full border border-white/[0.06] text-zinc-300 hover:text-white hover:bg-[#282828] active:scale-95 transition-colors pointer-events-auto w-11 h-11 shrink-0 ${props.terminalOpen ? "bg-[#282828] text-white" : "bg-[#1f1f1f]"}`}>
+    <TerminalSquare size={18} />
+  </button>;
+
 
   return (
     <aside
@@ -366,6 +373,7 @@ export function AppSidebar(props: AppSidebarProps) {
       {/* Bottom Dock: Omnibot Hub + CLI Harnesses Pill */}
       {setupMode ? null : collapsed ? (
         <div className="relative z-20 flex flex-col items-center gap-3 pb-4 pt-2">
+          {terminalButton}
           <button
             type="button"
             onClick={onNewChatOrSwarm}
@@ -393,6 +401,7 @@ export function AppSidebar(props: AppSidebarProps) {
         </div>
       ) : (
         <div className="absolute bottom-0 inset-x-0 z-20 px-4 pb-4 pt-2 flex items-center gap-2.5 pointer-events-none">
+          {terminalButton}
           <button
             type="button"
             onClick={onOpenSetup}
@@ -420,6 +429,7 @@ export function AppSidebar(props: AppSidebarProps) {
           </button>
         </div>
       )}
+
 
       {/* Right-Click Context Menu Popover */}
       {contextMenu && (
@@ -486,7 +496,7 @@ export function AppSidebar(props: AppSidebarProps) {
                     className="w-full px-2.5 py-1.5 rounded-xl flex items-center gap-2.5 text-xs text-red-400 hover:text-red-300 hover:bg-red-500/15 transition-colors"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
-                    <span>Delete Bot</span>
+                    <span>Archive Bot</span>
                   </button>
                 </>
               )}

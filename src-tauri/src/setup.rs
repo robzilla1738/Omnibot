@@ -138,6 +138,16 @@ pub fn complete_setup(state: &SharedOmniState, input: SetupInput) -> Result<Omni
             chat.use_worktrees = false;
         }
     }
+    let mut primary = store
+        .bots
+        .iter()
+        .find(|b| b.is_primary)
+        .cloned()
+        .ok_or("Main bot not found")?;
+    crate::lifecycle::validate_profile(&store, &mut primary)?;
+    if let Some(saved) = store.bots.iter_mut().find(|b| b.is_primary) {
+        *saved = primary;
+    }
     import_cli_bots(&mut store, &selected);
     // Selecting a CLI explicitly adds its individual bot to the sidebar.
     // Preserve unrelated pins and keep repeated setup idempotent.
@@ -173,6 +183,9 @@ pub fn pin_bot(state: &SharedOmniState, input: PinBotInput) -> Result<OmniSnapsh
         .iter()
         .find(|b| b.id == input.bot_id)
         .ok_or("Bot not found")?;
+    if bot.archived {
+        return Err("Restore this bot before pinning it.".into());
+    }
     if bot.is_primary {
         return Err("The main bot is always visible.".into());
     }
@@ -270,6 +283,36 @@ mod tests {
         .unwrap();
         assert_eq!(saved["preferences"]["onboardingCompleted"], true);
     }
+    #[test]
+    fn discovered_bots_inherit_cli_models_without_overwriting_saved_choices() {
+        let f = fixture();
+        let mut g = f.state.write().unwrap();
+        let mut harnesses = g.harnesses.clone();
+        for h in &mut harnesses {
+            h.models = vec!["catalog-model".into()];
+        }
+        import_cli_bots(&mut g.store, &harnesses);
+        let bot = g
+            .store
+            .bots
+            .iter_mut()
+            .find(|b| b.id == "bot-codex")
+            .unwrap();
+        assert!(bot.model.is_none());
+        bot.model = Some("chosen-model".into());
+        import_cli_bots(&mut g.store, &harnesses);
+        assert_eq!(
+            g.store
+                .bots
+                .iter()
+                .find(|b| b.id == "bot-codex")
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("chosen-model")
+        );
+    }
+
     #[test]
     fn setup_with_no_selected_tools_preserves_a_single_main_bot() {
         let f = fixture();

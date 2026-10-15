@@ -48,7 +48,7 @@ export function SidebarSections(props: AppSidebarProps & { customizationHost: HT
   const items: Record<Section, Item[]> = {
     bots: (layout.view === "bots" ? props.bots.filter(b => !b.isPrimary).map(b => b.id) : props.pinnedBotIds).flatMap(id => {
       const bot = props.bots.find(b => b.id === id && !b.isPrimary); if (!bot) return [];
-      const direct = props.chats.filter(c => !c.isPrimary && c.isBotHome && !c.isGroup && c.participantBotIds.length === 1 && c.participantBotIds[0] === id).sort((a,b) => b.updatedAtMs-a.updatedAtMs);
+      const direct = props.chats.filter(c => !c.isPrimary && c.isBotHome && (c.ownerBotId ?? c.participantBotIds[0]) === id).sort((a,b) => b.updatedAtMs-a.updatedAtMs);
       const running = props.activeRuns.some(r => r.botId === id);
       return [{ id, name: bot.name, detail: running ? "Thinking…" : direct[0]?.messages.filter(m => m.text.trim()).at(-1)?.text.replace(/[#*_`]/g, "").replace(/\s+/g, " ") || bot.roleTitle || "Start a conversation", updated: direct[0]?.updatedAtMs ?? 0, active: direct.some(c => c.id === props.activeChatId), icon: <BotCharacterAvatar bot={bot} size={40} isStreaming={running} />, open: () => props.onSelectBotDirectChat(bot), rename: (name: string) => props.onUpsertBot({ ...bot, name }), remove: async () => { if (props.pinnedBotIds.includes(id)) await props.onTogglePin(bot); if (layout.view === "bots") toggle("hidden", `bots:${id}`); } }];
     }),
@@ -112,7 +112,7 @@ export function SidebarSections(props: AppSidebarProps & { customizationHost: HT
         <button disabled={saving} title="Remove from sidebar; keep history and files" onClick={() => { if (menuItem.remove) void run(menuItem.remove); else { toggle("hidden",menu!); setMenu(null); } }} className="w-full text-left px-3 py-2 rounded-xl hover:bg-white/5 text-zinc-400">Remove</button>
       </>}
     </div>, props.customizationHost)}
-    <div data-sidebar-scroll className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden sidebar-scroll-mask space-y-5 pt-4 pb-24">
+    <div data-sidebar-scroll className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden sidebar-scroll-mask space-y-5 pt-4 pb-20">
     {layout.sections.filter(section => (layout.view === "all" ? !layout.hidden.includes(section) : layout.view === section)).map(section => {
       const rows = sorted(section).filter(item => !layout.hidden.includes(`${section}:${item.id}`)); const closed = layout.collapsed.includes(section);
       if (rows.length === 0 && layout.view === "all") return null;

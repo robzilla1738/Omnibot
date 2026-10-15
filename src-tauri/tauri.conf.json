@@ -54,6 +54,8 @@
       "../licenses/T3-Code-MIT.txt": "licenses/T3-Code-MIT.txt",
       "../licenses/Lucide-ISC.txt": "licenses/Lucide-ISC.txt",
       "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "../licenses/xterm-MIT.txt": "licenses/xterm-MIT.txt",
+      "../licenses/portable-pty-MIT.txt": "licenses/portable-pty-MIT.txt",
       "../licenses/Sparkle.txt": "licenses/Sparkle.txt"
     }
   },

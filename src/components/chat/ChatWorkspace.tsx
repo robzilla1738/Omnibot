@@ -1,3 +1,4 @@
+import { previewOmniMessage } from "../../lib/omni-bridge";
 import { Collapse } from "../ui/Collapse";
 import { BotModelSelect } from "../bots/BotModelSelect";
 import DOMPurify from "dompurify";
@@ -37,7 +38,8 @@ import {
 
 export interface ChatWorkspaceProps {
   chat: ChatThread;
-  onChooseProject: () => void;
+  initialDraft?: string;
+  onChooseProject: (prompt?: string) => void;
   onManageTeam: () => void;
   onOpenMemory: () => void;
   bots: BotProfile[];
@@ -45,6 +47,9 @@ export interface ChatWorkspaceProps {
   skills: LocalSkillItem[];
   activeRuns: ActiveBotRun[];
   workflowActive: boolean;
+  terminalControlActive?: boolean;
+  summarizeTeamResults?: boolean;
+  onOpenTerminal?: () => void;
   defaultSpeakerId: string;
   inspectorOpen: boolean;
   onToggleInspector: () => void;
@@ -56,6 +61,7 @@ export interface ChatWorkspaceProps {
     overrideModel?: string;
     overrideEffort?: string;
     parallelMode?: boolean;
+  summarize?: boolean;
   }) => Promise<void>;
   onStopChat: () => Promise<void>;
 }
@@ -74,6 +80,12 @@ const SWARM_SLASH_COMMANDS = [
     prefix: "/race ",
   },
   {
+    slug: "team",
+    name: "Project team",
+    description: "Explicitly invite the bots assigned to this project",
+    prefix: "/team ",
+  },
+  {
     slug: "review",
     name: "Cross-Bot Code Review",
     description: "Have @Claude and @Codex cross-review uncommitted git changes",
@@ -84,12 +96,16 @@ const SWARM_SLASH_COMMANDS = [
 
 export function ChatWorkspace({
   chat,
+  initialDraft = "",
   onChooseProject, onManageTeam, onOpenMemory,
   bots,
   harnesses,
   skills,
   activeRuns,
   workflowActive,
+  terminalControlActive = false,
+  summarizeTeamResults: summarize = false,
+  onOpenTerminal,
   defaultSpeakerId,
   inspectorOpen,
   onToggleInspector,
@@ -97,7 +113,7 @@ export function ChatWorkspace({
   onSendMessage,
   onStopChat,
 }: ChatWorkspaceProps) {
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState(initialDraft);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const sendPending = useRef(false);
@@ -117,19 +133,29 @@ export function ChatWorkspace({
   const composerInputRef = useRef<HTMLInputElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
+  const composerAreaRef = useRef<HTMLDivElement | null>(null);
+  const [composerHeight, setComposerHeight] = useState(120);
+  const [visibleMessageCount, setVisibleMessageCount] = useState(200);
+  useEffect(() => {
+    const element = composerAreaRef.current;
+    if (!element) return;
+    const observer = new ResizeObserver(() => setComposerHeight(element.offsetHeight));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
 
   const chatParticipants = useMemo(() => {
     const list = chat.participantBotIds
       .map((id) => bots.find((b) => b.id === id))
-      .filter((b): b is BotProfile => Boolean(b));
-    return list.length > 0 ? list : [bots[0]].filter(Boolean);
+      .filter((b): b is BotProfile => Boolean(b) && !b?.archived);
+    return list;
   }, [chat.participantBotIds, bots]);
 
   const activeSpeakerBot = useMemo(() => {
     if (overrideBotId) {
-      return bots.find((b) => b.id === overrideBotId) ?? chatParticipants[0];
+      return bots.find((b) => b.id === overrideBotId && !b.archived) ?? chatParticipants[0];
     }
-    return bots.find((b) => b.id === defaultSpeakerId) ?? chatParticipants[0];
+    return bots.find((b) => b.id === defaultSpeakerId && !b.archived) ?? chatParticipants[0];
   }, [overrideBotId, bots, chatParticipants, defaultSpeakerId]);
 
   useEffect(() => {
@@ -137,6 +163,22 @@ export function ChatWorkspace({
     const effort = activeSpeakerBot?.reasoningEffort;
     setReasoningEffort(effort === "low" || effort === "high" ? effort : "medium");
   }, [activeSpeakerBot?.id, activeSpeakerBot?.cliDriver, activeSpeakerBot?.model, activeSpeakerBot?.reasoningEffort]);
+
+  const [routePreview, setRoutePreview] = useState("");
+  useEffect(() => {
+    let disposed = false;
+    if (!input.trim()) { setRoutePreview(""); return; }
+    const timer = setTimeout(() => {
+      previewOmniMessage({ chatId: chat.id, text: input, overrideBotId: activeSpeakerBot?.id, overrideModel, parallelMode })
+        .then(plan => {
+          if (disposed) return;
+          const isCurrentBot = chat.participantBotIds.length === 1 && plan.botIds.length === 1 && plan.botIds[0] === chat.participantBotIds[0];
+          setRoutePreview(isCurrentBot ? "" : `To: ${plan.botIds.map(id => bots.find(b => b.id === id)?.name ?? id).join(", ")}${plan.botIds.length > 1 ? (plan.parallel ? " · Running together" : " · One after another") : ""}`);
+        })
+        .catch(error => { if (!disposed) setRoutePreview(error instanceof Error ? error.message : "Cannot preview recipients"); });
+    }, 200);
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [input, chat.id, chat.participantBotIds, activeSpeakerBot?.id, overrideModel, parallelMode, bots]);
 
   const chatActiveRuns = useMemo(
     () => activeRuns.filter((r) => r.chatId === chat.id),
@@ -210,7 +252,7 @@ export function ChatWorkspace({
     if (!q || "all".includes(q) || "swarm".includes(q) || "everyone".includes(q)) {
       items.push({ kind: "all" });
     }
-    for (const b of bots) {
+    for (const b of bots.filter(bot => !bot.archived)) {
       if (
         !q ||
         b.name.toLowerCase().includes(q) ||
@@ -265,7 +307,7 @@ export function ChatWorkspace({
       } else {
         setInput((prev) =>
           prev
-            .replace(/(?:^|\s)@[a-zA-Z0-9_-]*$/, ` @${entry.bot.name} `)
+            .replace(/(?:^|\s)@[a-zA-Z0-9_-]*$/, ` @${entry.bot.slug} `)
             .trimStart()
         );
       }
@@ -278,6 +320,11 @@ export function ChatWorkspace({
     async (overridePrompt?: string, targetBotId?: string) => {
       const trimmed = (overridePrompt ?? input).trim();
       if (!trimmed || sendPending.current || isStreaming) return;
+      if (!activeSpeakerBot && !targetBotId) { setSendError("Restore this bot in Bot library or choose an active participant."); return; }
+      if (!chat.workspacePath && (/^\/review(?:\s|$)/i.test(trimmed) || (/^(?:please\s+)?(?:inspect|review|audit|check|summarize|examine)\b/i.test(trimmed) && /\b(git (?:diff|status|commits?|changes)|uncommitted (?:changes|diffs)|recent (?:git )?commits)\b/i.test(trimmed)))) {
+        onChooseProject(trimmed);
+        return;
+      }
       sendPending.current = true;
       setSending(true);
       setSendError(null);
@@ -298,6 +345,7 @@ export function ChatWorkspace({
         overrideModel: targetBotId && targetBotId !== activeSpeakerBot?.id ? undefined : overrideModel,
         overrideEffort: reasoningEffort,
         parallelMode: isParallel,
+        summarize,
       });
       } catch (error) {
         if (!overridePrompt) setInput(trimmed);
@@ -310,10 +358,12 @@ export function ChatWorkspace({
       }
     },
     [
+      chat.workspacePath, onChooseProject,
       input,
       isStreaming,
       selectedSkill,
       parallelMode,
+      summarize,
       onSendMessage,
       activeSpeakerBot?.id,
       overrideModel,
@@ -329,7 +379,7 @@ export function ChatWorkspace({
   const isEmpty = chat.messages.length === 0;
 
   return (
-    <main className="motion-chat relative flex-1 h-full bg-[#121212] overflow-hidden">
+    <main className="motion-chat relative flex-1 min-w-0 h-full bg-[#121212] overflow-hidden">
       {/* Top Progressive Blur & Soft Vignette Feather */}
       <div
         aria-hidden
@@ -377,7 +427,7 @@ export function ChatWorkspace({
           </span>
           <span className="bot-header-chevron" aria-hidden="true"><ChevronRight size={18} /></span>
         </button>
-        <button onClick={onChooseProject} title={chat.workspacePath ?? "Start a project work chat"} className="max-w-[260px] truncate rounded-md px-2 py-1 text-[11px] text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04]">
+        <button onClick={() => onChooseProject()} title={chat.workspacePath ?? "Start a project work chat"} className="max-w-[260px] truncate rounded-md px-2 py-1 text-[11px] text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04]">
           {chat.workspacePath ? chat.workspacePath.split("/").filter(Boolean).at(-1) : "Personal space"}
         </button>
       </div>
@@ -386,6 +436,7 @@ export function ChatWorkspace({
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
+        style={isEmpty ? undefined : { paddingBottom: composerHeight + 40 }}
         className={`h-full w-full overflow-y-auto overflow-x-hidden chat-scroll-mask px-6 ${
           isEmpty ? "flex flex-col items-center justify-center" : "pt-28 pb-40"
         }`}
@@ -402,7 +453,8 @@ export function ChatWorkspace({
           />
         ) : (
           <div className="max-w-[740px] mx-auto space-y-5">
-            {chat.messages.map((msg) => (
+            {chat.messages.length > visibleMessageCount && <button type="button" className="text-xs text-zinc-400 hover:text-white" onClick={() => { setIsNearBottom(false); setVisibleMessageCount(count => count + 200); }}>Load earlier messages ({chat.messages.length - visibleMessageCount} remaining)</button>}
+            {chat.messages.slice(-visibleMessageCount).map((msg) => (
               <MessageCard
                 key={msg.id}
                 message={msg}
@@ -417,7 +469,7 @@ export function ChatWorkspace({
               />
             ))}
 
-            {isStreaming && !chat.messages.some(message => message.status === "streaming") && (
+            {isStreaming && !terminalControlActive && !chat.messages.some(message => message.status === "streaming") && (
               <div role="status" className="pl-12 text-[13px] text-zinc-400 flex items-center gap-2">
                 <ThinkingDots />
                 <span>Preparing the next turn</span>
@@ -437,7 +489,7 @@ export function ChatWorkspace({
 
       {/* Floating Jump-to-Latest Pill when scrolled up */}
       {!isEmpty && !isNearBottom && (
-        <div className="absolute bottom-20 inset-x-0 flex justify-center z-20 pointer-events-none">
+        <div className="absolute inset-x-0 flex justify-center z-20 pointer-events-none" style={{ bottom: composerHeight + 8 }}>
           <button
             type="button"
             onClick={() => {
@@ -447,13 +499,13 @@ export function ChatWorkspace({
             className="pointer-events-auto px-3.5 py-1.5 rounded-full liquid-glass-pill text-xs font-medium text-zinc-100 hover:text-white flex items-center gap-1.5 shadow-xl active:scale-95"
           >
             <ArrowDown className="w-3.5 h-3.5 text-[#8cf1fb]" />
-            <span>{isStreaming ? "Streaming below" : "Jump to latest"}</span>
+            <span>{isStreaming && !terminalControlActive ? "Streaming below" : "Jump to latest"}</span>
           </button>
         </div>
       )}
 
       {/* Floating Bottom Composer Area with Liquid Glass */}
-      <div className="absolute bottom-0 inset-x-0 px-5 pb-4 pt-2 z-20 pointer-events-none">
+      <div ref={composerAreaRef} className="absolute bottom-0 inset-x-0 px-5 pb-4 pt-2 z-20 pointer-events-none">
         <div className="max-w-[740px] mx-auto relative pointer-events-auto">
           {/* `/` Slash Command & Skill Autocomplete Popover */}
           {slashMatch && matchingSlashItems.length > 0 && (
@@ -565,6 +617,7 @@ export function ChatWorkspace({
           )}
 
           {/* Active Chips Row */}
+          {routePreview && <p className="text-xs text-zinc-400 px-3 py-1" aria-label="Recipient preview">{routePreview}</p>}
           {(selectedSkill || parallelMode || overrideBotId || overrideModel) && (
             <div className="flex flex-wrap items-center gap-2 mb-2 px-1">
               {parallelMode && (
@@ -644,7 +697,7 @@ export function ChatWorkspace({
                 Route Turn to Bot
               </div>
               <div className="max-h-36 overflow-y-auto space-y-0.5 pr-0.5">
-                {bots.map((b) => {
+                {bots.filter(b => !b.archived).map((b) => {
                   const active = activeSpeakerBot?.id === b.id && !parallelMode;
                   return (
                     <button
@@ -698,7 +751,7 @@ export function ChatWorkspace({
             </div>
 
             {activeSpeakerHarness && <div className="px-2 pt-2">
-              <BotModelSelect label={`${activeSpeakerHarness.name} model`} harness={activeSpeakerHarness} value={overrideModel ?? null} defaultLabel={activeSpeakerBot?.model ? `Bot default (${activeSpeakerBot.model})` : "CLI default"} onChange={model => setOverrideModel(model ?? undefined)} />
+              <BotModelSelect label={`${activeSpeakerHarness.name} model`} harness={activeSpeakerHarness} value={overrideModel ?? null} defaultLabel={activeSpeakerBot && chat.modelOverrides && activeSpeakerBot.id in chat.modelOverrides ? `Chat default (${chat.modelOverrides[activeSpeakerBot.id] ?? "CLI default"})` : activeSpeakerBot?.model ? `Bot default (${activeSpeakerBot.model})` : "CLI default"} onChange={model => setOverrideModel(model ?? undefined)} />
             </div>}
 
             <div className="px-2 pb-1 pt-2">
@@ -709,6 +762,8 @@ export function ChatWorkspace({
                 {(["low", "medium", "high"] as const).map((lvl) => (
                   <button
                     key={lvl}
+                    disabled={!activeSpeakerHarness?.supportsEffort}
+                    title="Available only for adapters that support reasoning effort"
                     type="button"
                     onClick={() => setReasoningEffort(lvl)}
                     className={`py-1.5 rounded-xl text-xs capitalize transition-all ${
@@ -724,6 +779,10 @@ export function ChatWorkspace({
             </div>
           </div>
 
+          {terminalControlActive && <div role="status" className="mb-3 flex items-center justify-center gap-2 text-[11px] text-zinc-400">
+            <span className="h-1.5 w-1.5 rounded-full bg-zinc-400" />Terminal control is active
+            <button className="underline underline-offset-4 hover:text-white" onClick={onOpenTerminal}>Open terminal</button>
+          </div>}
           {/* Main Liquid Glass Pill Composer */}
           <div className="min-h-[48px] rounded-full liquid-glass-pill px-2.5 py-1.5 flex items-center gap-2.5">
             <button
@@ -841,7 +900,7 @@ export function ChatWorkspace({
 function EmptyChatHero({ chat, participants, allBots, onSendStarter, onChooseProject, onManageTeam, onOpenMemory }: {
   chat: ChatThread; participants: BotProfile[]; allBots: BotProfile[];
   onSendStarter: (prompt: string) => void;
-  onChooseProject: () => void; onManageTeam: () => void; onOpenMemory: () => void;
+  onChooseProject: (prompt?: string) => void; onManageTeam: () => void; onOpenMemory: () => void;
 }) {
   const lead = participants[0];
   const second =
@@ -854,7 +913,7 @@ function EmptyChatHero({ chat, participants, allBots, onSendStarter, onChoosePro
       {lead && <BotCharacterAvatar bot={lead} size={84} showStarBadge={lead.isPrimary} showCliBadge={false} />}
       <div className="space-y-3"><h2 className="text-[28px] font-medium text-white">{lead?.name ?? chat.title}</h2><p className="text-[15px] text-zinc-400 leading-relaxed">{chat.isPrimary ? "A place for your ideas, plans, and everything you’re working toward." : `Ask ${lead?.name ?? "your bot"} for help with anything you’re working on.`}</p></div>
       <div className="flex flex-wrap justify-center gap-3">
-        <button onClick={onChooseProject} className="rounded-full bg-white text-black px-5 py-3 text-sm motion-cta">Choose a project</button>
+        <button onClick={() => onChooseProject()} className="rounded-full bg-white text-black px-5 py-3 text-sm motion-cta">Choose a project</button>
         <button onClick={onManageTeam} className="rounded-full liquid-glass-pill px-5 py-3 text-sm">Manage my team</button>
         <button onClick={onOpenMemory} className="rounded-full liquid-glass-pill px-5 py-3 text-sm">Memory</button>
       </div>
@@ -872,15 +931,18 @@ function EmptyChatHero({ chat, participants, allBots, onSendStarter, onChoosePro
     ? [
         {
           label: "Plan & cross-review",
+          requiresProject: false,
           prompt: `@${lead?.name || "Claude"} propose a clean plan for our next task, then hand off to @${second?.name || "Codex"} to review edge cases.`,
         },
         {
-          label: "Parallel Group audit (@all)",
+          label: chat.workspacePath ? "Parallel Group audit (@all)" : "Brainstorm together",
+          requiresProject: !!chat.workspacePath,
           prompt:
-            "@all Inspect this project and share your top 2 highest-leverage improvements.",
+            chat.workspacePath ? "@all Inspect this project and share your top 2 improvements." : "@all Help me plan our next task and identify the questions we should answer first.",
         },
         {
           label: "Review git diff",
+          requiresProject: true,
           prompt:
             "@all Review uncommitted git changes in this repository and flag any bugs.",
         },
@@ -888,15 +950,18 @@ function EmptyChatHero({ chat, participants, allBots, onSendStarter, onChoosePro
     : [
         {
           label: "Summarize project & git status",
+          requiresProject: true,
           prompt:
             "Summarize the architecture of this project and check `git status` for any pending changes.",
         },
         {
           label: `Pair with @${second?.name || "Codex"}`,
+          requiresProject: true,
           prompt: `Audit the codebase for bugs or tech debt, then hand off to @${second?.name || "Codex"} to verify your findings.`,
         },
         {
           label: "Review recent changes",
+          requiresProject: true,
           prompt: "Inspect recent git commits and diffs for any issues.",
         },
       ];
@@ -935,7 +1000,7 @@ function EmptyChatHero({ chat, participants, allBots, onSendStarter, onChoosePro
           <button
             key={s.label}
             type="button"
-            onClick={() => onSendStarter(s.prompt)}
+            onClick={() => chat.workspacePath || !s.requiresProject ? onSendStarter(s.prompt) : onChooseProject(s.prompt)}
             className="px-4 py-2 rounded-full liquid-glass-pill text-[13px] font-medium text-zinc-200 hover:text-white active:scale-95"
           >
             {s.label}
@@ -1017,7 +1082,7 @@ function MessageCard({
       <div className="w-full max-w-[620px] min-w-0 space-y-2">
         <div className="w-full overflow-hidden rounded-2xl liquid-glass-card px-5 py-4 min-h-[100px] text-[15px] text-zinc-100 space-y-3 break-words">
           {/* Bot Identity & CLI Harness Header Bar */}
-          <div className="flex items-center justify-between gap-2 pb-1 ">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pb-1">
             <div className="flex items-center gap-2 min-w-0">
               <button type="button" disabled={!authorBot} aria-label={`Open ${message.authorName || authorBot?.name || "bot"} settings`} onClick={() => authorBot && onOpenBotSettings(authorBot)} className="text-[13.5px] font-semibold text-white truncate rounded-md hover:text-zinc-300">
                 {message.authorName || authorBot?.name || "Bot"}
@@ -1035,7 +1100,7 @@ function MessageCard({
               )}
             </div>
 
-            <div className="flex items-center gap-2 text-[11px] text-[#8e8d8a] shrink-0">
+            <div className="provider-hover-badge inline-flex flex-wrap items-center gap-2 text-[11px] text-[#8e8d8a]">
               {totalTokens != null && (
                 <span title={`CLI reported: ${totalTokens!.toLocaleString()} tokens · Input (including cache): ${message.inputTokens?.toLocaleString()} · Output: ${message.outputTokens?.toLocaleString()}`}>
                   {totalTokens >= 1000
@@ -1054,6 +1119,8 @@ function MessageCard({
               {message.durationMs != null && message.durationMs > 0 && (
                 <span title={`Elapsed CLI execution time: ${message.durationMs.toLocaleString()} ms`}>{(message.durationMs / 1000).toFixed(1)}s</span>
               )}
+            </div>
+            <div className="flex items-center gap-2 text-[11px]">
               {message.status === "streaming" && renderedHtml && !runningTool && (
                 <span role="status" className="inline-flex items-center gap-1.5 text-zinc-400">
                   <span aria-hidden="true" className="h-1 w-1 rounded-full bg-zinc-400" />

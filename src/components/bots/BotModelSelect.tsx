@@ -42,6 +42,7 @@ export function BotModelSelect({ value, harness, onChange, label = "Model", defa
       {models.map(model => <option key={model} value={model}>{harness?.modelLabels?.[model] ? `${harness.modelLabels[model]} · ${model}` : model}</option>)}
       <option value="__custom__">Custom model…</option>
     </NativeSelect>
+    {!value && !custom && defaultLabel === "CLI default" && <p>Uses the model configured in {harness?.name ?? "your CLI"}.</p>}
     {custom && <label className="block space-y-2"><span>Model ID from your CLI</span><input aria-label={`${label} custom ID`} value={draft} onChange={event => setDraft(event.target.value)} onBlur={() => { if (draft.trim()) void save(draft.trim()); }} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); if (draft.trim()) void save(draft.trim()); } }} disabled={disabled || saving} className="w-full rounded-xl border border-white/10 bg-[#1c1c1c] px-3 py-3 text-sm text-zinc-200" /></label>}
     {harness?.modelsStatus === "loading" && <p role="status">Checking models with your CLI…</p>}
     {harness?.modelsStatus === "unavailable" && <p>Model list unavailable. Use your CLI default or enter a model ID.</p>}

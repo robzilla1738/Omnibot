@@ -68,6 +68,8 @@ export interface InspectorDrawerProps {
   projects: WorkspaceEntry[];
   routines: RoutineEntry[];
   gitStatus: GitRepoStatus;
+  gitTaskId?: string;
+  onSelectGitTask: (id: string | undefined) => void;
   preferences: OmniPreferences;
   computerActivity: ComputerActivityEntry[];
   onUpdateChat: (params: {
@@ -78,6 +80,7 @@ export interface InspectorDrawerProps {
     useWorktrees?: boolean;
     maxSwarmTurns?: number;
   }) => Promise<void>;
+  onResetSessions: () => Promise<void>;
   onClearChat: (chatId: string) => Promise<void>;
   onToggleBotInChat: (botId: string) => Promise<void>;
   onUpsertBot: (bot: BotProfile) => Promise<void>;
@@ -106,10 +109,13 @@ export function InspectorDrawer({
   projects,
   routines,
   gitStatus,
+  gitTaskId,
+  onSelectGitTask,
   preferences,
   computerActivity,
   onUpdateChat,
   onClearChat,
+  onResetSessions,
   onToggleBotInChat,
   onUpsertBot,
   onDeleteBot,
@@ -190,7 +196,7 @@ export function InspectorDrawer({
     setSelectedDiffFile(filePath);
     setSelectedDiffContent("Loading diff...");
     try {
-      const diff = await getGitFileDiff(filePath, chat.id);
+      const diff = await getGitFileDiff(filePath, chat.id, gitTaskId);
       setSelectedDiffContent(diff || "(No diff output)");
     } catch (err) {
       setSelectedDiffContent(
@@ -478,7 +484,7 @@ export function InspectorDrawer({
                         className="px-3 py-1.5 rounded-xl bg-red-500/15 hover:bg-red-500/25 text-red-300 text-xs font-medium flex items-center gap-1.5"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
-                        <span>Delete @{activeBot.name}</span>
+                        <span>Archive @{activeBot.name}</span>
                       </button>
                     </div>
                   )}
@@ -648,6 +654,8 @@ export function InspectorDrawer({
                     </div>
                   </div>
 
+                  <button type="button" onClick={() => void onResetSessions()} className="w-full px-4 py-2.5 text-left text-xs text-zinc-400 hover:text-white">Reset CLI sessions · keep conversation history</button>
+                  <p className="px-4 pb-2 text-xs text-zinc-500">Use after changing accounts or settings outside Omnibot.</p>
                   {chat.messages.length > 0 && (
                     <button
                       type="button"
@@ -994,6 +1002,12 @@ export function InspectorDrawer({
                 </div>
               </div>
 
+              {!!chat.tasks?.some(t => t.workspacePath) && <label className="block text-xs text-zinc-400 p-3">Review working folder
+                <select aria-label="Git working folder" className="block w-full bg-zinc-900 p-2 mt-2 rounded" value={gitTaskId ?? ""} onChange={e => onSelectGitTask(e.target.value || undefined)}>
+                  <option value="">Project checkout · {chat.workspacePath}</option>
+                  {chat.tasks.filter((task, index, tasks) => task.workspacePath && tasks.findIndex(other => other.workspacePath === task.workspacePath) === index).map(task => <option key={task.id} value={task.id}>{bots.find(b => b.id === task.botId)?.name ?? task.botId} · {task.workspacePath}</option>)}
+                </select>
+              </label>}
               {gitStatus.worktrees.length > 0 && (
                 <div className="space-y-2">
                   <span className="px-1.5 text-[13.5px] font-normal text-[#8e8d8a] block">

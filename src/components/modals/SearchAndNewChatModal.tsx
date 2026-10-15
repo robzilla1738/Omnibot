@@ -20,9 +20,9 @@ import { BotCharacterAvatar, SkillBrandIcon } from "../icons/BotCharacterAvatar"
 export interface SearchAndNewChatModalProps {
   open: boolean;
   projectRequired?: boolean;
+  initialParticipantBotIds?: string[];
   mode: "search" | "new-chat" | "new-group";
   harnesses: CliHarnessInfo[];
-  onUpsertBot: (bot: BotProfile) => Promise<void>;
   bots: BotProfile[];
   chats: ChatThread[];
   skills: LocalSkillItem[];
@@ -35,6 +35,7 @@ export interface SearchAndNewChatModalProps {
   onCreateSwarmOrChat: (params: {
     title?: string;
     participantBotIds: string[];
+    modelOverrides?: Record<string, string | null>;
     useWorktrees?: boolean;
     workspacePath?: string;
     initialPrompt?: string;
@@ -45,9 +46,9 @@ export interface SearchAndNewChatModalProps {
 export function SearchAndNewChatModal({
   open,
   projectRequired = false,
+  initialParticipantBotIds,
   mode,
   harnesses,
-  onUpsertBot,
   bots,
   chats,
   skills,
@@ -78,14 +79,14 @@ export function SearchAndNewChatModal({
     initialized.current = true;
     setQuery("");
     setGroupChat(mode === "new-group");
-    setSelectedBotIds(mode === "new-group" ? [] : bots.filter(b => b.isPrimary).slice(0, 1).map(b => b.id));
+    setSelectedBotIds(initialParticipantBotIds?.filter(id => bots.some(bot => bot.id === id)) ?? (mode === "new-group" ? [] : bots.filter(b => b.isPrimary).slice(0, 1).map(b => b.id)));
     setModels(Object.fromEntries(bots.map(bot => [bot.id, bot.model ?? null])));
     setUseWorktrees(false);
     setProjectPath(""); setFolderPath("");
     setError("");
     const timer = setTimeout(() => inputRef.current?.focus(), 40);
     return () => clearTimeout(timer);
-  }, [open, mode, bots]);
+  }, [open, mode, bots, initialParticipantBotIds]);
 
   const trimmedQuery = query.trim().toLowerCase();
   const toggleBotSelection = (id: string) => {
@@ -99,11 +100,7 @@ export function SearchAndNewChatModal({
     setSaving(true);
     setError("");
     try {
-      for (const bot of bots.filter(bot => selectedBotIds.includes(bot.id))) {
-        const model = models[bot.id] ?? null;
-        if (model !== (bot.model ?? null)) await onUpsertBot({ ...bot, model });
-      }
-      await onCreateSwarmOrChat({ title: query.trim() || undefined, participantBotIds: selectedBotIds, useWorktrees: groupChat && !!workspacePath && useWorktrees, workspacePath: workspacePath || undefined });
+      await onCreateSwarmOrChat({ title: query.trim() || undefined, participantBotIds: selectedBotIds, modelOverrides: Object.fromEntries(selectedBotIds.map(id => [id, models[id] ?? null])), useWorktrees: groupChat && !!workspacePath && useWorktrees, workspacePath: workspacePath || undefined });
       onClose();
     } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
     finally { submitting.current = false; setSaving(false); }

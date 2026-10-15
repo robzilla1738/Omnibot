@@ -1,4 +1,4 @@
-use crate::git_ops::{inspect_git_status, GitRepoStatus};
+use crate::git_ops::GitRepoStatus;
 use crate::scanner::{
     scan_local_cli_harnesses, scan_local_mcp_servers, scan_local_skills, CliDriverKind,
     CliHarnessInfo, LocalMcpServer, LocalSkillItem,
@@ -14,6 +14,8 @@ use tokio::sync::broadcast;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotProfile {
+    #[serde(default)]
+    pub archived: bool,
     pub id: String,
     pub name: String,
     pub slug: String,
@@ -95,6 +97,14 @@ pub struct ChatMessage {
 #[serde(rename_all = "camelCase")]
 pub struct ChatThread {
     #[serde(default)]
+    pub owner_bot_id: Option<String>,
+    #[serde(default)]
+    pub model_overrides: HashMap<String, Option<String>>,
+    #[serde(default)]
+    pub session_contexts: HashMap<String, String>,
+    #[serde(default)]
+    pub tasks: Vec<WorkflowTask>,
+    #[serde(default)]
     pub is_bot_home: bool,
     pub id: String,
     pub title: String,
@@ -137,6 +147,10 @@ pub struct WorkspaceEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoutineEntry {
+    #[serde(default)]
+    pub workflow_id: Option<String>,
+    #[serde(default)]
+    pub run_status: Option<String>,
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -180,6 +194,10 @@ pub struct ActiveBotRun {
     pub started_at_ms: u64,
 }
 
+fn default_workflow_budget() -> f64 {
+    3.75
+}
+
 fn default_max_context_messages() -> u32 {
     6
 }
@@ -202,6 +220,12 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OmniPreferences {
+    #[serde(default)]
+    pub summarize_team_results: bool,
+    #[serde(default)]
+    pub trust_cursor_bot_homes: bool,
+    #[serde(default = "default_workflow_budget")]
+    pub workflow_budget_usd: f64,
     #[serde(default)]
     pub onboarding_completed: bool,
     #[serde(default)]
@@ -244,6 +268,9 @@ pub struct PersistedStore {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OmniSnapshot {
+    pub instance_id: String,
+    pub revision: u64,
+    pub storage_error: Option<String>,
     pub server_port: u16,
     pub server_base_url: String,
     pub preferences: OmniPreferences,
@@ -311,7 +338,26 @@ pub enum OmniStreamEvent {
     StateUpdated { chat_id: Option<String> },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowTask {
+    pub id: String,
+    pub workflow_id: String,
+    pub bot_id: String,
+    pub from_bot_id: Option<String>,
+    pub instructions: String,
+    pub mode: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub workspace_path: Option<String>,
+}
+
 pub struct OmniRuntimeState {
+    pub instance_id: String,
+    pub revision: std::sync::atomic::AtomicU64,
+    pub storage_error: Option<String>,
+    pub execution_slots: HashMap<String, String>,
+    pub terminals: HashMap<String, Arc<crate::terminal::TerminalSession>>,
     pub server_port: u16,
     pub data_dir: PathBuf,
     pub store_lock: Option<fs::File>,
@@ -398,6 +444,7 @@ impl OmniRuntimeState {
         normalize_preferences(&mut store);
         remove_legacy_welcome(&mut store);
         crate::homes::migrate(&mut store);
+        crate::lifecycle::migrate(&mut store);
         for chat in &mut store.chats {
             if chat.id == "chat-swarm-core" && chat.title == "Core Coding Swarm" {
                 chat.title = "Core Coding Group".into();
@@ -416,6 +463,11 @@ impl OmniRuntimeState {
         save_store(&store)?;
 
         Ok(Self {
+            instance_id: uuid::Uuid::new_v4().to_string(),
+            revision: std::sync::atomic::AtomicU64::new(1),
+            storage_error: None,
+            execution_slots: HashMap::new(),
+            terminals: HashMap::new(),
             server_port,
             data_dir,
             store_lock: Some(store_lock),
@@ -436,7 +488,21 @@ impl OmniRuntimeState {
     }
 
     pub fn emit(&self, event: OmniStreamEvent) {
+        self.revision
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let _ = self.event_tx.send(event);
+    }
+
+    pub fn persist_or_restore(&mut self, previous: PersistedStore) -> Result<(), String> {
+        if let Err(error) = self.persist() {
+            self.store = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn save_execution(&mut self) {
+        self.storage_error = self.persist().err();
     }
 
     pub fn record_activity(
@@ -462,11 +528,14 @@ impl OmniRuntimeState {
     }
 
     pub fn snapshot(&self) -> OmniSnapshot {
-        let git_status = inspect_git_status(&self.store.preferences.workspace_root);
+        let git_status = GitRepoStatus::default();
         let mut active_runs: Vec<ActiveBotRun> = self.active_runs.values().cloned().collect();
         active_runs.sort_by_key(|r| r.started_at_ms);
 
         OmniSnapshot {
+            instance_id: self.instance_id.clone(),
+            revision: self.revision.load(std::sync::atomic::Ordering::SeqCst),
+            storage_error: self.storage_error.clone(),
             server_port: self.server_port,
             server_base_url: format!("http://127.0.0.1:{}", self.server_port),
             preferences: self.store.preferences.clone(),
@@ -559,6 +628,7 @@ fn initialize_store(harnesses: &[CliHarnessInfo]) -> Result<PersistedStore, Stri
         .unwrap_or(CliDriverKind::Claude);
 
     let omni_bot = BotProfile {
+        archived: false,
         id: "bot-omni".to_string(),
         name: "Omni".to_string(),
         slug: "omni".to_string(),
@@ -580,6 +650,10 @@ fn initialize_store(harnesses: &[CliHarnessInfo]) -> Result<PersistedStore, Stri
     };
 
     let primary_chat = ChatThread {
+        owner_bot_id: Some("bot-omni".into()),
+        model_overrides: HashMap::new(),
+        session_contexts: HashMap::new(),
+        tasks: Vec::new(),
         is_bot_home: true,
         id: "chat-omni-primary".to_string(),
         title: "Omni".to_string(),
@@ -604,6 +678,9 @@ fn initialize_store(harnesses: &[CliHarnessInfo]) -> Result<PersistedStore, Stri
     Ok(PersistedStore {
         home_layout_version: 3,
         preferences: OmniPreferences {
+            summarize_team_results: false,
+            trust_cursor_bot_homes: false,
+            workflow_budget_usd: 3.75,
             onboarding_completed: false,
             pinned_bot_ids: Vec::new(),
             workspace_root,
@@ -630,6 +707,11 @@ fn initialize_store(harnesses: &[CliHarnessInfo]) -> Result<PersistedStore, Stri
 }
 
 fn normalize_preferences(store: &mut PersistedStore) {
+    if !store.preferences.workflow_budget_usd.is_finite()
+        || store.preferences.workflow_budget_usd <= 0.0
+    {
+        store.preferences.workflow_budget_usd = default_workflow_budget();
+    }
     // Ensure guardrail defaults are within sane bounds
     store.preferences.max_context_messages = store.preferences.max_context_messages.clamp(2, 24);
     store.preferences.max_message_chars = store.preferences.max_message_chars.clamp(400, 6000);
@@ -639,10 +721,12 @@ fn normalize_preferences(store: &mut PersistedStore) {
     store.preferences.max_parallel_bots = store.preferences.max_parallel_bots.clamp(1, 6);
     store.preferences.turn_timeout_secs = store.preferences.turn_timeout_secs.clamp(30, 1800);
 
-    store
-        .preferences
-        .pinned_bot_ids
-        .retain(|id| store.bots.iter().any(|b| &b.id == id && !b.is_primary));
+    store.preferences.pinned_bot_ids.retain(|id| {
+        store
+            .bots
+            .iter()
+            .any(|b| &b.id == id && !b.is_primary && !b.archived)
+    });
 }
 
 pub(crate) fn import_cli_bots(store: &mut PersistedStore, harnesses: &[CliHarnessInfo]) {
@@ -653,21 +737,13 @@ pub(crate) fn import_cli_bots(store: &mut PersistedStore, harnesses: &[CliHarnes
         if !already_exists {
             let slug = h.kind.as_str().to_string();
             let base_name = h.kind.default_bot_name();
-            let mut name = base_name.to_string();
-            let mut suffix = 2;
-            while store
-                .bots
-                .iter()
-                .any(|b| b.name.eq_ignore_ascii_case(&name))
-            {
-                name = format!("{base_name} {suffix}");
-                suffix += 1;
-            }
+            let name = crate::lifecycle::unique_name(store, base_name);
             let role_title = h.kind.default_role_title().to_string();
             let shape = h.kind.default_shape().to_string();
             let color = h.kind.default_color().to_string();
 
-            store.bots.push(BotProfile {
+            let mut imported = BotProfile {
+                archived: false,
                 id: bot_id.clone(),
                 name: name.clone(),
                 slug: slug.clone(),
@@ -689,12 +765,18 @@ pub(crate) fn import_cli_bots(store: &mut PersistedStore, harnesses: &[CliHarnes
                 auto_created_for_cli: true,
                 custom_command: None,
                 max_turn_budget_usd: None,
-            });
+            };
+            crate::lifecycle::validate_profile(store, &mut imported).expect("valid CLI template");
+            store.bots.push(imported);
 
             // Ensure a dedicated 1:1 thread exists for this Bot
             let direct_chat_id = format!("chat-direct-{slug}");
             if !store.chats.iter().any(|c| c.id == direct_chat_id) {
                 store.chats.push(ChatThread {
+                    owner_bot_id: Some(bot_id.clone()),
+                    model_overrides: HashMap::new(),
+                    session_contexts: HashMap::new(),
+                    tasks: Vec::new(),
                     is_bot_home: true,
                     id: direct_chat_id,
                     title: name.clone(),
@@ -855,6 +937,31 @@ mod tests {
     }
 
     use crate::test_support::Fixture;
+
+    #[test]
+    fn saved_team_and_trust_preferences_roundtrip_and_legacy_defaults_are_off() {
+        let f = Fixture::new(&["A"]);
+        let mut g = f.state.write().unwrap();
+        g.store.preferences.summarize_team_results = true;
+        g.store.preferences.trust_cursor_bot_homes = true;
+        g.persist().unwrap();
+        let stored: PersistedStore =
+            serde_json::from_str(&fs::read_to_string(g.data_dir.join("store.json")).unwrap())
+                .unwrap();
+        assert!(stored.preferences.summarize_team_results);
+        assert!(stored.preferences.trust_cursor_bot_homes);
+        let mut legacy = serde_json::to_value(&stored.preferences).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("summarizeTeamResults");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("trustCursorBotHomes");
+        let prefs: OmniPreferences = serde_json::from_value(legacy).unwrap();
+        assert!(!prefs.summarize_team_results && !prefs.trust_cursor_bot_homes);
+    }
 
     #[test]
     fn atomic_store_roundtrips_and_leaves_no_partial_files() {

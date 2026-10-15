@@ -33,13 +33,13 @@ pnpm tauri:dev
 
 In setup, customize your main bot, find installed tools, select bots to add to the sidebar, and review permissions. Adding a project is optional. Standard CLI permissions are the default. Discovery checks installation and model metadata; it does not prove that your provider account can complete a request.
 
-Open **Bot library** to add or pin bots later. Click a bot's name or avatar to edit its settings. Right-click empty sidebar space for view options. The settings button reopens setup.
+Open **Bot library** to add or pin bots later. Click a bot's name or avatar to edit its settings. Archive bots to preserve their history and memory; restore them from Bot library. Right-click empty sidebar space for view options. The settings button reopens setup.
 
 ### CLI support
 
 Execution adapters are implemented for Claude Code, Codex, OpenCode, Cursor Agent, Grok Build, Pi, Muse, Gemini CLI, Aider, and Ollama, plus custom commands. Streaming, model discovery, session resume, and usage reporting depend on each CLI's protocol. Unsupported metadata is shown as unavailable rather than guessed. Ollama requires an explicit installed model.
 
-Install and sign in to each CLI using its own documentation. Check **Bot library → Local tools** for local diagnostics. See [implementation notes and limitations](docs/local-review.md) for verified behavior; live inference has not been tested against every CLI/version combination.
+Install and sign in to each CLI using its own documentation. Check **Bot library → Local tools** for local diagnostics. See [lifecycle and coordination changes](docs/bot-lifecycle-implementation.md) and [implementation notes and limitations](docs/local-review.md) for verified behavior; live inference has not been tested against every CLI/version combination.
 
 ## Bots, projects, and memory
 
@@ -47,7 +47,13 @@ Each bot has its own local home folder and personal notes. Project notes are inc
 
 A bot can carry out an explicit request involving a named folder within its CLI permissions. Its home folder is not an operating-system sandbox. A project is useful when you want a conversation to keep a workspace and Git context.
 
-For deliberate delegation, a bot can emit a complete handoff block:
+Newly discovered bots inherit their CLI’s configured model by default; discovery never selects the first catalog model or overwrites a saved choice. Chat creation saves model choices for that chat. Bot settings change global defaults, and composer selections override only the current request. Personal conversations keep a stable owner when helpers join.
+
+`@all` and `/race` address current room participants. `/group` runs them sequentially; `/team` explicitly selects the bots assigned to a project. The composer previews recipients only when they differ from the single bot already shown in the chat header, or when multiple bots participate. **Bot library → Team Rules & Trust → Summarize team results** saves whether the first speaker adds a final summary turn. Bots sharing a checkout queue; use worktrees for parallel editing.
+
+Repository-dependent starter actions select a project before running. In personal space, `/review` and recognized Git-review requests open the existing project picker, carrying the prompt and selected team into a new project conversation. The prompt remains in the composer for review before sending; the original personal conversation stays separate. General questions about Git do not require a project.
+
+For deliberate delegation to a room participant or assigned project teammate, a bot can emit a complete handoff block:
 
 ```xml
 <handoff to="Codex" mode="sequential">Review the changes in the named worktree and report regressions.</handoff>
@@ -87,7 +93,7 @@ pnpm tauri:build
 
 The native development build produces `Omnibot.app` and a `.dmg` under `src-tauri/target/release/bundle/` using ad-hoc signing. Public release builds use Developer ID signing, Apple notarization, and Sparkle updates. Download a signed universal build from [Releases](https://github.com/robzilla1738/Omnibot/releases). CI checks frontend compilation, Rust tests and Clippy, browser tests, and native app packaging. See [release instructions](docs/releasing.md) for the verified signing and publication process.
 
-Tests use temporary repositories, fake CLI processes, and mocked API responses. They do not load your conversations or call model providers. Browser tests start Vite automatically; set `PLAYWRIGHT_CHANNEL=chrome` to use an installed Google Chrome instead of Playwright Chromium.
+Tests use temporary repositories, fake CLI processes, and mocked API responses. They do not load your conversations or call model providers. Browser tests start Vite automatically; use `PLAYWRIGHT_PORT=1423 pnpm test` when the default development port is occupied; set `PLAYWRIGHT_CHANNEL=chrome` to use an installed Google Chrome instead of Playwright Chromium.
 
 ## Local data and compatibility
 
@@ -102,3 +108,16 @@ The application, Dock entry, executable, window, and bundle are named **Omnibot*
 Bug reports and focused pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting changes and [SECURITY.md](SECURITY.md) before reporting a vulnerability.
 
 Omnibot's code is available under the [MIT license](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md) for borrowed code, icon attribution, and provider trademarks.
+
+### Embedded terminal
+
+Use the circular **Terminal** button beside Settings in the expanded sidebar (⌘`) to enter the interactive Claude Code or custom-command session directly. Existing sessions are reused; active chat automation is stopped before starting a new interactive session. Resize or expand the panel, search its output, and switch to **Run logs** for automated process output. Hiding the panel keeps the process running; **End control** stops it. See [terminal behavior and testing](docs/embedded-terminal.md).
+
+
+### Interface and provider settings
+
+Dropdowns use native platform menus and keyboard controls. Token usage, reported cost, duration, and the model badge sit beside the bot name and appear on card hover or keyboard focus (always available on touch devices). The chat area has no activity-history panel. The jump-to-latest control stays above the measured composer height, including terminal notices.
+
+Cursor workspace trust is separate from tool approval. **Bot library → Team Rules & Trust → Trust bot homes in Cursor** permits Cursor to trust only Omnibot-managed bot home folders; project folders still need their own approval. This preference defaults off for new profiles. Provider errors are presented without duplicate JSON envelopes, while raw diagnostics remain in terminal run logs.
+
+See the [implementation notes](docs/bot-lifecycle-implementation.md) and [embedded terminal guide](docs/embedded-terminal.md) for behavior, testing, and limitations.

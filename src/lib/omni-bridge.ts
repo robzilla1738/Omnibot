@@ -63,6 +63,10 @@ export async function getOmniSnapshot(): Promise<OmniSnapshot> {
   return snap;
 }
 
+export async function retryOmniStorage(): Promise<OmniSnapshot> {
+  return httpJson("/api/storage/retry", { method: "POST" });
+}
+
 export async function rescanOmniEnvironment(): Promise<OmniSnapshot> {
   if (isTauriRuntime()) {
     return invoke<OmniSnapshot>("omni_rescan");
@@ -78,6 +82,11 @@ export interface SendMessageParams {
   overrideModel?: string;
   overrideEffort?: string;
   parallelMode?: boolean;
+  summarize?: boolean;
+}
+
+export async function previewOmniMessage(params: SendMessageParams): Promise<{ botIds: string[]; parallel: boolean; prompt: string }> {
+  return httpJson("/api/chat/preview", { method: "POST", body: JSON.stringify(params) });
 }
 
 export async function sendOmniMessage(params: SendMessageParams): Promise<string> {
@@ -102,6 +111,7 @@ export async function stopOmniChat(chatId: string): Promise<OmniSnapshot> {
 }
 
 export interface CreateChatParams {
+  modelOverrides?: Record<string, string | null>;
   botHome?: boolean;
   title?: string;
   subtitle?: string;
@@ -146,6 +156,10 @@ export async function updateOmniChat(
     method: "POST",
     body: JSON.stringify(params),
   });
+}
+
+export async function resetOmniSessions(id: string): Promise<OmniSnapshot> {
+  return httpJson("/api/chat/reset-sessions", { method: "POST", body: JSON.stringify({ id }) });
 }
 
 export async function clearOmniChat(id: string): Promise<OmniSnapshot> {
@@ -294,18 +308,18 @@ export async function openLocalItem(
   return res.message;
 }
 
-export async function getChatGitStatus(chatId: string): Promise<GitRepoStatus> {
-  return httpJson<GitRepoStatus>(`/api/git/status?chatId=${encodeURIComponent(chatId)}`);
+export async function getChatGitStatus(chatId: string, taskId?: string): Promise<GitRepoStatus> {
+  return httpJson<GitRepoStatus>(`/api/git/status?chatId=${encodeURIComponent(chatId)}${taskId ? `&taskId=${encodeURIComponent(taskId)}` : ""}`);
 }
-export async function getGitFileDiff(filePath: string, chatId: string): Promise<string> {
-  const res = await httpJson<{ diff: string }>(`/api/git/diff?path=${encodeURIComponent(filePath)}&chatId=${encodeURIComponent(chatId)}`);
+export async function getGitFileDiff(filePath: string, chatId: string, taskId?: string): Promise<string> {
+  const res = await httpJson<{ diff: string }>(`/api/git/diff?path=${encodeURIComponent(filePath)}&chatId=${encodeURIComponent(chatId)}${taskId ? `&taskId=${encodeURIComponent(taskId)}` : ""}`);
   return res.diff;
 }
-export async function commitGitChanges(message: string, chatId: string): Promise<OmniSnapshot> {
-  return httpJson<OmniSnapshot>("/api/git/commit", { method: "POST", body: JSON.stringify({ message, chatId }) });
+export async function commitGitChanges(message: string, chatId: string, taskId?: string): Promise<OmniSnapshot> {
+  return httpJson<OmniSnapshot>("/api/git/commit", { method: "POST", body: JSON.stringify({ message, chatId, taskId }) });
 }
-export async function discardGitFile(filePath: string, chatId: string): Promise<OmniSnapshot> {
-  return httpJson<OmniSnapshot>("/api/git/discard", { method: "POST", body: JSON.stringify({ filePath, chatId }) });
+export async function discardGitFile(filePath: string, chatId: string, taskId?: string): Promise<OmniSnapshot> {
+  return httpJson<OmniSnapshot>("/api/git/discard", { method: "POST", body: JSON.stringify({ filePath, chatId, taskId }) });
 }
 
 export async function testCliHarness(
@@ -378,4 +392,36 @@ export async function pinOmniBot(botId: string, pinned: boolean): Promise<OmniSn
 
 export async function runOmniRoutine(id: string, chatId: string): Promise<void> {
   await httpJson("/api/routine/run", { method: "POST", body: JSON.stringify({ id, chatId }) });
+}
+
+export interface TerminalSessionInfo {
+  id: string;
+  chatId: string;
+  botId: string;
+  botName: string;
+  mode: "output" | "interactive";
+  status: "queued" | "running" | "complete" | "exited" | "stopped" | "error";
+  cwd: string;
+  startedAtMs: number;
+  exitCode: number | null;
+  error: string | null;
+  resumed: boolean;
+}
+export function listTerminals(chatId: string): Promise<TerminalSessionInfo[]> {
+  return httpJson(`/api/terminal/list?chatId=${encodeURIComponent(chatId)}`);
+}
+export function readTerminal(id: string, offset: number): Promise<{ data: number[]; offset: number; truncated: boolean; status: string }> {
+  return httpJson(`/api/terminal/output?id=${encodeURIComponent(id)}&offset=${offset}`);
+}
+export function startTerminal(chatId: string, botId: string): Promise<TerminalSessionInfo> {
+  return httpJson("/api/terminal/start", { method: "POST", body: JSON.stringify({ chatId, botId, cols: 80, rows: 24 }) });
+}
+export function writeTerminal(id: string, data: number[]): Promise<void> {
+  return httpJson("/api/terminal/write", { method: "POST", body: JSON.stringify({ id, data }) });
+}
+export function resizeTerminal(id: string, cols: number, rows: number): Promise<void> {
+  return httpJson("/api/terminal/resize", { method: "POST", body: JSON.stringify({ id, cols, rows }) });
+}
+export function stopTerminal(id: string): Promise<void> {
+  return httpJson("/api/terminal/stop", { method: "POST", body: JSON.stringify({ id }) });
 }

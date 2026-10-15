@@ -28,7 +28,12 @@ pub fn validate(state: &OmniRuntimeState, routine: &RoutineEntry) -> Result<(), 
     {
         return Err("Add a routine name (up to 100 characters) and instructions.".into());
     }
-    if !state.store.bots.iter().any(|b| b.id == routine.bot_id) {
+    if !state
+        .store
+        .bots
+        .iter()
+        .any(|b| b.id == routine.bot_id && !b.archived)
+    {
         return Err("Choose an existing bot.".into());
     }
     if let Some(id) = &routine.chat_id {
@@ -131,6 +136,7 @@ async fn run(
     let result = dispatch_routine_turn(
         state.clone(),
         SendMessageInput {
+            summarize: false,
             chat_id,
             text: routine.prompt,
             skill_slug: None,
@@ -139,15 +145,16 @@ async fn run(
             override_effort: None,
             parallel_mode: Some(false),
         },
+        id.to_string(),
     )
     .await;
     if let Ok(mut guard) = state.write() {
         if let Some(routine) = guard.store.routines.iter_mut().find(|r| r.id == id) {
-            routine.last_error = result.as_ref().err().cloned();
-            if result.is_ok() {
-                routine.last_run_ms = Some(now_ms());
+            if let Err(error) = &result {
+                routine.last_error = Some(error.clone());
+                routine.run_status = Some("error".into());
             }
-            guard.persist()?;
+            guard.save_execution();
             guard.emit(OmniStreamEvent::StateUpdated { chat_id: None });
         }
     }
@@ -186,7 +193,17 @@ pub async fn scheduler(state: SharedOmniState) {
             Err(_) => continue,
         };
         for id in ids {
-            let _ = run(state.clone(), &id, None, true).await;
+            if let Err(error) = run(state.clone(), &id, None, true).await {
+                if let Ok(mut guard) = state.write() {
+                    if let Some(routine) = guard.store.routines.iter_mut().find(|r| r.id == id) {
+                        routine.last_attempt_ms = Some(now_ms());
+                        routine.run_status = Some("skipped".into());
+                        routine.last_error = Some(error);
+                    }
+                    guard.save_execution();
+                    guard.emit(OmniStreamEvent::StateUpdated { chat_id: None });
+                }
+            }
         }
     }
 }
@@ -253,6 +270,23 @@ mod tests {
             assert!(guard.store.routines[0].last_error.is_none());
         }
         assert!(run(f.state.clone(), "r", None, false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn routine_failure_is_an_execution_outcome_not_a_successful_dispatch() {
+        let f = Fixture::new(&["A"]);
+        f.script("A", "echo failed-request; exit 1");
+        let mut r = routine();
+        r.chat_id = Some("room".into());
+        crate::server::upsert_routine_entry(&f.state, r).unwrap();
+        let workflow_id = run(f.state.clone(), "r", None, false).await.unwrap();
+        f.wait().await;
+        let g = f.state.read().unwrap();
+        let r = &g.store.routines[0];
+        assert_eq!(r.workflow_id.as_deref(), Some(workflow_id.as_str()));
+        assert_eq!(r.run_status.as_deref(), Some("error"));
+        assert!(r.last_error.is_some());
+        assert!(r.last_run_ms.is_none());
     }
     #[tokio::test]
     async fn failed_persistence_never_launches_a_routine() {

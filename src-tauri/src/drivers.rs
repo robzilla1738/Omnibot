@@ -55,7 +55,7 @@ struct StreamParserState {
     failed: bool,
 }
 
-fn resolve_driver_binary(bot: &BotProfile) -> Option<(String, Vec<String>)> {
+pub(crate) fn resolve_driver_binary(bot: &BotProfile) -> Option<(String, Vec<String>)> {
     if let Some(custom) = bot
         .custom_command
         .as_deref()
@@ -87,6 +87,40 @@ fn resolve_driver_binary(bot: &BotProfile) -> Option<(String, Vec<String>)> {
         CliDriverKind::Custom => None,
     }?;
     Some((bin, Vec::new()))
+}
+
+pub fn validate_available(bot: &BotProfile) -> Result<(), String> {
+    if resolve_driver_binary(bot).is_none() {
+        return Err(format!("{}'s CLI command is unavailable. Check Local tools or its custom command before sending.", bot.name));
+    }
+    Ok(())
+}
+
+fn provider_error_description(error: Option<&Value>) -> String {
+    fn extract(value: &Value, depth: usize) -> Option<String> {
+        if depth > 6 {
+            return None;
+        }
+        if let Some(text) = value.as_str() {
+            if let Ok(nested) = serde_json::from_str::<Value>(text) {
+                if let Some(message) = extract(&nested, depth + 1) {
+                    return Some(message);
+                }
+            }
+            return Some(text.to_string());
+        }
+        value
+            .get("error")
+            .and_then(|v| extract(v, depth + 1))
+            .or_else(|| value.get("message").and_then(|v| extract(v, depth + 1)))
+    }
+    let mut message = error
+        .and_then(|v| extract(v, 0))
+        .unwrap_or_else(|| "Provider reported a failed turn.".into());
+    if message.contains("not supported") && message.contains("ChatGPT account") {
+        message.push_str("\n\nOpen this bot’s settings and choose CLI default or a model available to your signed-in Codex account. Also clear any chat-specific model override, then send your message again.");
+    }
+    message
 }
 
 pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) -> DriverTurnOutput {
@@ -186,6 +220,8 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
             }
             if req.bot.permission_mode == "plan" {
                 cmd.args(["--permission-mode", "plan"]);
+            } else if req.bot.permission_mode == "acceptEdits" {
+                cmd.args(["--permission-mode", "acceptEdits"]);
             } else if req.approve_all || req.bot.permission_mode == "bypassPermissions" {
                 cmd.arg("--dangerously-skip-permissions");
             }
@@ -237,6 +273,15 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
             cmd.arg(&combined_prompt);
         }
         CliDriverKind::Cursor => {
+            // Trust is scoped to the app-managed home and explicitly enabled in settings.
+            let trust_home = state.read().ok().is_some_and(|guard| {
+                guard.store.preferences.trust_cursor_bot_homes
+                    && crate::homes::bot_home(&guard.data_dir, &req.bot.id)
+                        .is_ok_and(|home| home == req.cwd)
+            });
+            if trust_home {
+                cmd.arg("--trust");
+            }
             cmd.args([
                 "-p",
                 "--output-format",
@@ -408,10 +453,12 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
         });
     }
 
+    let terminal = crate::terminal::record_run(&state, &req);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             let err_text = format!("Failed to spawn `{}`: {e}", binary_path);
+            terminal.finish("error", None, Some(err_text.clone()));
             update_message_delta(
                 &state,
                 &req.chat_id,
@@ -448,8 +495,16 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
 
-    let mut stdout_lines = BufReader::new(stdout).lines();
-    let mut stderr_lines = BufReader::new(stderr).lines();
+    let mut stdout_lines = BufReader::new(crate::terminal::RecordedReader::new(
+        stdout,
+        terminal.clone(),
+    ))
+    .lines();
+    let mut stderr_lines = BufReader::new(crate::terminal::RecordedReader::new(
+        stderr,
+        terminal.clone(),
+    ))
+    .lines();
 
     let mut parser = StreamParserState::default();
     let mut stderr_buf = Vec::new();
@@ -555,10 +610,18 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
     {
         stderr_buf.push(format!("CLI exited unsuccessfully: {exit_status:?}"));
     }
-    if !stderr_buf.is_empty() && !was_cancelled && !exit_status.is_some_and(|s| s.success()) {
+    if !stderr_buf.is_empty()
+        && !was_cancelled
+        && !parser.failed
+        && !exit_status.is_some_and(|s| s.success())
+    {
         let joined_err = stderr_buf.join("\n");
         // Check if session resume failed (e.g. expired or invalid session ID)
-        let formatted_err = format!("\n\n```\n{}\n```", joined_err.trim());
+        let formatted_err = if joined_err.contains("Workspace Trust Required") {
+            "\n\nCursor needs workspace approval. For a bot home, enable **Trust bot homes in Cursor** in Settings → Team Rules & Trust, then send your message again. For a project, open `agent` in that project folder and approve it there. Tool permissions are unchanged.".to_string()
+        } else {
+            format!("\n\n```\n{}\n```", joined_err.trim())
+        };
         parser.accumulated_text.push_str(&formatted_err);
         update_message_delta(
             &state,
@@ -578,6 +641,13 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
         "error"
     };
 
+    terminal.finish(
+        final_status,
+        exit_status
+            .and_then(|s| s.code())
+            .and_then(|c| u32::try_from(c).ok()),
+        None,
+    );
     finish_active_run(
         &state,
         &req.chat_id,
@@ -839,12 +909,14 @@ fn parse_cli_output_line(
             .and_then(|e| e.get("message").or(Some(e)))
             .or_else(|| val.get("message"))
             .or_else(|| val.get("result"));
-        let description = error
-            .and_then(Value::as_str)
-            .unwrap_or("Provider reported a failed turn.");
-        let chunk = format!("\n\n{description}");
-        parser.accumulated_text.push_str(&chunk);
-        update_message_delta(state, chat_id, message_id, bot_id, &chunk, false);
+        let description = provider_error_description(error);
+        if !parser.accumulated_text.contains(&description) {
+            let chunk = format!("\n\n{description}");
+            parser.accumulated_text.push_str(&chunk);
+            update_message_delta(state, chat_id, message_id, bot_id, &chunk, false);
+        }
+        extract_usage_tokens(&val, parser);
+        return;
     }
     extract_usage_tokens(&val, parser);
     if let Some(model) = reported_model(&val) {
@@ -1589,7 +1661,7 @@ fn finish_active_run(
         }
         chat.updated_at_ms = now_ms();
     }
-    let _ = guard.persist();
+    guard.save_execution();
     guard.emit(OmniStreamEvent::TurnFinished {
         chat_id: chat_id.to_string(),
         message_id: message_id.to_string(),
@@ -1703,6 +1775,23 @@ mod tests {
         );
         assert!(p.failed);
         assert!(p.accumulated_text.contains("Rate limit"));
+    }
+
+    #[test]
+    fn nested_codex_errors_are_readable_and_not_repeated() {
+        let f = Fixture::new(&["A"]);
+        let mut p = StreamParserState::default();
+        let error = json!({"type":"error","status":400,"error":{"message":"The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account."}}).to_string();
+        feed(&f, &mut p, json!({"type":"error","message":error}));
+        feed(
+            &f,
+            &mut p,
+            json!({"type":"turn.failed","error":{"message":error}}),
+        );
+        assert!(p.failed);
+        assert_eq!(p.accumulated_text.matches("gpt-5.4").count(), 1);
+        assert!(!p.accumulated_text.contains("{\"type\""));
+        assert!(p.accumulated_text.contains("CLI default"));
     }
 
     #[test]
@@ -1826,6 +1915,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cursor_trust_is_opt_in_and_only_for_the_bot_home() {
+        for (enabled, home, expected) in [
+            (false, true, false),
+            (true, true, true),
+            (true, false, false),
+        ] {
+            let f = Fixture::new(&["A"]);
+            f.script("A", "printf '%s\\n' \"$@\" > cli-args.txt\necho Done");
+            let mut bot = f.state.read().unwrap().store.bots[0].clone();
+            bot.cli_driver = CliDriverKind::Cursor;
+            let cwd = {
+                let mut g = f.state.write().unwrap();
+                g.store.preferences.trust_cursor_bot_homes = enabled;
+                if home {
+                    crate::homes::bot_home(&g.data_dir, &bot.id).unwrap()
+                } else {
+                    f.dir.to_string_lossy().into_owned()
+                }
+            };
+            let result = execute_bot_turn(
+                f.state.clone(),
+                DriverTurnRequest {
+                    chat_id: "room".into(),
+                    message_id: "message".into(),
+                    bot,
+                    prompt: "Hello".into(),
+                    system_context: String::new(),
+                    cwd: cwd.clone(),
+                    resume_session_id: None,
+                    approve_all: false,
+                    turn_timeout_secs: 5,
+                    max_budget_usd: None,
+                },
+            )
+            .await;
+            assert_eq!(result.status, "complete");
+            let args =
+                std::fs::read_to_string(std::path::Path::new(&cwd).join("cli-args.txt")).unwrap();
+            assert_eq!(args.lines().any(|a| a == "--trust"), expected);
+            assert!(!args.lines().any(|a| a == "-f" || a == "--yolo"));
+        }
+    }
+
+    #[tokio::test]
     async fn plain_output_has_no_invented_tokens_or_cost() {
         let f = Fixture::new(&["A"]);
         f.script("A", "echo 'Hello from a local fixture'");
@@ -1933,17 +2066,16 @@ mod tests {
         let f = Fixture::new(&["A"]);
         f.script("A", "touch should-not-run");
         f.state.write().unwrap().store.bots[0].cli_driver = CliDriverKind::Ollama;
-        crate::orchestrator::dispatch_chat_turn(
+        let error = crate::orchestrator::dispatch_chat_turn(
             f.state.clone(),
             crate::test_support::input("Start"),
         )
         .await
-        .unwrap();
+        .unwrap_err();
         f.wait().await;
         assert!(!f.dir.join("should-not-run").exists());
         let guard = f.state.read().unwrap();
-        let message = guard.store.chats[0].messages.last().unwrap();
-        assert_eq!(message.status, "error");
-        assert!(message.text.contains("Choose an installed Ollama model"));
+        assert!(guard.store.chats[0].messages.is_empty());
+        assert!(error.contains("Choose an installed Ollama model"));
     }
 }

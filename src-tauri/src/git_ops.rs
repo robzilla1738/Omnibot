@@ -20,7 +20,7 @@ pub struct GitWorktreeEntry {
     pub head: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitRepoStatus {
     pub is_repo: bool,
@@ -36,12 +36,61 @@ pub struct GitRepoStatus {
 }
 
 fn run_git(cwd: &str, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
+    let output_dir = std::env::temp_dir().join(format!("omni-git-{}", uuid::Uuid::new_v4()));
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&output_dir).map_err(|e| e.to_string())?;
+    struct OutputDir(PathBuf);
+    impl Drop for OutputDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = OutputDir(output_dir.clone());
+    let stdout = fs::File::create(output_dir.join("stdout")).map_err(|e| e.to_string())?;
+    let stderr = fs::File::create(output_dir.join("stderr")).map_err(|e| e.to_string())?;
+    let mut command = Command::new("git");
+    command
         .args(args)
         .current_dir(cwd)
         .env("PATH", augmented_path_env())
-        .output()
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command
+        .spawn()
         .map_err(|e| format!("Failed to run git: {e}"))?;
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break status;
+        }
+        if start.elapsed() > std::time::Duration::from_secs(15) {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Git took too long. Check repository hooks or locks and try again.".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let out = std::process::Output {
+        status,
+        stdout: fs::read(output_dir.join("stdout")).map_err(|e| e.to_string())?,
+        stderr: fs::read(output_dir.join("stderr")).map_err(|e| e.to_string())?,
+    };
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
         return Err(if stderr.is_empty() {
@@ -200,7 +249,7 @@ pub fn ensure_bot_worktree(
     )
 }
 
-fn ensure_bot_worktree_in(
+pub(crate) fn ensure_bot_worktree_in(
     workspace_root: &str,
     chat_id: &str,
     bot_slug: &str,
@@ -219,7 +268,33 @@ fn ensure_bot_worktree_in(
     }
     let chat_key = key(chat_id);
     let bot_key = key(bot_slug);
-    let wt_base = data_dir.join("worktrees").join(&chat_key);
+    let canonical_root = fs::canonicalize(root).map_err(|e| e.to_string())?;
+    // The repository identity prevents reusing a different project's checkout.
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in canonical_root.as_os_str().as_encoded_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let repository_key = format!("{hash:016x}");
+    let legacy = data_dir.join("worktrees").join(&chat_key).join(&bot_key);
+    if legacy.exists() {
+        let expected = run_git(
+            root,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?;
+        if let Ok(actual) = run_git(
+            &legacy.to_string_lossy(),
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        ) {
+            if fs::canonicalize(expected.trim()).ok() == fs::canonicalize(actual.trim()).ok() {
+                return Ok(legacy.to_string_lossy().into_owned());
+            }
+        }
+    }
+    let wt_base = data_dir
+        .join("worktrees")
+        .join(repository_key)
+        .join(&chat_key);
     fs::create_dir_all(&wt_base).map_err(|e| e.to_string())?;
     let wt_dir = wt_base.join(&bot_key);
     let wt_str = wt_dir.to_string_lossy().into_owned();
@@ -364,6 +439,44 @@ mod tests {
         f
     }
 
+    #[test]
+    fn switching_repositories_keeps_old_dirty_worktrees_intact() {
+        let first = repository();
+        let second = repository();
+        let data = first.dir.join("data");
+        let original =
+            ensure_bot_worktree_in(first.dir.to_str().unwrap(), "room", "bot", &data).unwrap();
+        fs::write(Path::new(&original).join("uncommitted.txt"), "keep me").unwrap();
+        let next =
+            ensure_bot_worktree_in(second.dir.to_str().unwrap(), "room", "bot", &data).unwrap();
+        assert_ne!(original, next);
+        assert_eq!(
+            fs::read_to_string(Path::new(&original).join("uncommitted.txt")).unwrap(),
+            "keep me"
+        );
+        assert!(!Path::new(&next).join("uncommitted.txt").exists());
+        assert_eq!(
+            original,
+            ensure_bot_worktree_in(first.dir.to_str().unwrap(), "room", "bot", &data).unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_worktree_is_reused_without_losing_uncommitted_edits() {
+        let f = repository();
+        let data = f.dir.join("data");
+        let legacy = data.join("worktrees/726f6f6d/626f74");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        run_git(
+            f.dir.to_str().unwrap(),
+            &["worktree", "add", "-b", "legacy", legacy.to_str().unwrap()],
+        )
+        .unwrap();
+        fs::write(legacy.join("uncommitted.txt"), "keep me").unwrap();
+        let actual = ensure_bot_worktree_in(f.dir.to_str().unwrap(), "room", "bot", &data).unwrap();
+        assert_eq!(Path::new(&actual), legacy);
+        assert!(legacy.join("uncommitted.txt").exists());
+    }
     #[test]
     fn git_status_preserves_unicode_spaces_and_rename_destination() {
         let f = repository();
