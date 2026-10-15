@@ -487,6 +487,9 @@ test("routines keep drafts, save readable schedules and model choices, and run t
   await expect(page.getByRole("button", { name: "New routine", exact: true })).toBeVisible();
   expect(state.routines[0]).toMatchObject({ botId: "bot-b", model: "fixture-cheap", chatId: "room", schedule: { frequency: "weekly", time: "10:30", weekday: 3 } });
   await expect(page.getByText("Wednesday at 10:30", { exact: true })).toBeVisible();
+  // Saving collapses the form above this row. Wait for the layout transition,
+  // otherwise WebKit's scroll adjustment can move the click onto another control.
+  await expect(page.locator('[id$="-showNewRoutineForm"]')).toHaveCSS("grid-template-rows", "0px");
   await page.getByTitle("Run routine with its saved bot and model").click();
   await expect.poll(() => runRequest).toEqual({ id: "saved-routine", chatId: "room" });
   expect(sends).toHaveLength(0);

@@ -21,6 +21,8 @@ The public 0.1.2 app's native Check for Updates subsequently reported 0.1.2 as t
 
 A later CI run exposed a stress-fixture startup timeout: the mock returned the entire 3,000-message snapshot on all 15 discovery ports, duplicating serialization and transport work. The fixture now represents one listening backend and refuses other ports. The unchanged responsiveness assertions passed five consecutive Chromium runs and five WebKit runs after this test-only correction. Native startup uses IPC, and authenticated browser development uses its explicit server address.
 
+The saved-routine UI test also waits for the form collapse to reach zero height before clicking the adjacent Run control, avoiding a WebKit scroll/layout race in automated pointer targeting. Its saved-configuration assertions passed 15 consecutive WebKit runs and five Chromium runs. Application code is unchanged by both fixture fixes.
+
 ### Minimum-system correction after publication
 
 Inspection of both slices of the shipped Sparkle framework with `otool -l` established a macOS 12.0 deployment target in both 0.1.1 and 0.1.2. Their top-level app metadata incorrectly declares 11.0. README, release notes, support matrix and future build configuration now state 12.0; the release validator rejects a top-level minimum below either framework slice. The safeguard suite now has 25 passing tests.
