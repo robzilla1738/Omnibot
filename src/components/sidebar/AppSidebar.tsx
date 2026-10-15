@@ -430,7 +430,7 @@ export function AppSidebar(props: AppSidebarProps) {
             className="pointer-events-auto h-11 flex-1 min-w-0 px-4 rounded-full bg-[#1f1f1f] hover:bg-[#272727] border border-white/[0.06] flex items-center justify-between gap-2.5 transition-colors active:scale-[0.98]"
           >
             <span className="text-[14.5px] font-medium text-zinc-100 truncate">
-              Bot library
+              Bots
             </span>
             {dockHarnesses.length ? <span aria-hidden="true" className="flex items-center -space-x-1.5 shrink-0">
               {dockHarnesses.map(harness => <span key={harness.kind} className="w-6 h-6 rounded-full bg-[#1f1f1f] border border-white/15 flex items-center justify-center">
