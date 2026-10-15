@@ -10,7 +10,6 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
@@ -30,7 +29,8 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' tauri: http://tauri.localhost http://localhost:1420; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; img-src 'self' asset: http://asset.localhost data: blob: http://127.0.0.1:*; media-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; frame-src 'self' http://127.0.0.1:* blob: data:;"
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:*; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'",
+      "devCsp": "default-src 'self' http://localhost:1420 http://127.0.0.1:1420 http://localhost:1422 http://127.0.0.1:1422; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; img-src 'self' asset: http://asset.localhost data: blob: http://localhost:* http://127.0.0.1:*; media-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'"
     }
   },
   "bundle": {

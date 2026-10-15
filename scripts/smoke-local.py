@@ -4,6 +4,7 @@
 Build first: pnpm build && cargo build --manifest-path src-tauri/Cargo.toml --locked
 This opens a temporary native window. No provider inference is submitted.
 """
+import base64
 import json
 import os
 from pathlib import Path
@@ -21,11 +22,19 @@ ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "src-tauri/target/debug/Omnibot"
 
 
-def request(base, path, body=None):
+def request(base, path, body=None, token=None):
     data = None if body is None else json.dumps(body).encode()
-    req = urllib.request.Request(base + path, data=data, headers={"Content-Type": "application/json"})
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(base + path, data=data, headers=headers)
     with urllib.request.urlopen(req, timeout=2) as response:
         return json.load(response)
+
+
+def terminal_output(api, terminal_id):
+    output = api("/api/terminal/output?id=" + terminal_id)
+    return output, base64.b64decode(output["data"])
 
 
 def stop(process):
@@ -66,14 +75,16 @@ def main():
                 app = subprocess.Popen([str(BINARY)], cwd=ROOT, env={**os.environ, "OMNI_BOT_HOME": str(directory)}, stdout=log, stderr=log, start_new_session=True)
                 processes.append(app)
                 base = None
+                token_file = directory / "api-token"
                 deadline = time.monotonic() + 45
                 while time.monotonic() < deadline and base is None:
                     if app.poll() is not None:
                         raise RuntimeError("Native app exited before its API became available.")
+                    token = token_file.read_text().strip() if token_file.exists() else None
                     for port in range(4321, 4336):
                         candidate = f"http://127.0.0.1:{port}"
                         try:
-                            snapshot = request(candidate, "/api/snapshot")
+                            snapshot = request(candidate, "/api/snapshot", token=token)
                         except (urllib.error.URLError, TimeoutError, socket.timeout):
                             continue
                         if any(bot["id"] == primary_id for bot in snapshot["bots"]):
@@ -82,12 +93,16 @@ def main():
                     time.sleep(0.1)
                 if base is None:
                     raise RuntimeError("Native API did not start in time.")
-                preview = request(base, "/api/chat/preview", dict(chatId="smoke-room", text="@all Check the native workflow"))
+
+                def api(path, body=None):
+                    return request(base, path, body, token)
+
+                preview = api("/api/chat/preview", dict(chatId="smoke-room", text="@all Check the native workflow"))
                 assert preview["botIds"] == [primary_id, "smoke-helper"]
-                request(base, "/api/chat/send", dict(chatId="smoke-room", text="@all Check the native workflow"))
+                api("/api/chat/send", dict(chatId="smoke-room", text="@all Check the native workflow"))
                 deadline = time.monotonic() + 15
                 while time.monotonic() < deadline:
-                    snapshot = request(base, "/api/snapshot")
+                    snapshot = api("/api/snapshot")
                     if not snapshot["activeWorkflowChatIds"]:
                         break
                     time.sleep(0.1)
@@ -96,42 +111,42 @@ def main():
                 tasks = snapshot["chats"][0]["tasks"]
                 assert len(tasks) == 2 and all(task["status"] == "complete" for task in tasks)
                 assert sum(m["text"] == "NATIVE_FIXTURE_OK" for m in snapshot["chats"][0]["messages"]) == 2
-                archived = request(base, "/api/bot/delete", {"id": "smoke-helper"})
+                archived = api("/api/bot/delete", {"id": "smoke-helper"})
                 assert len(archived["chats"][0]["messages"]) == 3
                 restored = next(bot for bot in archived["bots"] if bot["id"] == "smoke-helper")
                 assert restored["archived"]
                 restored["archived"] = False
-                request(base, "/api/bot/upsert", restored)
+                api("/api/bot/upsert", restored)
                 saved = json.loads((directory / "store.json").read_text())
                 assert len(saved["chats"][0]["tasks"]) == 2
                 assert not next(bot for bot in saved["bots"] if bot["id"] == "smoke-helper")["archived"]
-                captured = request(base, "/api/terminal/list?chatId=smoke-room")
+                captured = api("/api/terminal/list?chatId=smoke-room")
                 assert len(captured) == 2 and all(item["mode"] == "output" for item in captured)
-                output = request(base, "/api/terminal/output?id=" + captured[0]["id"])
-                assert b"NATIVE_FIXTURE_OK" in bytes(output["data"])
+                _, data = terminal_output(api, captured[0]["id"])
+                assert b"NATIVE_FIXTURE_OK" in data
                 command.write_text("#!/bin/sh\nprintf 'PTY_READY'\nread -r line\nprintf '<%s>\\n' \"$line\"\nstty size\n")
-                terminal = request(base, "/api/terminal/start", dict(chatId="smoke-room", botId="smoke-helper", cols=80, rows=24))
+                terminal = api("/api/terminal/start", dict(chatId="smoke-room", botId="smoke-helper", cols=80, rows=24))
                 deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
-                    output = request(base, "/api/terminal/output?id=" + terminal["id"])
-                    if b"PTY_READY" in bytes(output["data"]):
+                    _, data = terminal_output(api, terminal["id"])
+                    if b"PTY_READY" in data:
                         break
                     time.sleep(0.05)
                 else:
                     raise RuntimeError("Interactive PTY did not start.")
-                request(base, "/api/terminal/resize", dict(id=terminal["id"], cols=99, rows=31))
-                request(base, "/api/terminal/write", dict(id=terminal["id"], data=list("native terminal input\r".encode())))
+                api("/api/terminal/resize", dict(id=terminal["id"], cols=99, rows=31))
+                api("/api/terminal/write", dict(id=terminal["id"], data=base64.b64encode(b"native terminal input\r").decode()))
                 deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
-                    snapshot = request(base, "/api/snapshot")
+                    snapshot = api("/api/snapshot")
                     if not snapshot["activeWorkflowChatIds"]:
                         break
                     time.sleep(0.05)
                 else:
                     raise RuntimeError("Interactive PTY did not release the workflow.")
-                output = request(base, "/api/terminal/output?id=" + terminal["id"])
-                assert b"<native terminal input>" in bytes(output["data"])
-                assert b"31 99" in bytes(output["data"])
+                output, data = terminal_output(api, terminal["id"])
+                assert b"<native terminal input>" in data
+                assert b"31 99" in data
                 assert output["status"] == "exited"
                 print("Native smoke passed: startup, fake bot workflows, archive/restore, persistence, live output, interactive PTY input, resize, and exit cleanup.")
             except Exception:

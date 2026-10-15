@@ -6,12 +6,18 @@ use std::{
 };
 
 fn private_dir(path: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        // Runs on every save, so skip the writes when the folder is already private.
+        if fs::metadata(path).is_ok_and(|m| m.is_dir() && m.permissions().mode() & 0o777 == 0o700) {
+            return Ok(());
+        }
+        fs::create_dir_all(path)?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
+    #[cfg(not(unix))]
+    fs::create_dir_all(path)?;
     Ok(())
 }
 
@@ -69,6 +75,15 @@ pub fn sync_memory_folders(root: &Path, store: &PersistedStore) -> std::io::Resu
         )?;
     }
     Ok(())
+}
+
+/// Deleted projects must not leave their exported notes behind. Bot folders are kept on
+/// archive because archived bots can be restored.
+pub fn remove_project_memory(root: &Path, id: &str) -> std::io::Result<()> {
+    match fs::remove_dir_all(folder(root, "projects", id)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
 }
 
 fn mark_bot_homes(store: &mut PersistedStore) {
@@ -285,5 +300,22 @@ mod tests {
         guard.store.bots[0].memories.clear();
         guard.persist().unwrap();
         assert!(!fs::read_to_string(memory).unwrap().contains("PRIVATE_NOTE"));
+    }
+
+    #[test]
+    fn deleting_a_project_removes_its_notes_but_archiving_a_bot_keeps_its_folder() {
+        let f = Fixture::new(&["A", "B"]);
+        let root = {
+            let mut guard = f.state.write().unwrap();
+            guard.store.workspaces.push(serde_json::from_value(json!({"id":"p", "name":"Project", "path":f.dir, "description":"", "instructions":"", "memories":["PROJECT_NOTE"]})).unwrap());
+            guard.persist().unwrap();
+            guard.data_dir.clone()
+        };
+        let project = folder(&root, "projects", "p");
+        assert!(project.join("memory.md").exists());
+        crate::server::delete_workspace_entry(&f.state, "p").unwrap();
+        assert!(!project.exists());
+        crate::server::delete_bot_profile(&f.state, "B").unwrap();
+        assert!(folder(&root, "bots", "B").join("memory.md").exists());
     }
 }

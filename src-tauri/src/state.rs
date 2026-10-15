@@ -6,7 +6,7 @@ use crate::scanner::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
@@ -393,25 +393,88 @@ pub fn omni_data_dir() -> PathBuf {
         .join(".omni-bot")
 }
 
-fn store_file_path() -> PathBuf {
-    omni_data_dir().join("store.json")
+const STORE_FILE: &str = "store.json";
+const BACKUP_FILE: &str = "store.json.bak";
+/// Fresh stores already have the layout every `homes`/`lifecycle` migration produces.
+const CURRENT_HOME_LAYOUT_VERSION: u32 = 4;
+
+fn usable_workspace_root(path: &Path) -> bool {
+    path != Path::new("/") && path.is_dir()
 }
 
 fn default_workspace_root() -> String {
-    let cwd = std::env::current_dir().ok();
-    if let Some(dir) = cwd {
-        let s = dir.to_string_lossy().into_owned();
-        if !s.ends_with("/src-tauri") {
-            return s;
+    // Apps launched from Finder start in `/`, which is never a useful workspace.
+    let cwd = std::env::current_dir().ok().map(|dir| {
+        if dir.ends_with("src-tauri") {
+            dir.parent().map(Path::to_path_buf).unwrap_or(dir)
+        } else {
+            dir
         }
-        if let Some(parent) = dir.parent() {
-            return parent.to_string_lossy().into_owned();
-        }
-    }
-    dirs::desktop_dir()
+    });
+    cwd.filter(|dir| usable_workspace_root(dir))
         .or_else(dirs::home_dir)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| ".".to_string())
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+}
+
+fn open_data_dir(data_dir: &Path) -> Result<fs::File, String> {
+    let unreadable = |e: std::io::Error| {
+        format!(
+            "Omnibot couldn't open its data folder ({}): {e}",
+            data_dir.display()
+        )
+    };
+    fs::create_dir_all(data_dir).map_err(unreadable)?;
+    #[cfg(unix)]
+    set_mode(data_dir, 0o700).map_err(unreadable)?;
+    let lock_path = data_dir.join("store.lock");
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let store_lock = options.open(&lock_path).map_err(unreadable)?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        set_mode(&lock_path, 0o600).map_err(unreadable)?;
+        if unsafe { libc::flock(store_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                return Err(format!(
+                    "Omnibot is already running with this data folder ({}). Quit the other copy and try again.",
+                    data_dir.display()
+                ));
+            }
+            return Err(format!(
+                "Omnibot couldn't lock its data folder ({}): {error}",
+                data_dir.display()
+            ));
+        }
+    }
+    Ok(store_lock)
+}
+
+/// Only call while holding the store lock: another instance may own in-flight temp files.
+fn remove_stale_temp_files(data_dir: &Path) {
+    let Ok(entries) = fs::read_dir(data_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("store-") && name.ends_with(".tmp") {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 impl OmniRuntimeState {
@@ -420,26 +483,27 @@ impl OmniRuntimeState {
         event_tx: broadcast::Sender<OmniStreamEvent>,
     ) -> Result<Self, String> {
         let data_dir = omni_data_dir();
-        fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
-        let store_lock = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(data_dir.join("store.lock"))
-            .map_err(|e| e.to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            if unsafe { libc::flock(store_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-                return Err("Another Omnibot instance is using this data directory. Close it before starting a second instance.".into());
-            }
-        }
-        let harnesses = scan_local_cli_harnesses();
-        let skills = scan_local_skills();
-        let mcp_servers = scan_local_mcp_servers();
-
-        let mut store = load_or_initialize_store(&harnesses)?;
+        let store_lock = open_data_dir(&data_dir)?;
+        remove_stale_temp_files(&data_dir);
+        let loaded = load_store_at(&data_dir)?;
+        // Setup needs the CLI list immediately; everyone else gets it from the
+        // background scan in `finish_startup_scan` so the window opens sooner.
+        let scan_now = loaded
+            .as_ref()
+            .is_none_or(|(store, _)| !store.preferences.onboarding_completed);
+        let (harnesses, skills, mcp_servers) = if scan_now {
+            (
+                scan_local_cli_harnesses(),
+                scan_local_skills(),
+                scan_local_mcp_servers(),
+            )
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
+        let (mut store, storage_notice) = match loaded {
+            Some(loaded) => loaded,
+            None => (initialize_store(&harnesses), None),
+        };
         migrate_application_identity(&mut store);
         normalize_preferences(&mut store);
         remove_legacy_welcome(&mut store);
@@ -460,12 +524,17 @@ impl OmniRuntimeState {
                 }
             }
         }
-        save_store(&store)?;
+        save_store_at(&store, &data_dir).map_err(|error| {
+            format!(
+                "Omnibot couldn't save its data in {}: {error}",
+                data_dir.display()
+            )
+        })?;
 
         Ok(Self {
             instance_id: uuid::Uuid::new_v4().to_string(),
             revision: std::sync::atomic::AtomicU64::new(1),
-            storage_error: None,
+            storage_error: storage_notice,
             execution_slots: HashMap::new(),
             terminals: HashMap::new(),
             server_port,
@@ -600,25 +669,51 @@ pub fn remove_legacy_welcome(store: &mut PersistedStore) {
     }
 }
 
-fn load_or_initialize_store(harnesses: &[CliHarnessInfo]) -> Result<PersistedStore, String> {
-    let path = store_file_path();
-    match fs::read_to_string(&path) {
-        Ok(raw) => {
-            return serde_json::from_str(&raw).map_err(|e| {
-                format!(
-                    "Could not read saved state at {}: {e}. The original file was preserved.",
-                    path.display()
-                )
-            })
+/// Returns `None` for a first launch. A damaged store is replaced by the last-good backup
+/// (keeping the damaged copy beside it); without a valid backup the file is left untouched.
+fn load_store_at(dir: &Path) -> Result<Option<(PersistedStore, Option<String>)>, String> {
+    let path = dir.join(STORE_FILE);
+    let raw = match fs::read(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(format!(
+                "Omnibot couldn't read its saved data at {}: {e}",
+                path.display()
+            ))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("Could not read {}: {e}", path.display())),
-    }
-
-    initialize_store(harnesses)
+    };
+    let parse_error = match serde_json::from_slice(&raw) {
+        Ok(store) => return Ok(Some((store, None))),
+        Err(error) => error,
+    };
+    let backup_path = dir.join(BACKUP_FILE);
+    let backup = fs::read(&backup_path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<PersistedStore>(&raw).ok());
+    let Some(backup) = backup else {
+        return Err(format!(
+            "Omnibot's saved data at {} is damaged and couldn't be read ({parse_error}). No usable backup was found, so the file was left unchanged. Move or repair it, then open Omnibot again.",
+            path.display()
+        ));
+    };
+    let corrupt_path = dir.join(format!("store.corrupt-{}.json", now_ms()));
+    fs::rename(&path, &corrupt_path).map_err(|e| {
+        format!(
+            "Omnibot's saved data at {} is damaged, and setting it aside failed: {e}",
+            path.display()
+        )
+    })?;
+    Ok(Some((
+        backup,
+        Some(format!(
+            "your saved data was damaged, so Omnibot restored the last good backup. The most recent change may be missing. The damaged file was kept at {}",
+            corrupt_path.display()
+        )),
+    )))
 }
 
-fn initialize_store(harnesses: &[CliHarnessInfo]) -> Result<PersistedStore, String> {
+fn initialize_store(harnesses: &[CliHarnessInfo]) -> PersistedStore {
     let workspace_root = default_workspace_root();
     let preferred_primary_driver = harnesses
         .iter()
@@ -675,8 +770,8 @@ fn initialize_store(harnesses: &[CliHarnessInfo]) -> Result<PersistedStore, Stri
 
     let routines = Vec::new();
 
-    Ok(PersistedStore {
-        home_layout_version: 3,
+    PersistedStore {
+        home_layout_version: CURRENT_HOME_LAYOUT_VERSION,
         preferences: OmniPreferences {
             summarize_team_results: false,
             trust_cursor_bot_homes: false,
@@ -703,20 +798,29 @@ fn initialize_store(harnesses: &[CliHarnessInfo]) -> Result<PersistedStore, Stri
         workspaces,
         routines,
         dismissed_bot_ids: Vec::new(),
-    })
+    }
+}
+
+/// Zero means "no limit"; negative or non-finite values are invalid.
+pub fn valid_budget(value: f64) -> bool {
+    value.is_finite() && value >= 0.0
 }
 
 fn normalize_preferences(store: &mut PersistedStore) {
-    if !store.preferences.workflow_budget_usd.is_finite()
-        || store.preferences.workflow_budget_usd <= 0.0
-    {
+    if !valid_budget(store.preferences.workflow_budget_usd) {
         store.preferences.workflow_budget_usd = default_workflow_budget();
     }
     // Ensure guardrail defaults are within sane bounds
     store.preferences.max_context_messages = store.preferences.max_context_messages.clamp(2, 24);
     store.preferences.max_message_chars = store.preferences.max_message_chars.clamp(400, 6000);
-    if store.preferences.max_turn_budget_usd <= 0.0 {
-        store.preferences.max_turn_budget_usd = 1.50;
+    if !valid_budget(store.preferences.max_turn_budget_usd) {
+        store.preferences.max_turn_budget_usd = default_max_turn_budget_usd();
+    }
+    // Earlier releases saved `/` when launched from Finder. Other missing folders are
+    // kept because they may live on a volume that is not mounted yet.
+    let root = store.preferences.workspace_root.trim();
+    if root.is_empty() || Path::new(root) == Path::new("/") {
+        store.preferences.workspace_root = default_workspace_root();
     }
     store.preferences.max_parallel_bots = store.preferences.max_parallel_bots.clamp(1, 6);
     store.preferences.turn_timeout_secs = store.preferences.turn_timeout_secs.clamp(30, 1800);
@@ -802,30 +906,51 @@ pub(crate) fn import_cli_bots(store: &mut PersistedStore, harnesses: &[CliHarnes
     }
 }
 
-fn save_store(store: &PersistedStore) -> Result<(), String> {
-    save_store_at(store, &omni_data_dir())
+fn create_private_file(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
-fn save_store_at(store: &PersistedStore, dir: &std::path::Path) -> Result<(), String> {
+/// Point `store.json.bak` at the current store before it is replaced. The hard link keeps
+/// the old inode alive after the rename, so the backup costs no copy.
+fn refresh_backup(dir: &Path) -> std::io::Result<()> {
+    let current = dir.join(STORE_FILE);
+    if !current.exists() {
+        return Ok(());
+    }
+    let link = dir.join(format!("store-bak-{}.tmp", uuid::Uuid::new_v4()));
+    let result = fs::hard_link(&current, &link)
+        .or_else(|_| fs::copy(&current, &link).map(|_| ()))
+        .and_then(|_| fs::rename(&link, dir.join(BACKUP_FILE)));
+    if result.is_err() {
+        let _ = fs::remove_file(link);
+    }
+    result
+}
+
+fn save_store_at(store: &PersistedStore, dir: &Path) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
-    let json = serde_json::to_string_pretty(store)
-        .map_err(|e| format!("Failed to serialize store: {e}"))?;
+    let json = serde_json::to_vec(store).map_err(|e| format!("Failed to serialize store: {e}"))?;
     // Replace atomically so a crash cannot leave a half-written transcript.
     let temp = dir.join(format!("store-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| {
         use std::io::Write;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        }
-        file.write_all(json.as_bytes())?;
+        let mut file = create_private_file(&temp)?;
+        file.write_all(&json)?;
         file.sync_all()?;
-        fs::rename(&temp, dir.join("store.json"))
+        refresh_backup(dir)?;
+        fs::rename(&temp, dir.join(STORE_FILE))?;
+        // Persist the rename itself; a failure here leaves a valid file in place.
+        if let Ok(directory) = fs::File::open(dir) {
+            let _ = directory.sync_all();
+        }
+        Ok::<_, std::io::Error>(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(temp);
@@ -883,13 +1008,30 @@ pub async fn rescan_environment(state: SharedOmniState) -> Result<OmniSnapshot, 
     Ok(snapshot)
 }
 
+/// Completes discovery deferred by `OmniRuntimeState::load`, then loads model catalogs.
+pub async fn finish_startup_scan(state: SharedOmniState) {
+    let pending = state.read().is_ok_and(|guard| guard.harnesses.is_empty());
+    if !pending {
+        crate::models::refresh(state).await;
+        return;
+    }
+    match rescan_environment(state.clone()).await {
+        Ok(_) => {
+            if let Ok(guard) = state.read() {
+                guard.emit(OmniStreamEvent::StateUpdated { chat_id: None });
+            }
+        }
+        Err(error) => eprintln!("Tool discovery failed: {error}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn application_rename_preserves_profiles_and_refreshes_affected_sessions_once() {
-        let mut store = initialize_store(&[]).unwrap();
+        let mut store = initialize_store(&[]);
         let bot = &mut store.bots[0];
         bot.name = "My assistant".into();
         bot.avatar_image = Some("/botfinity-gauntlet.png".into());
@@ -920,7 +1062,7 @@ mod tests {
 
     #[test]
     fn fresh_store_has_only_main_bot_and_requires_setup() {
-        let store = initialize_store(&[]).unwrap();
+        let store = initialize_store(&[]);
         assert_eq!(store.bots.len(), 1);
         assert!(store.bots[0].is_primary);
         assert_eq!(
@@ -987,5 +1129,112 @@ mod tests {
                 & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn saves_keep_the_previous_store_as_backup() {
+        let f = Fixture::new(&["A"]);
+        let mut g = f.state.write().unwrap();
+        g.persist().unwrap();
+        assert!(!g.data_dir.join(BACKUP_FILE).exists());
+        g.store.bots[0].name = "Renamed".into();
+        g.persist().unwrap();
+        let backup: PersistedStore =
+            serde_json::from_slice(&fs::read(g.data_dir.join(BACKUP_FILE)).unwrap()).unwrap();
+        assert_eq!(backup.bots[0].name, "A");
+        let raw = fs::read_to_string(g.data_dir.join(STORE_FILE)).unwrap();
+        assert!(!raw.contains('\n'), "store should be compact");
+    }
+
+    #[test]
+    fn corrupt_store_recovers_from_backup_and_keeps_the_damaged_copy() {
+        let f = Fixture::new(&["A"]);
+        let dir = f.state.read().unwrap().data_dir.clone();
+        {
+            let mut g = f.state.write().unwrap();
+            g.persist().unwrap();
+            g.store.bots[0].name = "Newest".into();
+            g.persist().unwrap();
+        }
+        fs::write(dir.join(STORE_FILE), b"{ damaged").unwrap();
+        let (store, notice) = load_store_at(&dir).unwrap().unwrap();
+        assert_eq!(store.bots[0].name, "A");
+        assert!(notice.unwrap().contains("store.corrupt-"));
+        assert!(!dir.join(STORE_FILE).exists());
+        let corrupt: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("store.corrupt-")
+            })
+            .collect();
+        assert_eq!(corrupt.len(), 1);
+        assert_eq!(fs::read(corrupt[0].path()).unwrap(), b"{ damaged");
+    }
+
+    #[test]
+    fn corrupt_store_without_backup_fails_and_is_left_untouched() {
+        let f = Fixture::new(&["A"]);
+        let dir = f.state.read().unwrap().data_dir.clone();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(STORE_FILE), b"not json").unwrap();
+        fs::write(dir.join(BACKUP_FILE), b"also damaged").unwrap();
+        let error = load_store_at(&dir).unwrap_err();
+        assert!(error.contains(&dir.join(STORE_FILE).display().to_string()));
+        assert_eq!(fs::read(dir.join(STORE_FILE)).unwrap(), b"not json");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn startup_locks_the_data_folder_and_sweeps_stale_temp_files() {
+        let f = Fixture::new(&["A"]);
+        let dir = f.dir.join("data");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("store-crashed.tmp"), b"partial").unwrap();
+        fs::write(dir.join("notes.tmp"), b"not ours").unwrap();
+        let lock = open_data_dir(&dir).unwrap();
+        let error = open_data_dir(&dir).unwrap_err();
+        assert!(error.contains("already running"), "{error}");
+        remove_stale_temp_files(&dir);
+        assert!(!dir.join("store-crashed.tmp").exists());
+        assert!(dir.join("notes.tmp").exists());
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("store.lock")), 0o600);
+        drop(lock);
+    }
+
+    #[test]
+    fn fresh_store_needs_no_layout_migration() {
+        let mut store = initialize_store(&[]);
+        let before = serde_json::to_value(&store).unwrap();
+        crate::homes::migrate(&mut store);
+        crate::lifecycle::migrate(&mut store);
+        assert_eq!(before, serde_json::to_value(&store).unwrap());
+        // Running the version-3 upgrade on a fresh store must produce the same data.
+        let mut legacy = initialize_store(&[]);
+        legacy.home_layout_version = 3;
+        legacy.chats[0].updated_at_ms = store.chats[0].updated_at_ms;
+        crate::homes::migrate(&mut legacy);
+        crate::lifecycle::migrate(&mut legacy);
+        assert_eq!(before, serde_json::to_value(&legacy).unwrap());
+    }
+
+    #[test]
+    fn zero_budgets_mean_no_limit_and_finder_root_is_repaired() {
+        let mut store = initialize_store(&[]);
+        store.preferences.workflow_budget_usd = 0.0;
+        store.preferences.max_turn_budget_usd = 0.0;
+        store.preferences.workspace_root = "/".into();
+        normalize_preferences(&mut store);
+        assert_eq!(store.preferences.workflow_budget_usd, 0.0);
+        assert_eq!(store.preferences.max_turn_budget_usd, 0.0);
+        assert_ne!(store.preferences.workspace_root, "/");
+        store.preferences.workflow_budget_usd = -1.0;
+        normalize_preferences(&mut store);
+        assert_eq!(store.preferences.workflow_budget_usd, 3.75);
     }
 }
