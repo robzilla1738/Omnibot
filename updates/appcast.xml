@@ -1,18 +1,56 @@
-<?xml version="1.0" standalone="yes"?><!-- sparkle-sign-warning:
+<?xml version="1.0" standalone="yes"?>
+<!-- sparkle-sign-warning:
 IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
---><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+-->
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
         <title>Omnibot</title>
+        <item>
+            <title>0.1.2</title>
+            <pubDate>Thu, 15 Oct 2026 15:59:16 -0500</pubDate>
+            <sparkle:version>0.1.2</sparkle:version>
+            <sparkle:shortVersionString>0.1.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# Omnibot 0.1.2
+
+This release improves upgrade safety, bot coordination, local terminals, and everyday editing.
+
+## Before updating
+
+Finish or stop running tasks, and send or copy any unsent drafts in your older app before restarting. Back up `~/.omni-bot/` if it contains important work. Keep the same data directory: the bundle identity, update feed and signing key are unchanged.
+
+The first launch preserves an exact pre-migration store copy. Version 0.1.2 can recover a missing or damaged primary store from its backup and refuses unsupported newer schemas. Older binaries do not have that protection; follow the [recovery instructions](https://github.com/robzilla1738/Omnibot/blob/main/docs/recovery.md) before downgrading.
+
+## Changes
+
+- Embedded interactive terminals and retained run logs, stronger project/worktree isolation, bounded delegation, and scheduled-run grace periods.
+- Drafts and composer selections survive navigation and restart; failed sends preserve newer edits. Saved reasoning defaults and skills launched from the library are respected.
+- Git actions consistently target repository-relative files, including nested folders, staged additions and renames. Large previews and command output are bounded.
+- Safer migration and backup recovery, preserved customized prompts, cleanup of leftover CLI helpers, and authenticated development connections.
+- Fixes for stale Git previews, asynchronous avatar/profile updates, sidebar menu focus and Safari dialog keyboard navigation.
+- Release artifacts tied to an exact source commit and successful CI run, with dependency audits and bundled license/notice provenance for 307 packages.
+
+## Downloads and verification
+
+The universal DMG and ZIP are Developer ID signed and Apple-notarized. The release includes SHA-256 checksums, a source/CI manifest, and dependency notices. Install the DMG by dragging Omnibot to Applications; existing signed installations can use Check for Updates.
+
+Local verification passed 154 Rust tests, 69 Chromium tests, 69 WebKit tests and 23 Python safeguard tests, plus native startup, migration, restart persistence, PTY, update-check and active-task refusal checks. Release CI results are linked in the artifact manifest.
+
+Apple Silicon native runtime was tested on macOS 27.0.1. Physical Intel, the declared minimum macOS 11, actual Sparkle older-to-newer installation/relaunch, and every live CLI/provider combination remain unverified. Both CPU architectures are included and inspected. Two scoped Rust lockfile advisories concern dependencies excluded from both shipped macOS graphs; CI verifies those exclusions. See the [support matrix](https://github.com/robzilla1738/Omnibot/blob/main/docs/support-matrix.md) and [security policy](https://github.com/robzilla1738/Omnibot/blob/main/SECURITY.md).
+]]></description>
+            <enclosure url="https://github.com/robzilla1738/Omnibot/releases/download/v0.1.2/Omnibot-0.1.2-universal.zip" length="12700124" type="application/octet-stream" sparkle:edSignature="hprbV6oz1xZoPTepZYTjM1viqeWKI4eqF6UboptpMgqzpoyn/fgqwY1cxLEhf3AXrSb4bK0hV3C6XrThL7jGBQ=="/>
+        </item>
         <item>
             <title>0.1.1</title>
             <pubDate>Wed, 14 Oct 2026 14:32:10 -0500</pubDate>
             <sparkle:version>0.1.1</sparkle:version>
             <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/robzilla1738/Omnibot/releases/download/v0.1.1/Omnibot-0.1.1-universal.zip" length="11209907" type="application/octet-stream" sparkle:edSignature="ZgGj5SQcKIdog5FYfDsPCV8JqU2j7OwOFCIgIDcICzjLKLaQTqYi4xTwa029DzmBoZqmqfdWoLLwrhfMCpCDDA=="></enclosure>
+            <enclosure url="https://github.com/robzilla1738/Omnibot/releases/download/v0.1.1/Omnibot-0.1.1-universal.zip" length="11209907" type="application/octet-stream" sparkle:edSignature="ZgGj5SQcKIdog5FYfDsPCV8JqU2j7OwOFCIgIDcICzjLKLaQTqYi4xTwa029DzmBoZqmqfdWoLLwrhfMCpCDDA=="/>
         </item>
     </channel>
-</rss><!-- sparkle-signatures:
-edSignature: E5H/NNDwaAanXRh/0etuc9stp0UUX/8I2t9lurokACYfPIx2W7LLZN9XFDFEGhajFYWCVC4JjyMWSkLb9reZDA==
-length: 1057
+</rss>
+<!-- sparkle-signatures:
+edSignature: /7w3teHLBAm6n9/F2NFE4LQuzCc69OAEwl+y816b/65ZD+r2PyM1pB9AsFspxsOKa8d5HNRw529u4HeOgoevBA==
+length: 4547
 -->

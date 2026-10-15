@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.2 — Release preparation
+## [0.1.2](https://github.com/robzilla1738/Omnibot/releases/tag/v0.1.2) — October 15, 2026
 
 - Add embedded interactive terminals and run logs, stronger bot lifecycle handling, scoped project execution, bounded delegation, and scheduled-run grace periods.
 - Preserve customized bot instructions during upgrades. Keep an immutable copy of older stores before migration, recover missing or damaged primary stores from their backup, and refuse data from a newer schema.

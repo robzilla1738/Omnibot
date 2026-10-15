@@ -2,6 +2,21 @@
 
 This page distinguishes repeatable checks from historical results. Use the exact commit and environment in any new verification record. Uncommitted source changes are not a signed release candidate.
 
+## Published 0.1.2 — October 15, 2026
+
+[Release and downloads](https://github.com/robzilla1738/Omnibot/releases/tag/v0.1.2) were built from `0121fa16cfe3a26079e3261e1da585ee9e374952`, after [exact-source CI](https://github.com/robzilla1738/Omnibot/actions/runs/38804183870) passed. CI passed 154 Rust tests, 69 Chromium tests, 69 WebKit tests, 23 Python safeguards, formatting/Clippy, dependency auditing, notice collection, packaging and the isolated native backend smoke test.
+
+The final universal app and DMG were Developer ID signed, Apple-notarized and stapled. Public downloads were retrieved into a fresh directory and all five entries in `SHA256SUMS.txt` passed. The release tag matched the manifest source commit; the extracted app and DMG passed code-signature, ticket and Gatekeeper checks. The app's version, both architecture slices, existing bundle identity, update key/feed and embedded notices were validated. The ZIP passed Sparkle signature verification. The generated signed feed was published only after these downloads were available and verified.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Universal ZIP | `a9ff564b31541c7e094e0fa78824728e0d50cd70cceb319314f5926bad319599` |
+| Universal DMG | `c63f7b451ecd1bedc6fb162b1202f634a6441558eac176b66f3ed1044ad3f110` |
+
+The final signed binary passed isolated Apple Silicon startup, fake workflows, archive/restore, PTY input/resize/exit and restart persistence smoke tests. An additional upgrade check downloaded and verified the published 0.1.1 ZIP, used that binary to save a synthetic profile, then explicitly replaced its subprocess with 0.1.2. Custom prompts, model/effort choices, personal/project/shared memory, settings, project/history/session metadata and disabled routines were preserved. The pre-migration copy exactly matched the old store bytes; a second launch preserved the profile identity and did not create another migration copy.
+
+This was explicit binary replacement, not a Sparkle installation. Physical Intel, macOS 11, actual signed update installation/relaunch and all live CLI/provider combinations remain unverified. Native UI evidence from the earlier qualification is retained below. The source/CI manifest, checksums and dependency notices are release assets; the historical local qualification archive below is not the published artifact.
+
 ## 0.1.2 local qualification — October 15, 2026
 
 Environment: macOS 27.0.1, Apple Silicon, Rust 1.99.0, Playwright 1.64.0. Source is the uncommitted worktree based on `d75f7ea9f6af7a1a9e3cca553dfcdea9efa4e6d2`; nothing was committed, pushed or published. The pre-existing Dependabot edit was preserved.

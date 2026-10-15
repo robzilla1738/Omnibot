@@ -13,7 +13,7 @@ Omnibot currently targets macOS. A build target or implemented adapter is not a 
 | Custom command | Trusted executable plus configured arguments; automated context/prompt argument or interactive PTY | Command defines its own protocol and permissions; no provider compatibility claim |
 | Embedded interactive terminal | Claude Code and custom commands | Local PTY fixture coverage; live account/session behavior remains CLI-specific |
 | Scheduled routines | While application/backend runs | No background launch agent and no replay of runs missed while the app was closed |
-| Updates | Sparkle signatures, Developer ID/notarized release pipeline | Signing and update delivery must be verified against actual release artifacts |
+| Updates | Sparkle signatures, Developer ID/notarized release pipeline | 0.1.2 public downloads, signatures, notarization and source/CI binding verified; actual installation/relaunch remains unverified |
 
 For a live adapter check, record Omnibot commit, exact CLI version, macOS/CPU, authentication method, selected model, permission mode, working directory type, and which of send/stream/stop/resume/usage/interactive behaviors passed. Use a disposable project and the narrowest permissions needed. Obtain explicit authorization before paid inference or changing provider account settings. Never include credential values or private task content in the record.
 
