@@ -6,7 +6,7 @@ import {
   Search,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   BotProfile,
   CliHarnessInfo,
@@ -16,6 +16,10 @@ import type {
 } from "../../lib/types";
 import { BotModelSelect } from "../bots/BotModelSelect";
 import { BotCharacterAvatar, SkillBrandIcon } from "../icons/BotCharacterAvatar";
+import { Dialog } from "../ui/Dialog";
+import { useNotices } from "../ui/Notices";
+
+type SearchResult = { key: string; group: string; title: ReactNode; detail: string; icon: ReactNode; select: () => void };
 
 export interface SearchAndNewChatModalProps {
   open: boolean;
@@ -60,7 +64,10 @@ export function SearchAndNewChatModal({
   onSelectProject,
   onCreateSwarmOrChat,
 }: SearchAndNewChatModalProps) {
+  const { runAction } = useNotices();
+  const listboxId = useId();
   const [query, setQuery] = useState("");
+  const [activeIndex, setActiveIndex] = useState(0);
   const [selectedBotIds, setSelectedBotIds] = useState<string[]>([]);
   const [useWorktrees, setUseWorktrees] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -84,8 +91,6 @@ export function SearchAndNewChatModal({
     setUseWorktrees(false);
     setProjectPath(""); setFolderPath("");
     setError("");
-    const timer = setTimeout(() => inputRef.current?.focus(), 40);
-    return () => clearTimeout(timer);
   }, [open, mode, bots, initialParticipantBotIds]);
 
   const trimmedQuery = query.trim().toLowerCase();
@@ -106,64 +111,60 @@ export function SearchAndNewChatModal({
     finally { submitting.current = false; setSaving(false); }
   };
 
-  const filteredBots = useMemo(
-    () =>
-      bots.filter(
-        (b) =>
-          !trimmedQuery ||
-          b.name.toLowerCase().includes(trimmedQuery) ||
-          b.cliDriver.toLowerCase().includes(trimmedQuery) ||
-          b.roleTitle.toLowerCase().includes(trimmedQuery)
-      ),
-    [bots, trimmedQuery]
-  );
+  const results = useMemo<SearchResult[]>(() => {
+    const matches = (...fields: string[]) => !trimmedQuery || fields.some(field => field.toLowerCase().includes(trimmedQuery));
+    const iconBox = (className: string, icon: ReactNode) => <div className={`w-[36px] h-[36px] rounded-[11px] flex items-center justify-center shrink-0 ${className}`}>{icon}</div>;
+    return [
+      ...bots.filter(b => matches(b.name, b.cliDriver, b.roleTitle)).map(b => ({
+        key: `bot:${b.id}`, group: "Bots",
+        title: <><span>{b.name}</span><span className="text-[11px] text-zinc-400">({b.cliDriver})</span></>,
+        detail: b.roleTitle,
+        icon: <BotCharacterAvatar bot={b} size={38} showCliBadge={!b.isPrimary} showStarBadge={b.isPrimary} useHeroMascot={b.isPrimary} />,
+        select: () => { if (b.isPrimary) onSelectPrimary(); else onSelectBotDirectChat(b); onClose(); },
+      })),
+      ...chats.filter(c => matches(c.title, c.subtitle)).slice(0, 8).map(c => ({
+        key: `chat:${c.id}`, group: "Group chats & Threads", title: c.title, detail: c.subtitle,
+        icon: iconBox("bg-[#1b1b1b] border border-white/[0.06] text-zinc-400", <MessageSquare className="w-[17px] h-[17px]" />),
+        select: () => { onSelectChat(c.id); onClose(); },
+      })),
+      ...projects.filter(p => matches(p.name, p.path)).map(p => ({
+        key: `project:${p.id}`, group: "Projects", title: p.name, detail: p.path,
+        icon: iconBox("bg-[#8cf1fb]/15 text-[#8cf1fb]", <FolderGit2 className="w-[17px] h-[17px]" />),
+        select: () => { void runAction(`Couldn’t open ${p.name}`, async () => { await onSelectProject(p.path); onClose(); }); },
+      })),
+      ...skills.filter(sk => matches(sk.name, sk.slug)).slice(0, 10).map(sk => ({
+        key: `skill:${sk.id}`, group: "Local Skills", title: sk.name, detail: `/${sk.slug} · ${sk.description}`,
+        icon: <SkillBrandIcon name={sk.name} size={36} />,
+        select: () => {
+          void runAction(`Couldn’t start ${sk.name}`, () => onCreateSwarmOrChat({ title: sk.name, participantBotIds: [bots.find(b => b.isPrimary)?.id ?? "bot-omni"], skillSlug: sk.slug }));
+          onClose();
+        },
+      })),
+    ];
+  }, [bots, chats, projects, skills, trimmedQuery, onSelectPrimary, onSelectBotDirectChat, onSelectChat, onSelectProject, onCreateSwarmOrChat, onClose, runAction]);
 
-  const filteredChats = useMemo(
-    () =>
-      chats.filter(
-        (c) =>
-          !trimmedQuery ||
-          c.title.toLowerCase().includes(trimmedQuery) ||
-          c.subtitle.toLowerCase().includes(trimmedQuery)
-      ),
-    [chats, trimmedQuery]
-  );
+  useEffect(() => { setActiveIndex(0); }, [trimmedQuery, open]);
+  const activeResult = results[Math.min(activeIndex, results.length - 1)];
+  const optionId = (key: string) => `${listboxId}-${key.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+  useEffect(() => {
+    if (mode !== "search" || !activeResult) return;
+    document.getElementById(optionId(activeResult.key))?.scrollIntoView({ block: "nearest" });
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- only scroll when the highlighted result changes
+  }, [mode, activeResult?.key]);
 
-  const filteredSkills = useMemo(
-    () =>
-      skills
-        .filter(
-          (s) =>
-            !trimmedQuery ||
-            s.name.toLowerCase().includes(trimmedQuery) ||
-            s.slug.toLowerCase().includes(trimmedQuery)
-        )
-        .slice(0, 10),
-    [skills, trimmedQuery]
-  );
+  const close = () => { if (!saving) onClose(); };
 
   return (
-    <div
-      aria-hidden={!open}
-      inert={!open}
-      className={`fixed inset-0 z-50 flex items-start justify-center pt-16 px-4 select-none transition-opacity duration-220 spring-transition ${
-        open
-          ? "bg-black/65 backdrop-blur-md opacity-100 pointer-events-auto"
-          : "bg-black/65 backdrop-blur-md opacity-0 pointer-events-none"
-      }`}
-      onClick={() => { if (!saving) onClose(); }}
+    <Dialog
+      open={open}
+      onClose={close}
+      label={mode === "search" ? "Search" : "New chat"}
+      dismissible={!saving}
+      initialFocus={inputRef}
+      overlayClassName="items-start justify-center pt-16 px-4"
+      closedClassName="scale-[0.985] opacity-0 -translate-y-1"
+      className="w-full max-w-[560px] h-[min(720px,calc(100dvh-128px))] rounded-[22px] bg-[#121212] border border-white/[0.08] shadow-[0_28px_90px_rgba(0,0,0,0.85)] flex flex-col overflow-hidden"
     >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={mode === "search" ? "Search" : "New chat"}
-        className={`w-full max-w-[560px] h-[min(720px,calc(100dvh-128px))] rounded-[22px] bg-[#121212] border border-white/[0.08] shadow-[0_28px_90px_rgba(0,0,0,0.85)] flex flex-col overflow-hidden transition-[opacity,scale,translate] duration-240 spring-transition ${
-          open
-            ? "scale-100 opacity-100 translate-y-0"
-            : "scale-[0.985] opacity-0 -translate-y-1"
-        }`}
-        onClick={(e) => e.stopPropagation()}
-      >
         {/* Top Search / Input Bar */}
         <div className="shrink-0 px-4 py-3.5 flex items-center gap-3">
           <Search className="w-[18px] h-[18px] text-[#8e8d8a] shrink-0" />
@@ -177,9 +178,27 @@ export function SearchAndNewChatModal({
                 ? "Search Bots, Group chats, Projects, and Skills..."
                 : groupChat ? "Group chat title (optional)…" : "Chat title (optional)…"
             }
+            {...(mode === "search" ? {
+              role: "combobox",
+              "aria-expanded": results.length > 0,
+              "aria-controls": listboxId,
+              "aria-autocomplete": "list" as const,
+              "aria-activedescendant": activeResult ? optionId(activeResult.key) : undefined,
+            } : {})}
+            aria-label={mode === "search" ? "Search" : "Chat title"}
             onKeyDown={(e) => {
-              if (e.key === "Escape" && !saving) onClose();
-              if (e.key === "Enter" && mode !== "search") void createChat();
+              if (mode !== "search") {
+                if (e.key === "Enter") void createChat();
+                return;
+              }
+              if ((e.key === "ArrowDown" || e.key === "ArrowUp") && results.length > 0) {
+                e.preventDefault();
+                const step = e.key === "ArrowDown" ? 1 : -1;
+                setActiveIndex(index => (Math.min(index, results.length - 1) + step + results.length) % results.length);
+              } else if (e.key === "Enter" && activeResult) {
+                e.preventDefault();
+                activeResult.select();
+              }
             }}
             className="w-full bg-transparent text-[15px] text-zinc-100 placeholder:text-[#8e8d8a] focus:outline-none"
           />
@@ -187,7 +206,7 @@ export function SearchAndNewChatModal({
             type="button"
             aria-label="Close dialog"
             disabled={saving}
-            onClick={() => { if (!saving) onClose(); }}
+            onClick={close}
             className="w-8 h-8 rounded-full bg-[#1f1f1f] hover:bg-[#272727] border border-white/[0.06] flex items-center justify-center text-zinc-300 hover:text-white shrink-0 transition-colors"
           >
             <X className="w-4 h-4" />
@@ -233,143 +252,32 @@ export function SearchAndNewChatModal({
               </label>}
             </>
           ) : (
-            <div className="space-y-3">
-              {/* Bots */}
-              <div className="space-y-1">
-                <div className="px-2 text-xs text-[#8e8d8a]">Bots</div>
-                {filteredBots.map((b) => (
-                  <button
-                    key={b.id}
-                    type="button"
-                    onClick={() => {
-                      if (b.isPrimary) onSelectPrimary();
-                      else onSelectBotDirectChat(b);
-                      onClose();
-                    }}
-                    className="w-full px-3 py-2 rounded-[16px] hover:bg-[#1b1b1b] flex items-center gap-3.5 text-left transition-colors"
-                  >
-                    <BotCharacterAvatar
-                      bot={b}
-                      size={38}
-                      showCliBadge={!b.isPrimary}
-                      showStarBadge={b.isPrimary}
-                      useHeroMascot={b.isPrimary}
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="text-[14.5px] font-medium text-[#f4f4f5] flex items-center gap-2">
-                        <span>{b.name}</span>
-                        <span className="text-[11px]  text-zinc-400">
-                          ({b.cliDriver})
-                        </span>
+            <div id={listboxId} role="listbox" aria-label="Search results" className="space-y-3">
+              {results.length === 0 && <p className="px-3 py-6 text-center text-sm text-zinc-500">No matches</p>}
+              {results.map((result, index) => {
+                const active = result === activeResult;
+                return (
+                  <div key={result.key} role="presentation">
+                    {result.group !== results[index - 1]?.group && <div role="presentation" className="px-2 pb-1 text-xs text-[#8e8d8a]">{result.group}</div>}
+                    <button
+                      id={optionId(result.key)}
+                      type="button"
+                      role="option"
+                      aria-selected={active}
+                      tabIndex={-1}
+                      onMouseMove={() => { if (!active) setActiveIndex(index); }}
+                      onClick={result.select}
+                      className={`w-full px-3 py-2 rounded-[16px] flex items-center gap-3.5 text-left transition-colors ${active ? "bg-[#1f1f1f]" : "hover:bg-[#1b1b1b]"}`}
+                    >
+                      {result.icon}
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[14.5px] font-medium text-[#f4f4f5] flex items-center gap-2 truncate">{result.title}</div>
+                        <div className="text-[12.5px] text-[#8e8d8a] truncate">{result.detail}</div>
                       </div>
-                      <div className="text-[12.5px] text-[#8e8d8a] truncate">
-                        {b.roleTitle}
-                      </div>
-                    </div>
-                  </button>
-                ))}
-              </div>
-
-              {/* Threads & Group chats */}
-              {filteredChats.length > 0 && (
-                <div className="space-y-1">
-                  <div className="px-2 text-xs text-[#8e8d8a]">
-                    Group chats &amp; Threads
+                    </button>
                   </div>
-                  {filteredChats.slice(0, 8).map((c) => (
-                    <button
-                      key={c.id}
-                      type="button"
-                      onClick={() => {
-                        onSelectChat(c.id);
-                        onClose();
-                      }}
-                      className="w-full px-3 py-2 rounded-[16px] hover:bg-[#1b1b1b] flex items-center gap-3.5 text-left transition-colors"
-                    >
-                      <div className="w-[36px] h-[36px] rounded-[11px] bg-[#1b1b1b] border border-white/[0.06] text-zinc-400 flex items-center justify-center shrink-0">
-                        <MessageSquare className="w-[17px] h-[17px]" />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="text-[14.5px] font-medium text-[#f4f4f5] truncate">
-                          {c.title}
-                        </div>
-                        <div className="text-[12.5px] text-[#8e8d8a] truncate">
-                          {c.subtitle}
-                        </div>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {/* Projects */}
-              {projects.length > 0 && (
-                <div className="space-y-1">
-                  <div className="px-2 text-xs text-[#8e8d8a]">Projects</div>
-                  {projects
-                    .filter(
-                      (p) =>
-                        !trimmedQuery ||
-                        p.name.toLowerCase().includes(trimmedQuery) ||
-                        p.path.toLowerCase().includes(trimmedQuery)
-                    )
-                    .map((p) => (
-                      <button
-                        key={p.id}
-                        type="button"
-                        onClick={async () => {
-                          await onSelectProject(p.path);
-                          onClose();
-                        }}
-                        className="w-full px-3 py-2 rounded-[16px] hover:bg-[#1b1b1b] flex items-center gap-3.5 text-left transition-colors"
-                      >
-                        <div className="w-[36px] h-[36px] rounded-[11px] bg-[#8cf1fb]/15 text-[#8cf1fb] flex items-center justify-center shrink-0">
-                          <FolderGit2 className="w-[17px] h-[17px]" />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="text-[14.5px] font-medium text-[#f4f4f5] truncate">
-                            {p.name}
-                          </div>
-                          <div className="text-[12px]  text-[#8e8d8a] truncate">
-                            {p.path}
-                          </div>
-                        </div>
-                      </button>
-                    ))}
-                </div>
-              )}
-
-              {/* Local Skills */}
-              {filteredSkills.length > 0 && (
-                <div className="space-y-1">
-                  <div className="px-2 text-xs text-[#8e8d8a]">Local Skills</div>
-                  {filteredSkills.map((sk) => (
-                    <button
-                      key={sk.id}
-                      type="button"
-                      onClick={() => {
-                        onCreateSwarmOrChat({
-                          title: sk.name,
-                          participantBotIds: ["bot-omni"],
-                          skillSlug: sk.slug,
-                        });
-                        onClose();
-                      }}
-                      className="w-full px-3 py-2 rounded-[16px] hover:bg-[#1b1b1b] flex items-center gap-3.5 text-left transition-colors"
-                    >
-                      <SkillBrandIcon name={sk.name} size={36} />
-                      <div className="min-w-0 flex-1">
-                        <div className="text-[14.5px] font-medium text-[#f4f4f5] truncate">
-                          {sk.name}
-                        </div>
-                        <div className="text-[12.5px] text-[#8e8d8a] truncate">
-                          /{sk.slug} · {sk.description}
-                        </div>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              )}
+                );
+              })}
             </div>
           )}
         </div>
@@ -379,7 +287,6 @@ export function SearchAndNewChatModal({
                 {saving ? "Creating…" : groupChat ? `Create group chat${selectedBotIds.length ? ` (${selectedBotIds.length} bots)` : ""}` : "Start chat"}
               </button>
         </div>}
-      </div>
-    </div>
+    </Dialog>
   );
 }

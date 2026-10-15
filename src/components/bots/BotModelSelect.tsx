@@ -2,7 +2,7 @@ import type { CliHarnessInfo } from "../../lib/types";
 import { rescanOmniEnvironment } from "../../lib/omni-bridge";
 import { NativeSelect } from "../ui/NativeSelect";
 import { RefreshCw } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export function BotModelSelect({ value, harness, onChange, label = "Model", defaultLabel = "CLI default", disabled = false }: {
   value: string | null;
@@ -19,11 +19,22 @@ export function BotModelSelect({ value, harness, onChange, label = "Model", defa
   const [draft, setDraft] = useState("");
   useEffect(() => { setCustom(false); setDraft(""); setError(""); }, [harness?.kind]);
   const models = harness?.models ?? [];
+  const inFlight = useRef(false);
+  const lastSubmitted = useRef<string | null>(null);
   const save = async (model: string | null) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setSaving(true); setError("");
     try { await onChange(model); }
-    catch (error) { setError(error instanceof Error ? error.message : String(error)); }
-    finally { setSaving(false); }
+    catch (error) { lastSubmitted.current = null; setError(error instanceof Error ? error.message : String(error)); }
+    finally { inFlight.current = false; setSaving(false); }
+  };
+  // Enter saves and then disabling the input blurs it; without this the same ID is saved twice.
+  const submitCustom = () => {
+    const next = draft.trim();
+    if (!next || next === lastSubmitted.current) return;
+    lastSubmitted.current = next;
+    void save(next);
   };
   return <div className="space-y-2 text-xs text-zinc-400">
     <div className="flex items-center justify-between gap-2"><span>{label}</span>
@@ -43,7 +54,7 @@ export function BotModelSelect({ value, harness, onChange, label = "Model", defa
       <option value="__custom__">Custom model…</option>
     </NativeSelect>
     {!value && !custom && defaultLabel === "CLI default" && <p>Uses the model configured in {harness?.name ?? "your CLI"}.</p>}
-    {custom && <label className="block space-y-2"><span>Model ID from your CLI</span><input aria-label={`${label} custom ID`} value={draft} onChange={event => setDraft(event.target.value)} onBlur={() => { if (draft.trim()) void save(draft.trim()); }} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); if (draft.trim()) void save(draft.trim()); } }} disabled={disabled || saving} className="w-full rounded-xl border border-white/10 bg-[#1c1c1c] px-3 py-3 text-sm text-zinc-200" /></label>}
+    {custom && <label className="block space-y-2"><span>Model ID from your CLI</span><input aria-label={`${label} custom ID`} value={draft} onChange={event => { setDraft(event.target.value); lastSubmitted.current = null; }} onBlur={submitCustom} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); submitCustom(); } }} disabled={disabled || saving} className="w-full rounded-xl border border-white/10 bg-[#1c1c1c] px-3 py-3 text-sm text-zinc-200" /></label>}
     {harness?.modelsStatus === "loading" && <p role="status">Checking models with your CLI…</p>}
     {harness?.modelsStatus === "unavailable" && <p>Model list unavailable. Use your CLI default or enter a model ID.</p>}
     {error && <p role="alert" className="text-red-300">{error}</p>}

@@ -63,21 +63,24 @@ export type BotColor =
   | "gray"
   | "black";
 
+/** Accepts values persisted by newer or older versions while keeping autocomplete for known ones. */
+export type OpenString<Known extends string> = Known | (string & {});
+
 export interface BotProfile {
-  archived?: boolean;
+  archived: boolean;
   id: string;
   name: string;
   slug: string;
   roleTitle: string;
   description: string;
   avatarImage?: string | null;
-  shape: BotShape | string;
-  color: BotColor | string;
+  shape: OpenString<BotShape>;
+  color: OpenString<BotColor>;
   isPrimary: boolean;
   cliDriver: CliDriverKind;
   model?: string | null;
-  reasoningEffort: "low" | "medium" | "high" | string;
-  permissionMode: "auto" | "acceptEdits" | "plan" | "bypassPermissions" | string;
+  reasoningEffort: OpenString<"low" | "medium" | "high">;
+  permissionMode: OpenString<"auto" | "acceptEdits" | "plan" | "bypassPermissions">;
   systemPrompt: string;
   memories: string[];
   autoCreatedForCli: boolean;
@@ -91,7 +94,7 @@ export interface ToolInvocation {
   inputSummary: string;
   command?: string | null;
   outputSummary?: string | null;
-  status: "running" | "completed" | "error" | string;
+  status: OpenString<"running" | "completed" | "error">;
 }
 
 export interface HandoffEvent {
@@ -99,13 +102,13 @@ export interface HandoffEvent {
   fromBotName: string;
   toBotIds: string[];
   toBotNames: string[];
-  mode: "sequential" | "parallel" | string;
+  mode: OpenString<"sequential" | "parallel" | "summary">;
   note: string;
 }
 
 export interface ChatMessage {
-  usageReported?: boolean;
-  modelReported?: boolean;
+  usageReported: boolean;
+  modelReported: boolean;
   id: string;
   role: "user" | "assistant" | "system";
   authorBotId?: string | null;
@@ -125,7 +128,7 @@ export interface ChatMessage {
   costUsd?: number | null;
   inputTokens?: number | null;
   outputTokens?: number | null;
-  status: "streaming" | "complete" | "error" | "stopped" | string;
+  status: OpenString<"streaming" | "complete" | "error" | "stopped" | "interrupted">;
   createdAtMs: number;
 }
 
@@ -142,23 +145,23 @@ export interface WorkflowTask {
 }
 
 export interface ChatThread {
-  ownerBotId?: string | null;
-  modelOverrides?: Record<string, string | null>;
-  tasks?: WorkflowTask[];
-  isBotHome?: boolean;
+  ownerBotId: string | null;
+  modelOverrides: Record<string, string | null>;
+  tasks: WorkflowTask[];
+  isBotHome: boolean;
   id: string;
   title: string;
   subtitle: string;
   isPrimary: boolean;
   isGroup: boolean;
   participantBotIds: string[];
-  workspaceId?: string | null;
-  workspacePath?: string | null;
+  workspaceId: string | null;
+  workspacePath: string | null;
   useWorktrees: boolean;
   maxSwarmTurns: number;
   messages: ChatMessage[];
   nativeSessions: Record<string, string>;
-  lastSyncedMsgIndex?: Record<string, number>;
+  lastSyncedMsgIndex: Record<string, number>;
   updatedAtMs: number;
 }
 
@@ -284,28 +287,30 @@ export interface ActiveBotRun {
 }
 
 export interface OmniPreferences {
-  summarizeTeamResults?: boolean;
-  trustCursorBotHomes?: boolean;
-  workflowBudgetUsd?: number;
-  onboardingCompleted?: boolean;
-  pinnedBotIds?: string[];
+  summarizeTeamResults: boolean;
+  trustCursorBotHomes: boolean;
+  /** 0 means no limit. */
+  workflowBudgetUsd: number;
+  onboardingCompleted: boolean;
+  pinnedBotIds: string[];
   workspaceRoot: string;
   defaultMaxSwarmTurns: number;
   approveAllTools: boolean;
   globalInstructions: string;
   sharedMemories: string[];
-  maxContextMessages?: number;
-  maxMessageChars?: number;
-  maxTurnBudgetUsd?: number;
-  maxParallelBots?: number;
-  turnTimeoutSecs?: number;
-  preventHandoffLoops?: boolean;
-  onlyExplicitHandoffs?: boolean;
+  maxContextMessages: number;
+  maxMessageChars: number;
+  /** 0 means no limit. */
+  maxTurnBudgetUsd: number;
+  maxParallelBots: number;
+  turnTimeoutSecs: number;
+  preventHandoffLoops: boolean;
+  onlyExplicitHandoffs: boolean;
 }
 
 export interface OmniSnapshot {
-  instanceId?: string;
-  revision?: number;
+  instanceId: string;
+  revision: number;
   storageError?: string | null;
   serverPort: number;
   serverBaseUrl: string;

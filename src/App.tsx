@@ -1,23 +1,30 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { DesktopShell } from "./components/layout/DesktopShell";
+import { NoticesProvider } from "./components/ui/Notices";
 import { getOmniSnapshot } from "./lib/omni-bridge";
 import type { OmniSnapshot } from "./lib/types";
 
 export function App() {
   const [snapshot, setSnapshot] = useState<OmniSnapshot | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
 
-  useEffect(() => {
-    getOmniSnapshot()
-      .then((res) => setSnapshot(res))
-      .catch((err) =>
-        setBootError(
-          err instanceof Error
-            ? err.message
-            : "Could not reach Omnibot local Rust backend"
-        )
-      );
+  const boot = useCallback(async () => {
+    try {
+      const next = await getOmniSnapshot();
+      setBootError(null);
+      setSnapshot(next);
+    } catch (err) {
+      setBootError(err instanceof Error ? err.message : "Could not reach Omnibot local Rust backend");
+    }
   }, []);
+
+  useEffect(() => { void boot(); }, [boot]);
+
+  const retry = async () => {
+    setRetrying(true);
+    try { await boot(); } finally { setRetrying(false); }
+  };
 
   useEffect(() => {
     const timers = new WeakMap<Element, ReturnType<typeof setTimeout>>();
@@ -69,6 +76,14 @@ export function App() {
           Omnibot Local Daemon Offline
         </h2>
         <p className="mt-1.5 text-xs text-zinc-400 max-w-md">{bootError}</p>
+        <button
+          type="button"
+          disabled={retrying}
+          onClick={() => void retry()}
+          className="mt-4 px-4 py-2 rounded-full bg-white text-black text-sm font-medium disabled:opacity-50"
+        >
+          {retrying ? "Retrying…" : "Retry"}
+        </button>
       </div>
     );
   }
@@ -88,5 +103,9 @@ export function App() {
     );
   }
 
-  return <DesktopShell initialSnapshot={snapshot} />;
+  return (
+    <NoticesProvider>
+      <DesktopShell initialSnapshot={snapshot} />
+    </NoticesProvider>
+  );
 }

@@ -1,7 +1,8 @@
-import { previewOmniMessage } from "../../lib/omni-bridge";
+import { openExternalUrl, previewOmniMessage } from "../../lib/omni-bridge";
+import { renderMarkdown } from "../../lib/markdown";
 import { Collapse } from "../ui/Collapse";
+import { errorMessage, useNotices } from "../ui/Notices";
 import { BotModelSelect } from "../bots/BotModelSelect";
-import DOMPurify from "dompurify";
 import {
   ArrowDown,
   ArrowLeftRight,
@@ -20,8 +21,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { marked } from "marked";
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import type {
   ActiveBotRun,
   BotProfile,
@@ -94,6 +94,16 @@ const SWARM_SLASH_COMMANDS = [
   },
 ];
 
+/** A callback with a fixed identity that always runs the latest closure, so memoized children don't re-render. */
+function useStableCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R {
+  const ref = useRef(fn);
+  useLayoutEffect(() => { ref.current = fn; });
+  return useCallback((...args: A) => ref.current(...args), []);
+}
+
+const ROUTE_PREVIEW_DEBOUNCE_MS = 300;
+const COPY_FEEDBACK_MS = 1500;
+
 export function ChatWorkspace({
   chat,
   initialDraft = "",
@@ -113,6 +123,7 @@ export function ChatWorkspace({
   onSendMessage,
   onStopChat,
 }: ChatWorkspaceProps) {
+  const { runAction } = useNotices();
   const [input, setInput] = useState(initialDraft);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -161,10 +172,14 @@ export function ChatWorkspace({
   useEffect(() => {
     setOverrideModel(undefined);
     const effort = activeSpeakerBot?.reasoningEffort;
-    setReasoningEffort(effort === "low" || effort === "high" ? effort : "medium");
+    setReasoningEffort(effort === "low" ? "low" : effort === "high" ? "high" : "medium");
   }, [activeSpeakerBot?.id, activeSpeakerBot?.cliDriver, activeSpeakerBot?.model, activeSpeakerBot?.reasoningEffort]);
 
   const [routePreview, setRoutePreview] = useState("");
+  // Snapshots replace arrays on every refresh, so depend on value keys rather than identities.
+  const participantKey = chat.participantBotIds.join(",");
+  const botNamesRef = useRef(bots);
+  useLayoutEffect(() => { botNamesRef.current = bots; });
   useEffect(() => {
     let disposed = false;
     if (!input.trim()) { setRoutePreview(""); return; }
@@ -172,13 +187,14 @@ export function ChatWorkspace({
       previewOmniMessage({ chatId: chat.id, text: input, overrideBotId: activeSpeakerBot?.id, overrideModel, parallelMode })
         .then(plan => {
           if (disposed) return;
-          const isCurrentBot = chat.participantBotIds.length === 1 && plan.botIds.length === 1 && plan.botIds[0] === chat.participantBotIds[0];
-          setRoutePreview(isCurrentBot ? "" : `To: ${plan.botIds.map(id => bots.find(b => b.id === id)?.name ?? id).join(", ")}${plan.botIds.length > 1 ? (plan.parallel ? " · Running together" : " · One after another") : ""}`);
+          const participants = participantKey.split(",");
+          const isCurrentBot = participants.length === 1 && plan.botIds.length === 1 && plan.botIds[0] === participants[0];
+          setRoutePreview(isCurrentBot ? "" : `To: ${plan.botIds.map(id => botNamesRef.current.find(b => b.id === id)?.name ?? id).join(", ")}${plan.botIds.length > 1 ? (plan.parallel ? " · Running together" : " · One after another") : ""}`);
         })
         .catch(error => { if (!disposed) setRoutePreview(error instanceof Error ? error.message : "Cannot preview recipients"); });
-    }, 200);
+    }, ROUTE_PREVIEW_DEBOUNCE_MS);
     return () => { disposed = true; clearTimeout(timer); };
-  }, [input, chat.id, chat.participantBotIds, activeSpeakerBot?.id, overrideModel, parallelMode, bots]);
+  }, [input, chat.id, participantKey, activeSpeakerBot?.id, overrideModel, parallelMode]);
 
   const chatActiveRuns = useMemo(
     () => activeRuns.filter((r) => r.chatId === chat.id),
@@ -371,6 +387,30 @@ export function ChatWorkspace({
     ]
   );
 
+  const sendLatest = useStableCallback(handleSend);
+  const quickHandoff = useCallback((targetBot: BotProfile, sourceAuthor: string) => {
+    void sendLatest(`@${targetBot.name} review @${sourceAuthor || "Bot"}'s response above and follow up or improve on it.`, targetBot.id);
+  }, [sendLatest]);
+  const openBotSettings = useStableCallback(onOpenBotSettings);
+
+  const handleStop = async () => {
+    try {
+      setSendError(null);
+      await onStopChat();
+    } catch (error) {
+      setSendError(`Couldn’t stop the response: ${errorMessage(error)}`);
+    }
+  };
+
+  const handleTranscriptClick = (event: MouseEvent<HTMLDivElement>) => {
+    if (event.defaultPrevented || event.button !== 0) return;
+    const anchor = (event.target as Element).closest?.(".omni-prose a[href]");
+    if (!(anchor instanceof HTMLAnchorElement)) return;
+    event.preventDefault();
+    const href = anchor.getAttribute("href") ?? "";
+    void runAction("Couldn’t open link", () => openExternalUrl(href));
+  };
+
   const activeSpeakerHarness = useMemo(
     () => harnesses.find((h) => h.kind === activeSpeakerBot?.cliDriver),
     [harnesses, activeSpeakerBot]
@@ -436,6 +476,7 @@ export function ChatWorkspace({
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
+        onClick={handleTranscriptClick}
         style={isEmpty ? undefined : { paddingBottom: composerHeight + 40 }}
         className={`h-full w-full overflow-y-auto overflow-x-hidden chat-scroll-mask px-6 ${
           isEmpty ? "flex flex-col items-center justify-center" : "pt-28 pb-40"
@@ -459,13 +500,8 @@ export function ChatWorkspace({
                 key={msg.id}
                 message={msg}
                 bots={bots}
-                onOpenBotSettings={onOpenBotSettings}
-                onQuickHandoff={(targetBot) => {
-                  handleSend(
-                    `@${targetBot.name} review @${msg.authorName || "Bot"}'s response above and follow up or improve on it.`,
-                    targetBot.id
-                  );
-                }}
+                onOpenBotSettings={openBotSettings}
+                onQuickHandoff={quickHandoff}
               />
             ))}
 
@@ -802,7 +838,7 @@ export function ChatWorkspace({
               ref={composerInputRef}
               type="text"
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => { setInput(e.target.value); if (sendError) setSendError(null); }}
               onKeyDown={(e) => {
                 if (slashMatch && matchingSlashItems.length > 0) {
                   if (e.key === "ArrowDown") {
@@ -880,7 +916,7 @@ export function ChatWorkspace({
             <button
               type="button"
               disabled={!isStreaming && (!input.trim() || sending)}
-              onClick={() => isStreaming ? onStopChat() : handleSend()}
+              onClick={() => void (isStreaming ? handleStop() : handleSend())}
               aria-label={isStreaming ? "Stop response" : "Send message"}
               title={isStreaming ? "Stop response" : "Send message"}
               className="w-8 h-8 rounded-full bg-white hover:bg-zinc-200 disabled:opacity-35 text-black flex items-center justify-center transition-transform active:scale-95 shadow-md shrink-0"
@@ -1011,7 +1047,7 @@ function EmptyChatHero({ chat, participants, allBots, onSendStarter, onChoosePro
   );
 }
 
-function MessageCard({
+const MessageCard = memo(function MessageCard({
   message,
   bots,
   onQuickHandoff,
@@ -1019,13 +1055,18 @@ function MessageCard({
 }: {
   message: ChatMessage;
   bots: BotProfile[];
-  onQuickHandoff: (targetBot: BotProfile, sourceText: string) => void;
+  onQuickHandoff: (targetBot: BotProfile, sourceAuthor: string) => void;
   onOpenBotSettings: (bot: BotProfile) => void;
 }) {
   const thinkingId = useId();
   const [toolsExpanded, setToolsExpanded] = useState(false);
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  useEffect(() => {
+    if (copyState === "idle") return;
+    const timer = setTimeout(() => setCopyState("idle"), COPY_FEEDBACK_MS);
+    return () => clearTimeout(timer);
+  }, [copyState]);
 
   const authorBot = useMemo(
     () => bots.find((b) => b.id === message.authorBotId),
@@ -1042,19 +1083,7 @@ function MessageCard({
   const totalTokens =
     message.usageReported && message.inputTokens != null && message.outputTokens != null ? message.inputTokens + message.outputTokens : null;
 
-  const renderedHtml = useMemo(() => {
-    const cleanText = message.text
-      .replace(/<handoff[\s\S]*?<\/handoff>/gi, "")
-      .replace(/<handoff[\s\S]*$/gi, "")
-      .trim();
-    if (!cleanText) return "";
-    const rawHtml = marked.parse(cleanText, { async: false }) as string;
-    return DOMPurify.sanitize(rawHtml, {
-      USE_PROFILES: { html: true },
-      FORBID_TAGS: ["form", "input", "button", "style", "iframe"],
-      FORBID_ATTR: ["style"],
-    });
-  }, [message.text]);
+  const renderedHtml = useMemo(() => renderMarkdown(message.text), [message.text]);
 
   if (message.role === "user") {
     return (
@@ -1129,6 +1158,9 @@ function MessageCard({
               )}
               {message.status === "stopped" && (
                 <span className="text-amber-300 font-sans">Stopped</span>
+              )}
+              {message.status === "interrupted" && (
+                <span className="text-amber-300 font-sans" title="The app closed or the CLI exited before this reply finished">Interrupted</span>
               )}
             </div>
           </div>
@@ -1278,20 +1310,28 @@ function MessageCard({
 
         {/* Hover Action Row: Copy & One-Click Pass Baton / Cross-Review with Another CLI Bot */}
         {message.status !== "streaming" && message.text.trim().length > 0 && (
-          <div className="opacity-0 group-hover:opacity-100 transition-opacity flex flex-wrap items-center gap-1.5 pl-1">
+          <div className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity flex flex-wrap items-center gap-1.5 pl-1">
             <button
               type="button"
               onClick={async () => {
-                await navigator.clipboard.writeText(message.text);
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1500);
+                try {
+                  await navigator.clipboard.writeText(message.text);
+                  setCopyState("copied");
+                } catch {
+                  setCopyState("failed");
+                }
               }}
               className="px-2.5 py-1 rounded-full liquid-glass-chip text-[11px] text-zinc-300 hover:text-white flex items-center gap-1 active:scale-95"
             >
-              {copied ? (
+              {copyState === "copied" ? (
                 <>
                   <Check className="w-3 h-3 text-emerald-400" />
                   <span>Copied</span>
+                </>
+              ) : copyState === "failed" ? (
+                <>
+                  <X className="w-3 h-3 text-red-400" />
+                  <span role="status">Copy failed</span>
                 </>
               ) : (
                 <>
@@ -1309,7 +1349,7 @@ function MessageCard({
                   <button
                     key={b.id}
                     type="button"
-                    onClick={() => onQuickHandoff(b, message.text)}
+                    onClick={() => onQuickHandoff(b, message.authorName ?? "")}
                     className="px-2.5 py-1 rounded-full liquid-glass-chip text-[11px] text-zinc-300 hover:text-white flex items-center gap-1.5 active:scale-95"
                   >
                     <BotCharacterAvatar bot={b} size={14} />
@@ -1323,7 +1363,7 @@ function MessageCard({
       </div>
     </div>
   );
-}
+});
 
 function ThinkingDots() {
   return <span aria-hidden="true" className="thinking-dots inline-flex items-center gap-1"><i /><i /><i /></span>;

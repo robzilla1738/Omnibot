@@ -7,8 +7,10 @@ import {
   Search,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { testCliHarness } from "../../lib/omni-bridge";
+import { Dialog } from "../ui/Dialog";
+import { errorMessage } from "../ui/Notices";
 import type {
   BotColor,
   BotProfile,
@@ -129,13 +131,14 @@ export function CliHarnessesModal({
   onCreateBotFromTemplate,
   onStartChatWithSkill,
 }: CliHarnessesModalProps) {
-  const [creationError, setCreationError] = useState("");
+  const titleId = useId();
+  const [actionError, setActionError] = useState("");
   const [creating, setCreating] = useState(false);
   const createTemplate = async (template: Parameters<CliHarnessesModalProps["onCreateBotFromTemplate"]>[0]) => {
     if (creating) return;
-    setCreating(true); setCreationError("");
+    setCreating(true); setActionError("");
     try { await onCreateBotFromTemplate(template); }
-    catch (error) { setCreationError(error instanceof Error ? error.message : String(error)); }
+    catch (error) { setActionError(errorMessage(error)); }
     finally { setCreating(false); }
   };
   const [search, setSearch] = useState("");
@@ -144,11 +147,14 @@ export function CliHarnessesModal({
   const [testResults, setTestResults] = useState<
     Record<string, CliHarnessTestResult>
   >({});
+  const [testing, setTesting] = useState<string | null>(null);
 
   const installedList = useMemo(
     () => harnesses.filter((h) => h.installed),
     [harnesses]
   );
+  const templateDriver = (preferred: CliDriverKind): CliDriverKind | null =>
+    installedList.some(h => h.kind === preferred) ? preferred : installedList[0]?.kind ?? null;
 
   const filteredHarnesses = useMemo(() => {
     if (category !== "All" && category !== "Installed CLIs") {
@@ -202,44 +208,43 @@ export function CliHarnessesModal({
   }, [skills, search, category]);
 
   const handleRescan = async () => {
-    setRescanning(true);
+    if (rescanning) return;
+    setRescanning(true); setActionError("");
     try {
       await onRescan();
+    } catch (error) {
+      setActionError(`Couldn’t rescan local tools: ${errorMessage(error)}`);
     } finally {
       setRescanning(false);
     }
   };
 
   const handleTestHarness = async (kind: CliDriverKind) => {
-    const res = await testCliHarness(kind);
-    setTestResults((prev) => ({ ...prev, [kind]: res }));
+    if (testing) return;
+    setTesting(kind);
+    try {
+      const res = await testCliHarness(kind);
+      setTestResults((prev) => ({ ...prev, [kind]: res }));
+    } catch (error) {
+      setTestResults((prev) => ({ ...prev, [kind]: { kind, ok: false, latencyMs: 0, message: errorMessage(error) } }));
+    } finally {
+      setTesting(null);
+    }
   };
 
   return (
-    <div
-      aria-hidden={!open}
-      inert={!open}
-      className={`fixed inset-0 z-50 flex items-center justify-center p-6 select-none transition-opacity duration-250 spring-transition ${
-        open
-          ? "bg-black/65 backdrop-blur-sm opacity-100 pointer-events-auto"
-          : "bg-black/65 backdrop-blur-md opacity-0 pointer-events-none"
-      }`}
-      onClick={onClose}
+    <Dialog
+      open={open}
+      onClose={onClose}
+      labelledBy={titleId}
+      className="w-full max-w-[860px] h-[78vh] max-h-[680px] rounded-[24px] bg-[#121212] border border-white/[0.08] shadow-[0_28px_90px_rgba(0,0,0,0.85)] flex flex-col overflow-hidden"
     >
-      <div
-        className={`w-full max-w-[860px] h-[78vh] max-h-[680px] rounded-[24px] bg-[#121212] border border-white/[0.08] shadow-[0_28px_90px_rgba(0,0,0,0.85)] flex flex-col overflow-hidden transition-[opacity,scale,translate] duration-250 spring-transition ${
-          open
-            ? "scale-100 opacity-100 translate-y-0"
-            : "scale-[0.985] opacity-0 translate-y-1"
-        }`}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {creationError && <p role="alert" className="text-sm text-red-300 p-3">{creationError}</p>}
+        {actionError && <p role="alert" className="text-sm text-red-300 p-3">{actionError}</p>}
         {creating && <p role="status" className="text-xs text-zinc-400 p-3">Creating bot…</p>}
         {/* Top Header Row */}
         <div className="shrink-0 px-7 pt-5 pb-3.5 flex items-center justify-between">
           <div>
-            <h2 className="text-[20px] font-semibold text-white tracking-tight">
+            <h2 id={titleId} className="text-[20px] font-semibold text-white tracking-tight">
               Local Coding Tools
             </h2>
             <p className="text-xs text-[#8e8d8a] mt-0.5">
@@ -250,7 +255,9 @@ export function CliHarnessesModal({
           <div className="flex items-center gap-3">
             <button
               type="button"
-              onClick={handleRescan}
+              onClick={() => void handleRescan()}
+              disabled={rescanning}
+              aria-label={`Rescan local tools (${installedList.length} CLIs detected)`}
               className="h-8 px-3 rounded-full bg-[#1f1f1f] hover:bg-[#272727] border border-white/[0.06] flex items-center gap-2 text-xs text-zinc-200 hover:text-white transition-colors"
             >
               <RefreshCw
@@ -261,6 +268,7 @@ export function CliHarnessesModal({
 
             <button
               type="button"
+              aria-label="Close local tools"
               onClick={onClose}
               className="w-8 h-8 rounded-full bg-[#1f1f1f] hover:bg-[#272727] border border-white/[0.06] flex items-center justify-center text-zinc-300 hover:text-white active:scale-95 transition-colors"
             >
@@ -277,6 +285,7 @@ export function CliHarnessesModal({
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
+              aria-label="Search local tools"
               placeholder="Search local CLIs, role templates, MCP servers, and skills..."
               className="w-full bg-transparent text-[13.5px] text-zinc-100 placeholder:text-zinc-500 focus:outline-none"
             />
@@ -370,9 +379,15 @@ export function CliHarnessesModal({
                             className="text-[12px]  text-zinc-400 truncate mt-0.5"
                           >
                             {testRes ? (
-                              <span className="text-emerald-300">
-                                ✓ {testRes.latencyMs}ms · {h.binaryPath}
-                              </span>
+                              testRes.ok ? (
+                                <span className="text-emerald-300">
+                                  ✓ {testRes.latencyMs}ms · {testRes.binaryPath ?? h.binaryPath}
+                                </span>
+                              ) : (
+                                <span role="status" className="text-red-300">
+                                  ✕ Health check failed · {testRes.message}
+                                </span>
+                              )
                             ) : h.installed ? (
                               providerBots.length > 0
                                 ? providerBots.map((b) => `@${b.name}`).join(", ")
@@ -384,21 +399,23 @@ export function CliHarnessesModal({
                         </div>
                       </div>
 
-                      {h.installed && matchingBot ? (
+                      {h.installed ? (
                         <div className="flex items-center gap-1.5 shrink-0">
                           <button
                             type="button"
-                            onClick={() => handleTestHarness(h.kind)}
+                            onClick={() => void handleTestHarness(h.kind)}
+                            disabled={testing !== null}
                             title="Run live CLI health check"
+                            aria-label={`Test ${h.name}`}
                             className="p-2 rounded-full bg-[#1f1f1f] hover:bg-[#272727] border border-white/[0.06] text-zinc-300 hover:text-white active:scale-95 transition-colors"
                           >
-                            <Activity className="w-3.5 h-3.5" />
+                            <Activity className={`w-3.5 h-3.5 ${testing === h.kind ? "animate-pulse" : ""}`} />
                           </button>
                           <button
                             type="button"
                             onClick={() => {
                               const nextIdx = providerBots.length + 1;
-                              createTemplate({
+                              void createTemplate({
                                 name: `${h.name.split(" ")[0]} ${nextIdx}`,
                                 roleTitle: `${h.name} Specialist #${nextIdx}`,
                                 description: `Additional Bot instance running on ${h.name} (${h.binaryName})`,
@@ -415,7 +432,7 @@ export function CliHarnessesModal({
                           >
                             <Plus className="w-3.5 h-3.5" />
                           </button>
-                          <button
+                          {matchingBot && <button
                             type="button"
                             onClick={() => {
                               onSelectBotDirectChat(matchingBot);
@@ -425,7 +442,7 @@ export function CliHarnessesModal({
                           >
                             <Check className="w-3.5 h-3.5" />
                             <span>Chat</span>
-                          </button>
+                          </button>}
                         </div>
                       ) : (
                         <span className="text-xs text-zinc-500 shrink-0">
@@ -455,6 +472,7 @@ export function CliHarnessesModal({
                   const alreadyInRoster = bots.some(
                     (b) => b.name.toLowerCase() === tpl.name.toLowerCase()
                   );
+                  const driver = templateDriver(tpl.preferredDriver);
                   return (
                     <div
                       key={tpl.id}
@@ -464,7 +482,7 @@ export function CliHarnessesModal({
                         <BotCharacterAvatar
                           shape={tpl.shape}
                           color={tpl.color}
-                          cliDriver={tpl.preferredDriver}
+                          cliDriver={driver ?? tpl.preferredDriver}
                           size={44}
                           showCliBadge
                         />
@@ -473,8 +491,8 @@ export function CliHarnessesModal({
                             <span className="text-[14px] font-semibold text-zinc-100 truncate">
                               {tpl.name}
                             </span>
-                            <span className="text-[11px]  text-zinc-400">
-                              {tpl.preferredDriver}
+                            <span className="text-[11px]  text-zinc-400" title={driver && driver !== tpl.preferredDriver ? `${tpl.preferredDriver} is not installed; uses ${driver} instead` : undefined}>
+                              {driver ?? tpl.preferredDriver}
                             </span>
                           </div>
                           <div
@@ -491,17 +509,22 @@ export function CliHarnessesModal({
                           <Check className="w-3.5 h-3.5" />
                           <span>Added</span>
                         </span>
+                      ) : !driver ? (
+                        <span className="text-xs text-zinc-500 shrink-0" title={`Install a coding CLI such as ${tpl.preferredDriver} to use this template`}>
+                          No CLI installed
+                        </span>
                       ) : (
                         <button
                           type="button"
+                          disabled={creating}
                           onClick={() =>
-                            createTemplate({
+                            void createTemplate({
                               name: tpl.name,
                               roleTitle: tpl.roleTitle,
                               description: tpl.description,
                               shape: tpl.shape,
                               color: tpl.color,
-                              cliDriver: tpl.preferredDriver,
+                              cliDriver: driver,
                               systemPrompt: tpl.systemPrompt,
                             })
                           }
@@ -542,9 +565,8 @@ export function CliHarnessesModal({
                         </div>
                       </div>
                     </div>
-                    <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-400 shrink-0">
-                      <Check className="w-3.5 h-3.5" />
-                      <span>Active</span>
+                    <span className="text-[11px] text-zinc-500 shrink-0">
+                      {mcp.transport}
                     </span>
                   </div>
                 ))}
@@ -596,7 +618,6 @@ export function CliHarnessesModal({
             </section>
           )}
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }

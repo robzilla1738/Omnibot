@@ -3,17 +3,78 @@ import type { OmniSnapshot, ChatMessage } from "../src/lib/types";
 
 function snapshot(): OmniSnapshot {
   return {
+    instanceId: "fixture", revision: 1,
     serverPort: 4321, serverBaseUrl: "http://127.0.0.1:4321",
-    preferences: { onboardingCompleted: true, pinnedBotIds: [], workspaceRoot: "/tmp/test-project", defaultMaxSwarmTurns: 4, approveAllTools: false, globalInstructions: "", sharedMemories: [] },
-    bots: [{ id: "bot-a", name: "Test Bot", slug: "test-bot", roleTitle: "Tester", description: "Local fixture", shape: "blob", color: "cyan", isPrimary: true, cliDriver: "custom", model: null, reasoningEffort: "low", permissionMode: "plan", systemPrompt: "", memories: [], autoCreatedForCli: false }],
-    chats: [{ id: "room", title: "Test Room", subtitle: "Local fixture", isPrimary: true, isGroup: false, participantBotIds: ["bot-a"], workspacePath: "/tmp/test-project", useWorktrees: false, maxSwarmTurns: 4, messages: [], nativeSessions: {}, updatedAtMs: 0 }],
+    preferences: {
+      onboardingCompleted: true, pinnedBotIds: [], workspaceRoot: "/tmp/test-project", defaultMaxSwarmTurns: 4, approveAllTools: false, globalInstructions: "", sharedMemories: [],
+      summarizeTeamResults: false, trustCursorBotHomes: false, workflowBudgetUsd: 3.75, maxContextMessages: 6, maxMessageChars: 1400, maxTurnBudgetUsd: 1.5,
+      maxParallelBots: 3, turnTimeoutSecs: 300, preventHandoffLoops: true, onlyExplicitHandoffs: true,
+    },
+    bots: [{ id: "bot-a", name: "Test Bot", slug: "test-bot", roleTitle: "Tester", description: "Local fixture", shape: "blob", color: "cyan", isPrimary: true, cliDriver: "custom", model: null, reasoningEffort: "low", permissionMode: "plan", systemPrompt: "", memories: [], autoCreatedForCli: false, archived: false }],
+    chats: [{ id: "room", title: "Test Room", subtitle: "Local fixture", isPrimary: true, isGroup: false, participantBotIds: ["bot-a"], workspacePath: "/tmp/test-project", workspaceId: null, ownerBotId: null, isBotHome: false, useWorktrees: false, maxSwarmTurns: 4, messages: [], nativeSessions: {}, modelOverrides: {}, tasks: [], lastSyncedMsgIndex: {}, updatedAtMs: 0 }],
     workspaces: [], routines: [], skills: [], harnesses: [], mcpServers: [], computerActivity: [], activeRuns: [], activeWorkflowChatIds: [],
     gitStatus: { isRepo: false, rootPath: "/tmp/test-project", branch: "", headShort: "", ahead: 0, behind: 0, changedFiles: [], diffStat: "", diffPreview: "", worktrees: [] },
   };
 }
 
+const unexpectedRequests = new WeakMap<Page, string[]>();
+
+// Requests that reach the catch-all route have no fixture, so the UI would be exercising an error path by accident.
+test.afterEach(async ({ page }) => {
+  expect(unexpectedRequests.get(page) ?? [], "requests without a fixture").toEqual([]);
+});
+
+type FixtureEventsControl = { setDown(down: boolean): void };
+
+/**
+ * A fulfilled route can only return a finished SSE body, which makes the real EventSource drop and
+ * reconnect constantly. This stand-in stays open, and `__fixtureEvents.setDown` simulates an outage.
+ */
+async function installFixtureEventSource(page: Page) {
+  await page.addInitScript(() => {
+    const win = window as unknown as { EventSource: unknown; __fixtureEvents?: FixtureEventsControl };
+    let down = false;
+    const live = new Set<FixtureEventSource>();
+    class FixtureEventSource extends EventTarget {
+      static readonly CONNECTING = 0;
+      static readonly OPEN = 1;
+      static readonly CLOSED = 2;
+      readonly url: string;
+      readyState = 0;
+      onopen: ((event: Event) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      constructor(url: string | URL) {
+        super();
+        this.url = String(url);
+        live.add(this);
+        setTimeout(() => {
+          if (this.readyState === 2) return;
+          if (down) { this.fail(); return; }
+          this.readyState = 1;
+          this.dispatchEvent(new Event("open"));
+          this.onopen?.(new Event("open"));
+        }, 0);
+      }
+      fail() {
+        this.close();
+        this.dispatchEvent(new Event("error"));
+        this.onerror?.(new Event("error"));
+      }
+      close() { this.readyState = 2; live.delete(this); }
+    }
+    // Leave an EventSource that a test installed itself in place.
+    if (!/\[native code\]/.test(Function.prototype.toString.call(window.EventSource))) return;
+    win.EventSource = FixtureEventSource;
+    win.__fixtureEvents = { setDown(next) { down = next; if (next) for (const source of [...live]) source.fail(); } };
+  });
+}
+
 async function mockBackend(page: Page, state: OmniSnapshot, sendStatus = 200) {
   const sends: unknown[] = [];
+  const unexpected: string[] = [];
+  unexpectedRequests.set(page, unexpected);
+  await installFixtureEventSource(page);
   await page.route("**/api/**", async route => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/snapshot") return route.fulfill({ json: state });
@@ -41,12 +102,15 @@ async function mockBackend(page: Page, state: OmniSnapshot, sendStatus = 200) {
       return route.fulfill({ json: state });
     }
     if (path === "/api/events") return route.fulfill({ contentType: "text/event-stream", body: 'data: {"type":"state-updated","chatId":null}\n\n' });
+    if (path === "/api/chat/preview") return route.fulfill({ json: { botIds: [], parallel: false, prompt: "" } });
+    if (path === "/api/git/status") return route.fulfill({ json: state.gitStatus });
     if (path === "/api/chat/send") {
       sends.push(route.request().postDataJSON());
       if (sendStatus !== 200) return route.fulfill({ status: sendStatus, body: "Chat is still stopping" });
       state.activeWorkflowChatIds = ["room"];
       return route.fulfill({ json: { ok: true, messageId: "user1" } });
     }
+    unexpected.push(`${route.request().method()} ${path}`);
     return route.fulfill({ status: 400, body: "Unexpected fixture request" });
   });
   await page.goto("/");
@@ -55,8 +119,12 @@ async function mockBackend(page: Page, state: OmniSnapshot, sendStatus = 200) {
   return sends;
 }
 
+function toBase64(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString("base64");
+}
+
 function message(text: string): ChatMessage {
-  return { id: "assistant1", role: "assistant", authorBotId: "bot-a", authorName: "Test Bot", text, thinking: "", toolCalls: [], handoffs: [], mentionedBotIds: [], status: "complete", createdAtMs: 0 };
+  return { id: "assistant1", role: "assistant", authorBotId: "bot-a", authorName: "Test Bot", text, thinking: "", toolCalls: [], handoffs: [], mentionedBotIds: [], status: "complete", createdAtMs: 0, usageReported: false, modelReported: false };
 }
 
 test("failed sends retain the draft and show a useful error", async ({ page }) => {
@@ -90,9 +158,9 @@ test("bot markdown keeps formatting and strips executable HTML", async ({ page }
 
 test("new chat and inspector shortcuts work without calling providers", async ({ page }) => {
   await mockBackend(page, snapshot());
-  await page.keyboard.press("Control+i");
+  await page.keyboard.press("ControlOrMeta+i");
   await expect(page.getByTitle("Click to open Bot Settings, Group members, Project & Git (Cmd+I)")).toHaveAttribute("aria-expanded", "true");
-  await page.keyboard.press("Control+n");
+  await page.keyboard.press("ControlOrMeta+n");
   await expect(page.getByPlaceholder("Chat title (optional)…")).toBeVisible();
 });
 
@@ -109,7 +177,7 @@ test("new chats default to one bot and save its selected CLI model without runni
     state.chats.push(chat);
     await route.fulfill({ json: { chat, snapshot: state } });
   });
-  await page.keyboard.press("Control+n");
+  await page.keyboard.press("ControlOrMeta+n");
   await expect(page.getByRole("button", { name: "Individual bot", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByRole("button", { name: "Select Test Bot", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByRole("button", { name: "Select Teammate", exact: true })).toHaveAttribute("aria-pressed", "false");
@@ -127,7 +195,7 @@ test("group chats require explicit participants and preserve selection on create
   state.bots.push({ ...state.bots[0], id: "bot-b", name: "Teammate", isPrimary: false });
   const sends = await mockBackend(page, state);
   await page.route("**/api/chat/create", route => route.fulfill({ status: 400, body: "Unable to create chat" }));
-  await page.keyboard.press("Control+n");
+  await page.keyboard.press("ControlOrMeta+n");
   await page.getByRole("button", { name: "Group chat", exact: true }).click();
   await expect(page.getByRole("button", { name: /^Create group chat/ })).toBeDisabled();
   await page.getByRole("button", { name: "Select Test Bot", exact: true }).click();
@@ -302,7 +370,7 @@ test("slow discovery opens the tools screen immediately and is not repeated on B
     await route.fulfill({ json: state });
   });
   await page.getByRole("button", { name: "Find my tools" }).click();
-  await expect(page.getByRole("heading", { name: "Meet your local tools." })).toBeVisible({ timeout: 1500 });
+  await expect(page.getByRole("heading", { name: "Meet your local tools." })).toBeVisible();
   await expect(page.getByRole("status")).toHaveText("Checking installed tools…");
   await expect(page.getByRole("button", { name: "Continue", exact: true })).toBeDisabled();
   await expect(page.getByText("No supported CLIs found yet.", { exact: false })).toHaveCount(0);
@@ -387,7 +455,7 @@ test("routines keep drafts, save readable schedules and model choices, and run t
     runRequest = route.request().postDataJSON();
     await route.fulfill({ json: { messageId: "fixture-run" } });
   });
-  await page.keyboard.press("Control+i");
+  await page.keyboard.press("ControlOrMeta+i");
   await page.getByRole("button", { name: "New routine", exact: true }).click();
   const form = page.getByRole("form", { name: "New routine" });
   await expect(form.getByRole("button", { name: "Save routine" })).toBeDisabled();
@@ -533,12 +601,12 @@ test("sidebar stays clean while views, ordering, collapsing and renaming persist
   await expect(sidebar.getByRole("region", { name: "Bots", exact: true }).getByRole("button", { name: "Bots", exact: true })).toHaveAttribute("aria-expanded", "false");
   await sidebar.getByRole("region", { name: "Bots", exact: true }).getByRole("button", { name: "Bots", exact: true }).click();
   await sidebar.getByTitle("Options for Codex").click();
-  await sidebar.getByRole("button", { name: "Rename", exact: true }).click();
+  await sidebar.getByRole("menu", { name: "Options for Codex" }).getByRole("menuitem", { name: "Rename", exact: true }).click();
   await sidebar.getByRole("textbox", { name: "Rename Codex" }).fill("Builder");
   await sidebar.getByRole("button", { name: "Save", exact: true }).click();
   await expect(sidebar.getByRole("button", { name: "Open Builder", exact: true })).toBeVisible();
   await sidebar.getByTitle("Options for Homepage").click();
-  await sidebar.getByRole("button", { name: "Remove", exact: true }).click();
+  await sidebar.getByRole("menuitem", { name: "Remove from sidebar", exact: true }).click();
   await expect(sidebar.getByRole("button", { name: "Open Homepage", exact: true })).toHaveCount(0);
   expect(state.chats.some(c => c.id === "work")).toBe(true);
   await sidebar.click({ button: "right", position: { x: 8, y: 240 } });
@@ -670,10 +738,12 @@ test("sidebar views stay outside the fade, rows fit, and sections drag without c
     const box = await row.boundingBox(); expect(box!.x + box!.width).toBeLessThanOrEqual(bounds!.x+bounds!.width-8);
   }
   await sidebar.getByTitle("Options for Helper").click();
-  const menu = sidebar.getByRole("dialog", { name: "Options for Helper" });
-  await expect(menu.getByRole("button", { name: "Rename", exact: true })).toBeVisible();
+  const menu = sidebar.getByRole("menu", { name: "Options for Helper" });
+  await expect(menu.getByRole("menuitem", { name: "Rename", exact: true })).toBeFocused();
   await expect(menu.locator(".lucide-arrow-up, .lucide-arrow-down")).toHaveCount(0);
   await page.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+  await expect(sidebar.getByTitle("Options for Helper")).toBeFocused();
   await page.reload();
   await expect(sidebar.locator("[data-sidebar-section]").first()).toHaveAttribute("data-sidebar-section", "projects");
   await page.screenshot({ path: "test-results/sidebar-restored.png" });
@@ -695,7 +765,7 @@ test("failed chat creation keeps model choices local and preserves the draft", a
   let profileWrites = 0;
   await page.route("**/api/bot/upsert", async route => { profileWrites++; await route.fulfill({ json: state }); });
   await page.route("**/api/chat/create", route => route.fulfill({ status: 400, body: "Project folder unavailable" }));
-  await page.keyboard.press("Control+n");
+  await page.keyboard.press("ControlOrMeta+n");
   await page.getByRole("combobox", { name: "Test Bot model", exact: true }).selectOption("chat-only");
   await page.getByRole("button", { name: "Start chat", exact: true }).click();
   await expect(page.getByText("Project folder unavailable", { exact: true })).toBeVisible();
@@ -761,11 +831,11 @@ test("terminal panel follows output, expands, searches, and hides without stoppi
   await mockBackend(page, state);
   let stopped = 0;
   const terminal = { id: "run-1", chatId: "room", botId: "bot-a", botName: "Test Bot", mode: "output", status: "running", cwd: "/tmp/project", startedAtMs: 1, exitCode: null, error: null, resumed: false };
-  const bytes = Array.from(new TextEncoder().encode("Starting local tools\r\n\x1b[32mREADY: live process output\x1b[0m\r\n"));
+  const bytes = new TextEncoder().encode("Starting local tools\r\n\x1b[32mREADY: live process output\x1b[0m\r\n");
   await page.route("**/api/terminal/**", route => {
     const url = new URL(route.request().url());
     if (url.pathname.endsWith("/list")) return route.fulfill({ json: [terminal] });
-    if (url.pathname.endsWith("/output")) { const offset = Number(url.searchParams.get("offset")); return route.fulfill({ json: { data: bytes.slice(offset), offset: bytes.length, truncated: false, status: "running" } }); }
+    if (url.pathname.endsWith("/output")) { const offset = Number(url.searchParams.get("offset")); return route.fulfill({ json: { data: toBase64(bytes.slice(offset)), offset: bytes.length, truncated: false, status: "running" } }); }
     if (url.pathname.endsWith("/stop")) { stopped++; return route.fulfill({ json: null }); }
     return route.fulfill({ status: 400, body: "Unexpected terminal mutation" });
   });
@@ -789,6 +859,7 @@ test("terminal panel follows output, expands, searches, and hides without stoppi
 });
 
 test("terminal opens the interactive CLI by default, stops automation, and reuses the session after hiding", async ({ page }) => {
+  await page.clock.install();
   const state = snapshot(); state.bots[0].permissionMode = "auto"; state.activeWorkflowChatIds = ["room"];
   await mockBackend(page, state);
   const sessions: Record<string, unknown>[] = [];
@@ -803,9 +874,9 @@ test("terminal opens the interactive CLI by default, stops automation, and reuse
       const session = { id: "pty-1", chatId: "room", botId: "bot-a", botName: "Test Bot", mode: "interactive", status: "running", cwd: "/tmp/project", startedAtMs: 1, exitCode: null, error: null, resumed: false };
       sessions.push(session); return route.fulfill({ json: session });
     }
-    if (url.pathname.endsWith("/output")) { const bytes = Array.from(new TextEncoder().encode("Interactive fixture ready\r\n$ ")); return route.fulfill({ json: { data: bytes.slice(Number(url.searchParams.get("offset"))), offset: bytes.length, truncated: false, status: "running" } }); }
+    if (url.pathname.endsWith("/output")) { const bytes = new TextEncoder().encode("Interactive fixture ready\r\n$ "); return route.fulfill({ json: { data: toBase64(bytes.slice(Number(url.searchParams.get("offset")))), offset: bytes.length, truncated: false, status: "running" } }); }
     if (url.pathname.endsWith("/resize")) { resizes++; return route.fulfill({ json: null }); }
-    if (url.pathname.endsWith("/write")) { writes.push(...route.request().postDataJSON().data); return route.fulfill({ json: null }); }
+    if (url.pathname.endsWith("/write")) { writes.push(...Buffer.from(route.request().postDataJSON().data, "base64")); return route.fulfill({ json: null }); }
     if (url.pathname.endsWith("/stop")) { stops++; sessions[0].status = "stopped"; return route.fulfill({ json: null }); }
     return route.fulfill({ status: 400, body: "Unexpected terminal request" });
   });
@@ -820,14 +891,15 @@ test("terminal opens the interactive CLI by default, stops automation, and reuse
   await expect.poll(() => resizes).toBeGreaterThan(0);
   await page.keyboard.press("Control+k");
   await expect.poll(() => writes.at(-1)).toBe(11);
-  await page.keyboard.press("Meta+Backquote");
+  await expect(page.getByRole("dialog", { name: "Search" })).toHaveCount(0);
+  await page.keyboard.press("ControlOrMeta+Backquote");
   await expect(panel).toBeHidden();
   expect(stops).toBe(0);
-  await page.keyboard.press("Meta+Backquote");
+  await page.keyboard.press("ControlOrMeta+Backquote");
   await expect(panel).toBeVisible();
   await panel.getByRole("button", { name: "End control", exact: true }).click();
   await expect.poll(() => stops).toBe(1);
-  await page.waitForTimeout(1000);
+  await page.clock.runFor(5000);
   expect(sessions).toHaveLength(1);
 });
 
@@ -841,6 +913,7 @@ test("unsupported terminal adapters explain live output without enabling takeove
 });
 
 test("terminal startup errors stay visible without a retry loop", async ({ page }) => {
+  await page.clock.install();
   const state = snapshot(); state.bots[0].permissionMode = "auto";
   await mockBackend(page, state);
   let starts = 0;
@@ -852,7 +925,7 @@ test("terminal startup errors stay visible without a retry loop", async ({ page 
   });
   await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("CLI command is unavailable");
-  await page.waitForTimeout(1600);
+  await page.clock.runFor(5000);
   expect(starts).toBe(1);
   await page.getByRole("button", { name: "Retry connection", exact: true }).click();
   await expect.poll(() => starts).toBe(2);
@@ -932,4 +1005,205 @@ test("general Git questions in personal space do not require a project", async (
   await page.getByRole("button", { name: "Send message", exact: true }).click();
   await expect.poll(() => sends.length).toBe(1);
   await expect(page.getByRole("dialog", { name: "New chat", exact: true })).toBeHidden();
+});
+
+test("bot links open externally only for web and email URLs and remote images are not fetched", async ({ page }) => {
+  await page.addInitScript(() => {
+    const opened: string[] = [];
+    (window as unknown as { __opened: string[] }).__opened = opened;
+    window.open = ((url?: string | URL) => { opened.push(String(url)); return null; }) as typeof window.open;
+  });
+  const remoteRequests: string[] = [];
+  page.on("request", request => { if (new URL(request.url()).hostname === "tracker.example") remoteRequests.push(request.url()); });
+  const pixel = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+  const state = snapshot();
+  state.chats[0].messages = [message(`[Docs](https://docs.example/guide) [Local file](file:///etc/hosts) ![Tracking pixel](https://tracker.example/pixel.png) ![Inline](${pixel})`)];
+  await mockBackend(page, state);
+  const prose = page.locator(".omni-prose");
+  const docs = prose.getByRole("link", { name: "Docs", exact: true });
+  await expect(docs).toHaveAttribute("rel", "noopener noreferrer");
+  await expect(prose.locator("a", { hasText: "Local file" })).not.toHaveAttribute("href");
+  await expect(prose.locator(".omni-blocked-image")).toHaveText("Tracking pixel");
+  await expect(prose.getByRole("img", { name: "Inline" })).toHaveAttribute("src", pixel);
+  await docs.click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __opened: string[] }).__opened)).toEqual(["https://docs.example/guide"]);
+  expect(new URL(page.url()).pathname).toBe("/");
+  expect(remoteRequests).toEqual([]);
+});
+
+test("deleting a chat asks for confirmation and keeps it when cancelled", async ({ page }) => {
+  const state = snapshot();
+  state.chats.push({ ...state.chats[0], id: "work", isPrimary: false, title: "Homepage", messages: [message("Draft is ready.")] });
+  await mockBackend(page, state);
+  const deletes: unknown[] = [];
+  await page.route("**/api/chat/delete", async route => {
+    deletes.push(route.request().postDataJSON());
+    state.chats = state.chats.filter(chat => chat.id !== "work");
+    await route.fulfill({ json: state });
+  });
+  const sidebar = page.getByRole("complementary", { name: "Sidebar" });
+  const options = sidebar.getByTitle("Options for Homepage");
+  await options.click();
+  await page.getByRole("menuitem", { name: "Delete chat…", exact: true }).click();
+  const confirmDialog = page.getByRole("alertdialog", { name: "Delete “Homepage”?" });
+  await expect(confirmDialog).toBeVisible();
+  await expect(confirmDialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(confirmDialog).toHaveCount(0);
+  expect(deletes).toEqual([]);
+  await expect(sidebar.getByRole("button", { name: "Open Homepage", exact: true })).toBeVisible();
+  await options.click();
+  await page.getByRole("menuitem", { name: "Delete chat…", exact: true }).click();
+  await confirmDialog.getByRole("button", { name: "Delete chat", exact: true }).click();
+  await expect(sidebar.getByRole("button", { name: "Open Homepage", exact: true })).toHaveCount(0);
+  expect(deletes).toEqual([{ id: "work" }]);
+});
+
+test("project deletion from the hub requires confirmation", async ({ page }) => {
+  const state = snapshot();
+  state.workspaces = [{ id: "project", name: "Website", path: "/tmp/website", description: "", instructions: "" }, { id: "docs", name: "Docs", path: "/tmp/docs", description: "", instructions: "" }];
+  await mockBackend(page, state);
+  let deletes = 0;
+  await page.route("**/api/workspace/delete", async route => { deletes++; state.workspaces = state.workspaces.filter(ws => ws.id !== "project"); await route.fulfill({ json: state }); });
+  await page.getByRole("complementary", { name: "Sidebar" }).getByRole("button", { name: "Bot library", exact: true }).click();
+  const hub = page.getByRole("dialog", { name: "Omnibot Hub" });
+  await hub.getByRole("navigation").getByRole("button", { name: /^Projects/ }).click();
+  await hub.getByRole("button", { name: "Remove project Website", exact: true }).click();
+  const confirmDialog = page.getByRole("alertdialog", { name: "Remove project “Website”?" });
+  await expect(confirmDialog).toContainText("/tmp/website");
+  await confirmDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  expect(deletes).toBe(0);
+  await expect(hub).toBeVisible();
+  await hub.getByRole("button", { name: "Remove project Website", exact: true }).click();
+  await confirmDialog.getByRole("button", { name: "Remove project", exact: true }).click();
+  await expect.poll(() => deletes).toBe(1);
+  await expect(hub.getByRole("button", { name: "Remove project Website", exact: true })).toHaveCount(0);
+});
+
+test("a failed local tool health check is shown as a failure", async ({ page }) => {
+  const state = snapshot();
+  state.harnesses = [{ id: "codex", kind: "codex", name: "Codex", binaryName: "codex", installed: true, models: [], description: "", installHint: "", authHint: "", supportsJsonStream: true, supportsSessionResume: true }];
+  await mockBackend(page, state);
+  await page.route("**/api/harness/test", route => route.fulfill({ json: { kind: "codex", ok: false, latencyMs: 12, message: "Not signed in" } }));
+  await page.getByRole("complementary", { name: "Sidebar" }).getByRole("button", { name: "Bot library", exact: true }).click();
+  await page.getByRole("button", { name: "Local tools", exact: true }).click();
+  const tools = page.getByRole("dialog", { name: "Local Coding Tools" });
+  await tools.getByRole("button", { name: "Test Codex", exact: true }).click();
+  await expect(tools.getByText("✕ Health check failed · Not signed in")).toBeVisible();
+});
+
+test("search results support arrow-key selection and Enter", async ({ page }) => {
+  const state = snapshot();
+  state.chats.push({ ...state.chats[0], id: "alpha", isPrimary: false, title: "Alpha notes" }, { ...state.chats[0], id: "beta", isPrimary: false, title: "Alpha review" });
+  await mockBackend(page, state);
+  await page.keyboard.press("ControlOrMeta+k");
+  const search = page.getByRole("combobox", { name: "Search" });
+  await expect(search).toBeFocused();
+  await search.fill("Alpha");
+  const options = page.getByRole("listbox", { name: "Search results" }).getByRole("option");
+  await expect(options).toHaveCount(2);
+  await expect(options.first()).toHaveAttribute("aria-selected", "true");
+  await search.press("ArrowDown");
+  await expect(options.nth(1)).toHaveAttribute("aria-selected", "true");
+  await expect(search).toHaveAttribute("aria-activedescendant", (await options.nth(1).getAttribute("id"))!);
+  await search.press("Enter");
+  await expect(page.getByRole("dialog", { name: "Search" })).toHaveCount(0);
+  await expect(page.getByRole("complementary", { name: "Sidebar" }).getByRole("button", { name: "Open Alpha review", exact: true })).toHaveAttribute("aria-current", "page");
+  await page.keyboard.press("ControlOrMeta+k");
+  await search.fill("zzz-nothing");
+  await expect(page.getByText("No matches", { exact: true })).toBeVisible();
+});
+
+test("dialogs trap focus, close on Escape, and restore focus", async ({ page }) => {
+  await mockBackend(page, snapshot());
+  const composer = page.getByPlaceholder(/^Message /);
+  await composer.focus();
+  await page.keyboard.press("ControlOrMeta+k");
+  const dialog = page.getByRole("dialog", { name: "Search" });
+  await expect(dialog).toHaveAttribute("aria-modal", "true");
+  await expect(dialog.getByRole("combobox", { name: "Search" })).toBeFocused();
+  for (let i = 0; i < 6; i++) {
+    await page.keyboard.press("Tab");
+    expect(await dialog.evaluate(el => el.contains(document.activeElement))).toBe(true);
+  }
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(composer).toBeFocused();
+});
+
+test("shortcuts respect text fields and open modals", async ({ page }) => {
+  await mockBackend(page, snapshot());
+  const inspector = page.getByTitle("Click to open Bot Settings, Group members, Project & Git (Cmd+I)");
+  await page.getByPlaceholder(/^Message /).focus();
+  await page.keyboard.press("ControlOrMeta+i");
+  await expect(inspector).toHaveAttribute("aria-expanded", "false");
+  await page.keyboard.press("ControlOrMeta+k");
+  await expect(page.getByRole("dialog", { name: "Search" })).toBeVisible();
+  await page.keyboard.press("ControlOrMeta+n");
+  await expect(page.getByRole("dialog", { name: "Search" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "New chat" })).toHaveCount(0);
+});
+
+test("failed sidebar actions report the error instead of failing silently", async ({ page }) => {
+  const state = snapshot();
+  state.bots.push({ ...state.bots[0], id: "bot-b", name: "Teammate", slug: "teammate", isPrimary: false });
+  await mockBackend(page, state);
+  await page.route("**/api/bot/pin", route => route.fulfill({ status: 500, body: "Disk is read-only" }));
+  await page.getByRole("complementary", { name: "Sidebar" }).getByRole("button", { name: "Bot library", exact: true }).click();
+  await page.getByRole("button", { name: "Pin Teammate to sidebar", exact: true }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "Disk is read-only" })).toContainText("Couldn’t pin Teammate");
+  await page.getByRole("button", { name: "Dismiss" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "Disk is read-only" })).toHaveCount(0);
+});
+
+test("the offline screen can retry connecting to the backend", async ({ page }) => {
+  const state = snapshot();
+  let online = false;
+  // Routes registered later take priority, so the offline gate goes last.
+  await page.route("**/api/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/snapshot") return route.fulfill({ json: state });
+    if (path === "/api/git/status") return route.fulfill({ json: state.gitStatus });
+    return route.fulfill({ status: 400, body: "Unexpected fixture request" });
+  });
+  await installFixtureEventSource(page);
+  await page.route("**/api/snapshot", route => online ? route.fallback() : route.fulfill({ status: 503, body: "Starting" }));
+  await page.goto("/");
+  await expect(page.getByText("Could not reach the Omnibot local backend.")).toBeVisible();
+  online = true;
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeVisible();
+});
+
+test("a lost live-update connection shows a reconnecting notice", async ({ page }) => {
+  await page.clock.install();
+  const state = snapshot();
+  await mockBackend(page, state);
+  const setEventsDown = (down: boolean) => page.evaluate(next => (window as unknown as { __fixtureEvents: FixtureEventsControl }).__fixtureEvents.setDown(next), down);
+  await page.clock.runFor(5000);
+  await expect(page.getByText("Reconnecting…", { exact: true })).toHaveCount(0);
+  await setEventsDown(true);
+  await expect(page.getByText("Reconnecting…", { exact: true })).toBeVisible();
+  await setEventsDown(false);
+  await expect(page.getByText("Reconnecting…", { exact: true })).toHaveCount(0, { timeout: 10_000 });
+});
+
+test("workflow cost limit accepts 0 as no limit and rejects invalid input", async ({ page }) => {
+  const state = snapshot();
+  await mockBackend(page, state);
+  await page.getByRole("complementary", { name: "Sidebar" }).getByRole("button", { name: "Bot library", exact: true }).click();
+  await page.getByRole("button", { name: "Team Rules & Trust", exact: true }).click();
+  const limit = page.getByRole("spinbutton", { name: "Workflow cost limit" });
+  await expect(limit).toHaveValue("3.75");
+  await limit.fill("-1");
+  await expect(limit).toHaveAttribute("aria-invalid", "true");
+  await limit.press("Enter");
+  await expect(limit).toHaveValue("3.75");
+  expect(state.preferences.workflowBudgetUsd).toBe(3.75);
+  await limit.fill("0");
+  await limit.press("Enter");
+  await expect.poll(() => state.preferences.workflowBudgetUsd).toBe(0);
+  await page.getByRole("button", { name: "No limit", exact: true }).click();
+  await expect.poll(() => state.preferences.maxTurnBudgetUsd).toBe(0);
+  await expect(page.getByRole("button", { name: "No limit", exact: true })).toHaveAttribute("aria-pressed", "true");
 });
