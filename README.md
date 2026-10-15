@@ -17,7 +17,7 @@ Omnibot stores its own conversations, preferences, and memories locally. When yo
 
 ## Getting started
 
-Download the signed, Apple-notarized universal app from [GitHub Releases](https://github.com/robzilla1738/Omnibot/releases/latest). Open the DMG, drag **Omnibot** to **Applications**, and launch it. The same download contains Apple Silicon and Intel binaries. See the [support matrix](docs/support-matrix.md) for tested platforms and limitations.
+Requires **macOS 12 or newer**. Download the signed, Apple-notarized universal app from [GitHub Releases](https://github.com/robzilla1738/Omnibot/releases/latest). Open the DMG, drag **Omnibot** to **Applications**, and launch it. The same download contains Apple Silicon and Intel binaries. See the [support matrix](docs/support-matrix.md) for tested platforms and limitations.
 
 Existing users can use **Omnibot → Check for Updates…**. Finish running tasks before updating, and back up `~/.omni-bot/` when it contains important work. Keep the existing data directory; the update preserves the app identity and update key. See [backup and recovery](docs/recovery.md) before downgrading.
 
@@ -27,7 +27,7 @@ Omnibot is early-stage software. macOS is the supported platform; other platform
 
 For development, install:
 
-- macOS with Xcode Command Line Tools (`xcode-select --install`).
+- macOS 12 or newer with Xcode Command Line Tools (`xcode-select --install`).
 - Node.js 22 or newer and pnpm 11.12.0 (the version pinned in `package.json`).
 - A stable Rust toolchain with Cargo on your `PATH`.
 - At least one supported CLI installed and authenticated when you want to run a bot. Setup and the automated tests do not require provider accounts.

@@ -18,6 +18,19 @@ smoke = load_script("smoke-local")
 
 
 class ReleaseChecks(unittest.TestCase):
+    def test_minimum_macos_covers_all_framework_slices(self):
+        commands = "    minos 11.0\n    minos 12.0\n"
+        with self.assertRaisesRegex(SystemExit, "lower than bundled Sparkle"):
+            release.validate_minimum_system("11.0", commands)
+        release.validate_minimum_system("12.0", commands)
+        release.validate_minimum_system("12.0.0", commands)
+
+    def test_missing_framework_deployment_metadata_is_rejected(self):
+        with self.assertRaisesRegex(SystemExit, "Cannot determine"):
+            release.validate_minimum_system("12.0", "")
+        with self.assertRaisesRegex(SystemExit, "Missing or invalid"):
+            release.validate_minimum_system(None, "    minos 12.0\n")
+
     def test_ci_must_match_exact_source_and_branch(self):
         run = {"head_sha": "expected", "event": "push", "head_branch": "main",
                "run_number": 10, "run_attempt": 1, "status": "completed",

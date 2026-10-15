@@ -6,7 +6,7 @@ Omnibot currently targets macOS. A build target or implemented adapter is not a 
 | --- | --- | --- |
 | macOS Apple Silicon | Native app, local API, process execution and PTYs | Rust/browser fixtures, signed/notarized local bundle, isolated native API/PTY/restart smoke and selected native UI checks; actual signed update installation remains unverified |
 | macOS Intel | Universal release binary includes x86_64 | Both slices inspected in the signed artifact. Rosetta execution was unavailable on the qualification host; physical Intel runtime remains unverified |
-| Minimum macOS | Bundle declares macOS 11.0 | Test the release candidate on that OS before advertising verified compatibility |
+| Minimum macOS | macOS 12.0, required by bundled Sparkle | 0.1.1/0.1.2 bundle metadata incorrectly declares 11.0; feed eligibility and future build configuration are corrected to 12.0. Runtime on macOS 12 remains unverified |
 | Linux / Windows | Some upstream libraries have platform implementations | Unsupported by this project; packaging, permissions, subprocesses and PTYs are not validated |
 | Claude Code, Codex, OpenCode, Cursor Agent, Grok Build, Pi, Muse, Gemini CLI, Aider, Ollama | Execution adapters and adapter-specific stream/session/usage handling | Fake executable and protocol fixtures; real CLI/provider versions require explicit manual checks |
 | ACP / Antigravity | Experimental one-shot plain-text adapters | No guarantee of streaming metadata, resume or compatibility with every implementation |

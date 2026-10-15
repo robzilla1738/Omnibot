@@ -12,4 +12,6 @@
 - Stop leftover process-group helpers after a CLI turn and bound aggregate output and tool-call retention.
 - Bind release artifacts to an exact source commit and successful CI run. Add dependency audit gates, a complete collected dependency notice bundle with provenance, browser coverage in Chromium and WebKit, and recovery/support documentation.
 
+Post-publication compatibility correction: bundled Sparkle requires macOS 12. The 0.1.1/0.1.2 app metadata incorrectly declares 11; update eligibility, documentation and future build configuration now use 12. Published download bytes are unchanged.
+
 Existing bundle identity, update feed and signing key are preserved. Before returning to an older app version, quit Omnibot and follow [the recovery procedure](docs/recovery.md); an older binary cannot enforce the new schema guard. Drafts use local webview storage and should be copied separately before clearing application/browser data.

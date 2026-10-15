@@ -15,7 +15,13 @@ The final universal app and DMG were Developer ID signed, Apple-notarized and st
 
 The final signed binary passed isolated Apple Silicon startup, fake workflows, archive/restore, PTY input/resize/exit and restart persistence smoke tests. An additional upgrade check downloaded and verified the published 0.1.1 ZIP, used that binary to save a synthetic profile, then explicitly replaced its subprocess with 0.1.2. Custom prompts, model/effort choices, personal/project/shared memory, settings, project/history/session metadata and disabled routines were preserved. The pre-migration copy exactly matched the old store bytes; a second launch preserved the profile identity and did not create another migration copy.
 
-This was explicit binary replacement, not a Sparkle installation. Physical Intel, macOS 11, actual signed update installation/relaunch and all live CLI/provider combinations remain unverified. Native UI evidence from the earlier qualification is retained below. The source/CI manifest, checksums and dependency notices are release assets; the historical local qualification archive below is not the published artifact.
+This was explicit binary replacement, not a Sparkle installation. Physical Intel, macOS 12, actual signed update installation/relaunch and all live CLI/provider combinations remain unverified. Native UI evidence from the earlier qualification is retained below. The source/CI manifest, checksums and dependency notices are release assets; the historical local qualification archive below is not the published artifact.
+
+### Minimum-system correction after publication
+
+Inspection of both slices of the shipped Sparkle framework with `otool -l` established a macOS 12.0 deployment target in both 0.1.1 and 0.1.2. Their top-level app metadata incorrectly declares 11.0. README, release notes, support matrix and future build configuration now state 12.0; the release validator rejects a top-level minimum below either framework slice. The safeguard suite now has 25 passing tests.
+
+The live feed was regenerated as a new unsigned document with corrected minimum-system metadata for both versions, then signed and verified with Sparkle's official `sign_update` tool. Original candidate feeds and published artifacts remain unchanged. The manifest's feed hash describes the original candidate feed; the later eligibility correction is recorded in Git history. Archive URLs, lengths, signatures and SHA-256 checksums are unchanged. macOS 12 runtime remains unverified; the requirement is established by binary metadata.
 
 ## 0.1.2 local qualification — October 15, 2026
 

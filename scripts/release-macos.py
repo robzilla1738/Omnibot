@@ -55,11 +55,28 @@ def validate_app(app, version, team):
         raise SystemExit("Release requires the expected Developer ID, hardened runtime, and timestamp.")
     if not (app / "Contents/Frameworks/Sparkle.framework").exists():
         raise SystemExit("Missing Sparkle framework.")
+    framework_commands = run("otool", "-l", app / "Contents/Frameworks/Sparkle.framework/Sparkle",
+                             capture=True).stdout
+    validate_minimum_system(info.get("LSMinimumSystemVersion"), framework_commands)
     validate_notices(app)
     rpaths = run("otool", "-l", binary, capture=True).stdout
     if any(str(ROOT) in line for line in rpaths.splitlines() if line.strip().startswith("path ")):
         raise SystemExit("Release contains a development framework search path.")
     run("codesign", "--verify", "--deep", "--strict", app)
+
+
+def validate_minimum_system(declared, framework_commands):
+    def version(value):
+        if not value or not re.fullmatch(r"\d+(?:\.\d+){0,2}", value):
+            raise SystemExit("Missing or invalid minimum macOS version.")
+        parts = tuple(int(part) for part in value.split("."))
+        return parts + (0,) * (3 - len(parts))
+
+    requirements = re.findall(r"(?m)^\s*minos\s+(\d+(?:\.\d+){0,2})\s*$", framework_commands)
+    if not requirements:
+        raise SystemExit("Cannot determine Sparkle's minimum macOS version.")
+    if version(declared) < max(version(required) for required in requirements):
+        raise SystemExit("App minimum macOS version is lower than bundled Sparkle requires.")
 
 
 def validate_notices(app):

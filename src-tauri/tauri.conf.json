@@ -47,7 +47,7 @@
       "frameworks": [
         "./Sparkle.framework"
       ],
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "12.0"
     },
     "resources": {
       "../LICENSE": "licenses/Omnibot-MIT.txt",
