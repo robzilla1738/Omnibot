@@ -76,7 +76,11 @@ async function mockBackend(page: Page, state: OmniSnapshot, sendStatus = 200) {
   unexpectedRequests.set(page, unexpected);
   await installFixtureEventSource(page);
   await page.route("**/api/**", async route => {
-    const path = new URL(route.request().url()).pathname;
+    const url = new URL(route.request().url());
+    // Model one listening backend. Returning a large snapshot on every discovery
+    // port duplicates serialization and transport work fifteen times during startup.
+    if (url.origin !== state.serverBaseUrl) return route.abort("connectionrefused");
+    const path = url.pathname;
     if (path === "/api/snapshot") return route.fulfill({ json: state });
     if (path === "/api/preferences") { Object.assign(state.preferences, route.request().postDataJSON()); return route.fulfill({ json: state }); }
     if (path === "/api/rescan") return route.fulfill({ json: state });

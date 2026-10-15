@@ -17,6 +17,10 @@ The final signed binary passed isolated Apple Silicon startup, fake workflows, a
 
 This was explicit binary replacement, not a Sparkle installation. Physical Intel, macOS 12, actual signed update installation/relaunch and all live CLI/provider combinations remain unverified. Native UI evidence from the earlier qualification is retained below. The source/CI manifest, checksums and dependency notices are release assets; the historical local qualification archive below is not the published artifact.
 
+The public 0.1.2 app's native Check for Updates subsequently reported 0.1.2 as the newest version after GitHub's feed cache refreshed. The app was explicitly launched with a disposable profile, stopped without any automation-driven relaunch, and the normal store hash was unchanged. This verifies a live update check, not installation.
+
+A later CI run exposed a stress-fixture startup timeout: the mock returned the entire 3,000-message snapshot on all 15 discovery ports, duplicating serialization and transport work. The fixture now represents one listening backend and refuses other ports. The unchanged responsiveness assertions passed five consecutive Chromium runs and five WebKit runs after this test-only correction. Native startup uses IPC, and authenticated browser development uses its explicit server address.
+
 ### Minimum-system correction after publication
 
 Inspection of both slices of the shipped Sparkle framework with `otool -l` established a macOS 12.0 deployment target in both 0.1.1 and 0.1.2. Their top-level app metadata incorrectly declares 11.0. README, release notes, support matrix and future build configuration now state 12.0; the release validator rejects a top-level minimum below either framework slice. The safeguard suite now has 25 passing tests.
