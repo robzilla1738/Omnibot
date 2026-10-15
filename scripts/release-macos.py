@@ -213,7 +213,11 @@ def main():
     existing_feed = ROOT / "updates/appcast.xml"
     if existing_feed.exists():
         shutil.copyfile(existing_feed, archive_dir / "appcast.xml")
-    run(tools / "generate_appcast", "--account", ACCOUNT, "--maximum-deltas", "0",
+    release_notes = ROOT / "docs/releases" / f"{version}.md"
+    if not release_notes.is_file():
+        raise SystemExit("Add versioned release notes before generating the update feed.")
+    shutil.copyfile(release_notes, archive.with_suffix(".md"))
+    run(tools / "generate_appcast", "--account", ACCOUNT, "--maximum-deltas", "0", "--embed-release-notes",
         "--download-url-prefix", f"https://github.com/{REPO}/releases/download/v{version}/", archive_dir)
     feed = archive_dir / "appcast.xml"
     run(tools / "sign_update", "--account", ACCOUNT, "--verify", feed)
