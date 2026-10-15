@@ -1,5 +1,5 @@
 //! Model metadata only: no sessions, prompts, or inference requests.
-use crate::scanner::{augmented_path_env, CliDriverKind};
+use crate::scanner::{path_env_for_binary, user_environment, CliDriverKind};
 use crate::state::{OmniStreamEvent, SharedOmniState};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -150,7 +150,8 @@ async fn discover(kind: CliDriverKind, binary: &str) -> Result<Catalog, ()> {
     command
         .args(args)
         .current_dir(std::env::temp_dir())
-        .env("PATH", augmented_path_env())
+        .envs(user_environment().iter().map(|(k, v)| (k, v)))
+        .env("PATH", path_env_for_binary(binary))
         .env("NO_COLOR", "1")
         .env("TERM", "dumb")
         .env("PI_OFFLINE", "1")
@@ -172,7 +173,7 @@ async fn discover(kind: CliDriverKind, binary: &str) -> Result<Catalog, ()> {
         if protocol {
             let init = if kind == CliDriverKind::Claude {
                 json!({"type":"control_request","request_id":"models","request":{"subtype":"initialize"}})
-            } else { json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"omnibot","version":"0.1.0"}}}) };
+            } else { json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"omnibot","version":env!("CARGO_PKG_VERSION")}}}) };
             input.write_all(format!("{init}\n").as_bytes()).await.map_err(|_| ())?;
         }
         let mut lines = BufReader::new(stdout.take(2 * 1024 * 1024)).lines();

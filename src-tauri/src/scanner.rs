@@ -194,8 +194,7 @@ pub struct CliHarnessTestResult {
 
 pub fn test_cli_harness(kind: CliDriverKind) -> CliHarnessTestResult {
     let start = std::time::Instant::now();
-    let harnesses = scan_local_cli_harnesses();
-    let Some(info) = harnesses.into_iter().find(|h| h.kind == kind) else {
+    let Some(spec) = harness_specs().into_iter().find(|s| s.kind == kind) else {
         return CliHarnessTestResult {
             kind,
             ok: false,
@@ -206,14 +205,14 @@ pub fn test_cli_harness(kind: CliDriverKind) -> CliHarnessTestResult {
         };
     };
 
-    let Some(bin_path) = info.binary_path.clone() else {
+    let Some(bin_path) = find_binary(spec.binaries) else {
         return CliHarnessTestResult {
             kind,
             ok: false,
             binary_path: None,
             version: None,
             latency_ms: start.elapsed().as_millis() as u64,
-            message: format!("Binary '{}' not found on PATH", info.binary_name),
+            message: format!("Binary '{}' not found on PATH", spec.binaries[0]),
         };
     };
 
@@ -235,36 +234,159 @@ pub fn test_cli_harness(kind: CliDriverKind) -> CliHarnessTestResult {
     }
 }
 
+#[derive(Default)]
+struct LoginEnvironment {
+    path: Option<String>,
+    vars: Vec<(String, String)>,
+}
+
+static LOGIN_ENVIRONMENT: std::sync::OnceLock<LoginEnvironment> = std::sync::OnceLock::new();
+
+const LOGIN_ENV_MARKER: &str = "__OMNIBOT_ENV_START__";
+
+fn login_environment() -> &'static LoginEnvironment {
+    LOGIN_ENVIRONMENT.get_or_init(capture_login_environment)
+}
+
+/// Variables exported by the user's shell profile (API keys, tool homes, etc.).
+/// Apps opened from Finder inherit launchd's minimal environment, so CLIs
+/// started from here would otherwise miss them. Empty when the app itself was
+/// started from a shell, because the process environment is already complete.
+pub fn user_environment() -> &'static [(String, String)] {
+    &login_environment().vars
+}
+
+fn capture_login_environment() -> LoginEnvironment {
+    if cfg!(test) || std::env::var_os("SHLVL").is_some() {
+        return LoginEnvironment::default();
+    }
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|s| Path::new(s).is_absolute() && Path::new(s).is_file())
+        .unwrap_or_else(|| "/bin/zsh".into());
+    read_shell_environment(&shell, std::time::Duration::from_secs(5)).unwrap_or_default()
+}
+
+fn read_shell_environment(shell: &str, timeout: std::time::Duration) -> Option<LoginEnvironment> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut command = Command::new(shell);
+    command
+        .args([
+            "-l",
+            "-i",
+            "-c",
+            &format!("printf '%s' {LOGIN_ENV_MARKER}; /usr/bin/env -0"),
+        ])
+        // Lets shell profiles skip slow or interactive setup for this probe.
+        .env("OMNIBOT_RESOLVING_ENVIRONMENT", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut bytes);
+        let _ = tx.send(bytes);
+    });
+    let bytes = rx.recv_timeout(timeout).ok();
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    parse_shell_environment(&bytes?)
+}
+
+fn parse_shell_environment(bytes: &[u8]) -> Option<LoginEnvironment> {
+    const SKIP: &[&str] = &[
+        "PWD",
+        "OLDPWD",
+        "SHLVL",
+        "_",
+        "TERM",
+        "COLORTERM",
+        "PS1",
+        "OMNIBOT_RESOLVING_ENVIRONMENT",
+    ];
+    let marker = LOGIN_ENV_MARKER.as_bytes();
+    let start = bytes.windows(marker.len()).position(|w| w == marker)? + marker.len();
+    let mut env = LoginEnvironment::default();
+    for entry in bytes[start..].split(|b| *b == 0) {
+        let entry = String::from_utf8_lossy(entry);
+        let Some((key, value)) = entry.split_once('=') else {
+            continue;
+        };
+        if key.is_empty()
+            || SKIP.contains(&key)
+            || key.starts_with("TERM_")
+            || key.starts_with("TMUX")
+            || key.starts_with("ITERM")
+        {
+            continue;
+        }
+        if key == "PATH" {
+            env.path = Some(value.to_string());
+        } else {
+            env.vars.push((key.to_string(), value.to_string()));
+        }
+    }
+    Some(env)
+}
+
 pub fn extended_search_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut push = |p: PathBuf| {
+        if !p.as_os_str().is_empty() && !dirs.contains(&p) {
+            dirs.push(p);
+        }
+    };
+    if let Some(path) = &login_environment().path {
+        std::env::split_paths(path).for_each(&mut push);
+    }
     if let Some(home) = dirs::home_dir() {
         for rel in [
             ".local/bin",
+            "bin",
             ".grok/bin",
             ".cargo/bin",
             ".bun/bin",
+            ".deno/bin",
             ".opencode/bin",
             ".cursor/bin",
+            ".npm-global/bin",
+            ".volta/bin",
+            ".yarn/bin",
+            ".local/share/mise/shims",
+            ".asdf/shims",
+            ".pyenv/shims",
             "Library/pnpm",
         ] {
-            dirs.push(home.join(rel));
+            push(home.join(rel));
         }
     }
     for sys in [
         "/opt/homebrew/bin",
         "/opt/homebrew/sbin",
         "/usr/local/bin",
+        "/opt/local/bin",
         "/usr/bin",
         "/bin",
+        "/usr/sbin",
+        "/sbin",
     ] {
-        dirs.push(PathBuf::from(sys));
+        push(PathBuf::from(sys));
     }
-    if let Ok(path_var) = std::env::var("PATH") {
-        for p in std::env::split_paths(&path_var) {
-            if !dirs.contains(&p) {
-                dirs.push(p);
-            }
-        }
+    if let Some(path_var) = std::env::var_os("PATH") {
+        std::env::split_paths(&path_var).for_each(&mut push);
     }
     dirs
 }
@@ -276,16 +398,51 @@ pub fn augmented_path_env() -> String {
         .unwrap_or_else(|_| "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin".to_string())
 }
 
+/// PATH for a CLI child process. The binary's own directory goes first so
+/// version-manager installs (nvm, volta, mise) find their matching runtime.
+pub fn path_env_for_binary(binary_path: &str) -> String {
+    let base = augmented_path_env();
+    match Path::new(binary_path).parent().filter(|p| p.is_absolute()) {
+        Some(dir) => format!("{}:{base}", dir.display()),
+        None => base,
+    }
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    meta.is_file()
+}
+
+fn expand_home(name: &str) -> PathBuf {
+    match (name.strip_prefix("~/"), dirs::home_dir()) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ => PathBuf::from(name),
+    }
+}
+
+/// Resolves the first candidate that is an executable file. Names containing a
+/// slash are treated as paths (with `~/` expansion) and never searched on PATH.
 pub fn find_binary(candidates: &[&str]) -> Option<String> {
     let search_dirs = extended_search_dirs();
     for bin_name in candidates {
-        let p = Path::new(bin_name);
-        if p.is_absolute() && p.is_file() {
-            return Some(p.to_string_lossy().into_owned());
+        if bin_name.contains('/') {
+            let path = expand_home(bin_name);
+            if path.is_absolute() && is_executable_file(&path) {
+                return Some(path.to_string_lossy().into_owned());
+            }
+            continue;
         }
         for dir in &search_dirs {
             let full = dir.join(bin_name);
-            if full.is_file() {
+            if is_executable_file(&full) {
                 return Some(full.to_string_lossy().into_owned());
             }
         }
@@ -311,7 +468,8 @@ fn probe_version(binary_path: &str, flag: &str) -> Option<String> {
         let mut command = Command::new(binary_path);
         command
             .arg(flag)
-            .env("PATH", augmented_path_env())
+            .envs(user_environment().iter().map(|(k, v)| (k, v)))
+            .env("PATH", path_env_for_binary(binary_path))
             .stdin(Stdio::null())
             .stdout(file.try_clone().ok()?)
             .stderr(file);
@@ -360,18 +518,39 @@ fn probe_version(binary_path: &str, flag: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-pub fn scan_local_cli_harnesses() -> Vec<CliHarnessInfo> {
-    type HarnessSpec<'a> = (
-        CliDriverKind,
-        &'a [&'a str],
-        &'a str,
-        &'a str,
-        &'a str,
-        bool,
-        bool,
-    );
-    let specs: Vec<HarnessSpec<'_>> = vec![
-        (
+struct HarnessSpec {
+    kind: CliDriverKind,
+    /// Most specific name first; generic names like `agent` are a fallback.
+    binaries: &'static [&'static str],
+    description: &'static str,
+    install_hint: &'static str,
+    auth_hint: &'static str,
+    json_stream: bool,
+    session_resume: bool,
+}
+
+fn harness_specs() -> Vec<HarnessSpec> {
+    fn spec(
+        kind: CliDriverKind,
+        binaries: &'static [&'static str],
+        description: &'static str,
+        install_hint: &'static str,
+        auth_hint: &'static str,
+        json_stream: bool,
+        session_resume: bool,
+    ) -> HarnessSpec {
+        HarnessSpec {
+            kind,
+            binaries,
+            description,
+            install_hint,
+            auth_hint,
+            json_stream,
+            session_resume,
+        }
+    }
+    vec![
+        spec(
             CliDriverKind::Claude,
             &["claude"],
             "Anthropic Claude Code CLI with streaming JSONL, tool execution, skills, and session resume.",
@@ -380,7 +559,7 @@ pub fn scan_local_cli_harnesses() -> Vec<CliHarnessInfo> {
             true,
             true,
         ),
-        (
+        spec(
             CliDriverKind::Codex,
             &["codex"],
             "OpenAI Codex CLI with non-interactive JSONL execution, sandboxing, and git worktree support.",
@@ -389,129 +568,130 @@ pub fn scan_local_cli_harnesses() -> Vec<CliHarnessInfo> {
             true,
             true,
         ),
-        (
+        spec(
             CliDriverKind::Opencode,
             &["opencode"],
-            "OpenCode v2 CLI & local server harness with multi-provider models, thinking blocks, and ACP.",
+            "OpenCode CLI with multi-provider models, thinking blocks, and session resume.",
             "brew install opencode",
             "opencode auth login",
             true,
             true,
         ),
-        (
+        spec(
             CliDriverKind::Cursor,
-            &["agent", "cursor-agent"],
+            &["cursor-agent", "agent"],
             "Cursor Agent CLI with streaming partial deltas, auto-review classifier, and plan/build modes.",
             "Install via Cursor -> Install 'agent' CLI",
-            "agent login",
+            "cursor-agent login",
             true,
             true,
         ),
-        (
+        spec(
             CliDriverKind::Grok,
             &["grok"],
-            "xAI Grok Build CLI with streaming Anthropic/ACP JSONL wire output and subagent orchestration.",
+            "xAI Grok Build CLI with streaming JSONL output and session resume.",
             "curl -fsSL https://x.ai/cli | sh",
             "grok login",
             true,
             true,
         ),
-        (
+        spec(
             CliDriverKind::Pi,
             &["pi"],
-            "Pi coding agent with JSON/RPC modes, read/bash/edit/write tools, and session branching.",
+            "Pi coding agent with JSON mode, read/bash/edit/write tools, and sessions.",
             "npm i -g @mariozechner/pi-coding-agent",
             "pi auth",
             true,
             true,
         ),
-        (
+        spec(
             CliDriverKind::Antigravity,
             &["antigravity", "agy"],
-            "Google Antigravity coding agent supported by T3 Code.",
+            "Experimental: Google Antigravity agent. Omnibot sends one prompt and shows plain-text output.",
             "Install via Google Antigravity",
             "Sign in with Google",
-            true,
+            false,
             false,
         ),
-        (
+        spec(
             CliDriverKind::Muse,
             &["muse"],
-            "Meta Muse Code CLI agent supported by T3 Code.",
+            "Meta Muse Code CLI run headless with `muse exec`; shows plain-text output.",
             "Install Muse Code CLI",
             "muse login",
-            true,
+            false,
             false,
         ),
-        (
+        spec(
             CliDriverKind::Acp,
             &["acp"],
-            "Agent Client Protocol (ACP) Registry standard harness.",
+            "Experimental: passes the prompt as one argument to an `acp` command and shows plain-text output.",
             "opencode acp",
             "acp",
-            true,
+            false,
             false,
         ),
-        (
+        spec(
             CliDriverKind::Gemini,
             &["gemini"],
-            "Google Gemini CLI for 1M+ token codebase analysis and multimodal tasks.",
+            "Google Gemini CLI for large-context codebase analysis; shows plain-text output.",
             "npm i -g @google/gemini-cli",
             "gemini",
-            true,
+            false,
             false,
         ),
-        (
+        spec(
             CliDriverKind::Aider,
             &["aider"],
-            "Aider Git-centric pair programming CLI with automatic commit attribution.",
+            "Aider pair programming CLI. Omnibot turns off its automatic git commits.",
             "pipx install aider-chat",
             "Set API key in environment",
             false,
             false,
         ),
-        (
+        spec(
             CliDriverKind::Ollama,
             &["ollama"],
-            "Local open-weights LLM runner on your Mac GPU (Metal).",
+            "Local open-weights models on your Mac GPU (Metal). Only installed models are used.",
             "brew install ollama",
             "ollama serve",
             false,
             false,
         ),
-    ];
+    ]
+}
 
-    let mut harnesses: Vec<CliHarnessInfo> = specs
+pub fn scan_local_cli_harnesses() -> Vec<CliHarnessInfo> {
+    let mut harnesses: Vec<CliHarnessInfo> = harness_specs()
         .into_iter()
-        .map(
-            |(kind, bin_candidates, description, install_hint, auth_hint, json_stream, resume)| {
-                let binary_path = find_binary(bin_candidates);
-                let installed = binary_path.is_some();
-                CliHarnessInfo {
-                    supports_plan: crate::execution::supports_plan(kind),
-                    supports_effort: matches!(kind, CliDriverKind::Claude | CliDriverKind::Codex),
-                    id: kind.as_str().to_string(),
-                    kind,
-                    name: kind.display_name().to_string(),
-                    binary_name: bin_candidates[0].to_string(),
-                    binary_path,
-                    version: None,
-                    installed,
-                    description: description.to_string(),
-                    install_hint: install_hint.to_string(),
-                    auth_hint: auth_hint.to_string(),
-                    models: Vec::new(),
-                    model_labels: Default::default(),
-                    models_status: if installed { "loading" } else { "unavailable" }.into(),
-                    models_source: None,
-                    supports_json_stream: json_stream,
-                    supports_session_resume: resume,
-                }
-            },
-        )
+        .map(|spec| {
+            let kind = spec.kind;
+            let binary_path = find_binary(spec.binaries);
+            let installed = binary_path.is_some();
+            CliHarnessInfo {
+                supports_plan: crate::execution::supports_plan(kind),
+                supports_effort: matches!(kind, CliDriverKind::Claude | CliDriverKind::Codex),
+                id: kind.as_str().to_string(),
+                kind,
+                name: kind.display_name().to_string(),
+                binary_name: spec.binaries[0].to_string(),
+                binary_path,
+                version: None,
+                installed,
+                description: spec.description.to_string(),
+                install_hint: spec.install_hint.to_string(),
+                auth_hint: spec.auth_hint.to_string(),
+                models: Vec::new(),
+                model_labels: Default::default(),
+                models_status: if installed { "loading" } else { "unavailable" }.into(),
+                models_source: None,
+                supports_json_stream: spec.json_stream,
+                supports_session_resume: spec.session_resume,
+            }
+        })
         .collect();
 
-    // At most one probe per registered CLI (12), each with its own timeout.
+    // At most one probe per registered CLI, each with its own timeout.
     // Preserve registry order while avoiding cumulative process startup delays.
     std::thread::scope(|scope| {
         for harness in &mut harnesses {
@@ -686,4 +866,45 @@ pub fn scan_local_mcp_servers() -> Vec<LocalMcpServer> {
     }
 
     servers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_environment_skips_profile_noise_and_session_variables() {
+        let raw = b"motd noise __OMNIBOT_ENV_START__PATH=/a:/b\0API_KEY=x=y\0PWD=/tmp\0SHLVL=2\0TERM_PROGRAM=iTerm\0\0";
+        let env = parse_shell_environment(raw).unwrap();
+        assert_eq!(env.path.as_deref(), Some("/a:/b"));
+        assert_eq!(env.vars, vec![("API_KEY".to_string(), "x=y".to_string())]);
+        assert!(parse_shell_environment(b"PATH=/a").is_none());
+    }
+
+    #[test]
+    fn login_shell_environment_is_read_with_a_timeout() {
+        let env = read_shell_environment("/bin/sh", std::time::Duration::from_secs(5)).unwrap();
+        assert!(env.path.is_some_and(|p| !p.is_empty()));
+    }
+
+    #[test]
+    fn find_binary_requires_an_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("omni-bin-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let plain = dir.join("plain");
+        let tool = dir.join("tool");
+        fs::write(&plain, "").unwrap();
+        fs::write(&tool, "").unwrap();
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = |p: &Path| p.to_string_lossy().into_owned();
+        assert_eq!(find_binary(&[&path(&plain)]), None);
+        assert_eq!(find_binary(&[&path(&dir)]), None);
+        assert_eq!(
+            find_binary(&[&path(&plain), &path(&tool)]),
+            Some(path(&tool))
+        );
+        assert_eq!(find_binary(&["relative/tool"]), None);
+        let _ = fs::remove_dir_all(dir);
+    }
 }

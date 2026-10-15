@@ -1,12 +1,19 @@
-use crate::scanner::{augmented_path_env, find_binary, CliDriverKind};
+use crate::scanner::{find_binary, path_env_for_binary, user_environment, CliDriverKind};
 use crate::state::{
     now_ms, ActiveBotRun, BotProfile, OmniStreamEvent, SharedOmniState, ToolInvocation,
 };
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::process::Stdio;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+
+/// Longest single output line kept; the rest of an oversized line is dropped.
+const MAX_LINE_BYTES: usize = 1 << 20;
+const MAX_TURN_DURATION: Duration = Duration::from_secs(3 * 60 * 60);
+const TERMINATE_GRACE: Duration = Duration::from_secs(3);
 
 pub struct DriverTurnOutput {
     pub text: String,
@@ -20,6 +27,22 @@ pub struct DriverTurnOutput {
     pub status: String,
 }
 
+impl DriverTurnOutput {
+    fn error(text: String, duration_ms: u64) -> Self {
+        Self {
+            text,
+            thinking: String::new(),
+            tool_calls: Vec::new(),
+            native_session_id: None,
+            duration_ms,
+            cost_usd: None,
+            input_tokens: None,
+            output_tokens: None,
+            status: "error".into(),
+        }
+    }
+}
+
 pub struct DriverTurnRequest {
     pub chat_id: String,
     pub message_id: String,
@@ -31,6 +54,20 @@ pub struct DriverTurnRequest {
     pub approve_all: bool,
     pub turn_timeout_secs: u64,
     pub max_budget_usd: Option<f64>,
+}
+
+impl DriverTurnRequest {
+    fn model(&self) -> Option<&str> {
+        self.bot
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty() && *m != "default")
+    }
+
+    fn resume_id(&self) -> Option<&str> {
+        self.resume_session_id.as_deref().filter(|s| !s.is_empty())
+    }
 }
 
 #[derive(Default)]
@@ -53,6 +90,42 @@ struct StreamParserState {
     incomplete_output: bool,
     incomplete_cost: bool,
     failed: bool,
+    /// The CLI reported its terminal result; the turn's work is already done.
+    saw_final_result: bool,
+    /// Codex retries after transient `error` events; shown only if the turn fails.
+    pending_error: Option<String>,
+}
+
+/// CLIs whose stdout is parsed as JSON events. Everything else is plain text,
+/// so model output that happens to look like JSON is never reinterpreted.
+fn streams_json(kind: CliDriverKind) -> bool {
+    !matches!(
+        kind,
+        CliDriverKind::Gemini
+            | CliDriverKind::Antigravity
+            | CliDriverKind::Muse
+            | CliDriverKind::Aider
+            | CliDriverKind::Ollama
+            | CliDriverKind::Acp
+    )
+}
+
+fn driver_binaries(kind: CliDriverKind) -> &'static [&'static str] {
+    match kind {
+        CliDriverKind::Claude => &["claude"],
+        CliDriverKind::Codex => &["codex"],
+        CliDriverKind::Opencode => &["opencode"],
+        CliDriverKind::Cursor => &["cursor-agent", "agent"],
+        CliDriverKind::Grok => &["grok"],
+        CliDriverKind::Pi => &["pi"],
+        CliDriverKind::Antigravity => &["antigravity", "agy"],
+        CliDriverKind::Muse => &["muse"],
+        CliDriverKind::Acp => &["acp"],
+        CliDriverKind::Gemini => &["gemini"],
+        CliDriverKind::Aider => &["aider"],
+        CliDriverKind::Ollama => &["ollama"],
+        CliDriverKind::Custom => &[],
+    }
 }
 
 pub(crate) fn resolve_driver_binary(bot: &BotProfile) -> Option<(String, Vec<String>)> {
@@ -63,30 +136,10 @@ pub(crate) fn resolve_driver_binary(bot: &BotProfile) -> Option<(String, Vec<Str
         .filter(|s| !s.is_empty())
     {
         let parts = shlex::split(custom)?;
-        if let Some((first, rest)) = parts.split_first() {
-            if let Some(bin) = find_binary(&[first.as_str()]) {
-                return Some((bin, rest.to_vec()));
-            }
-        }
-        return None;
+        let (first, rest) = parts.split_first()?;
+        return find_binary(&[first.as_str()]).map(|bin| (bin, rest.to_vec()));
     }
-
-    let bin = match bot.cli_driver {
-        CliDriverKind::Claude => find_binary(&["claude"]),
-        CliDriverKind::Codex => find_binary(&["codex"]),
-        CliDriverKind::Opencode => find_binary(&["opencode"]),
-        CliDriverKind::Cursor => find_binary(&["agent", "cursor-agent"]),
-        CliDriverKind::Grok => find_binary(&["grok"]),
-        CliDriverKind::Pi => find_binary(&["pi"]),
-        CliDriverKind::Antigravity => find_binary(&["antigravity", "agy"]),
-        CliDriverKind::Muse => find_binary(&["muse"]),
-        CliDriverKind::Acp => find_binary(&["acp"]),
-        CliDriverKind::Gemini => find_binary(&["gemini"]),
-        CliDriverKind::Aider => find_binary(&["aider"]),
-        CliDriverKind::Ollama => find_binary(&["ollama"]),
-        CliDriverKind::Custom => None,
-    }?;
-    Some((bin, Vec::new()))
+    find_binary(driver_binaries(bot.cli_driver)).map(|bin| (bin, Vec::new()))
 }
 
 pub fn validate_available(bot: &BotProfile) -> Result<(), String> {
@@ -94,6 +147,120 @@ pub fn validate_available(bot: &BotProfile) -> Result<(), String> {
         return Err(format!("{}'s CLI command is unavailable. Check Local tools or its custom command before sending.", bot.name));
     }
     Ok(())
+}
+
+static RUNNING_PROCESS_GROUPS: Mutex<BTreeSet<i32>> = Mutex::new(BTreeSet::new());
+
+fn running_process_groups() -> std::sync::MutexGuard<'static, BTreeSet<i32>> {
+    RUNNING_PROCESS_GROUPS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Keeps a CLI's process group listed for `terminate_all_running_processes`
+/// until its turn finishes.
+struct RegisteredProcessGroup(Option<i32>);
+
+impl RegisteredProcessGroup {
+    fn new(pid: Option<u32>) -> Self {
+        let pgid = pid.and_then(|pid| i32::try_from(pid).ok());
+        if let Some(pgid) = pgid {
+            running_process_groups().insert(pgid);
+        }
+        Self(pgid)
+    }
+}
+
+impl Drop for RegisteredProcessGroup {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.0 {
+            running_process_groups().remove(&pgid);
+        }
+    }
+}
+
+/// Stops every bot CLI still running so agents cannot keep editing files or
+/// spending money after Omnibot quits. Blocks for at most a short grace period.
+pub fn terminate_all_running_processes() {
+    let groups: Vec<i32> = running_process_groups().iter().copied().collect();
+    if groups.is_empty() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        for pgid in &groups {
+            unsafe {
+                libc::kill(-pgid, libc::SIGTERM);
+            }
+        }
+        let deadline = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < deadline
+            && groups
+                .iter()
+                .any(|pgid| unsafe { libc::kill(-pgid, 0) } == 0)
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        for pgid in &groups {
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+/// Line reader that tolerates invalid UTF-8 and caps line length, so one bad
+/// byte or a huge line cannot stop the drain loop and stall the CLI on a full pipe.
+struct LineReader<R> {
+    inner: BufReader<R>,
+    buf: Vec<u8>,
+    discarding: bool,
+}
+
+impl<R: AsyncRead + Unpin> LineReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner: BufReader::new(inner),
+            buf: Vec::new(),
+            discarding: false,
+        }
+    }
+
+    fn take_line(&mut self) -> String {
+        let line = String::from_utf8_lossy(&self.buf)
+            .trim_end_matches(['\n', '\r'])
+            .to_string();
+        self.buf.clear();
+        line
+    }
+
+    /// Cancel safe: partial lines stay in `buf` until the next call.
+    async fn next_line(&mut self) -> std::io::Result<Option<String>> {
+        loop {
+            let available = self.inner.fill_buf().await?;
+            if available.is_empty() {
+                self.discarding = false;
+                return Ok((!self.buf.is_empty()).then(|| self.take_line()));
+            }
+            let newline = available.iter().position(|b| *b == b'\n');
+            let used = newline.map_or(available.len(), |i| i + 1);
+            if !self.discarding {
+                let room = MAX_LINE_BYTES.saturating_sub(self.buf.len());
+                self.buf.extend_from_slice(&available[..used.min(room)]);
+            }
+            self.inner.consume(used);
+            if newline.is_some() {
+                if std::mem::take(&mut self.discarding) {
+                    continue;
+                }
+                return Ok(Some(self.take_line()));
+            }
+            if !self.discarding && self.buf.len() >= MAX_LINE_BYTES {
+                self.discarding = true;
+                return Ok(Some(self.take_line()));
+            }
+        }
+    }
 }
 
 fn provider_error_description(error: Option<&Value>) -> String {
@@ -123,48 +290,98 @@ fn provider_error_description(error: Option<&Value>) -> String {
     message
 }
 
+/// Shows a failure in the bot's message and closes its run before a CLI starts.
+fn fail_turn(
+    state: &SharedOmniState,
+    req: &DriverTurnRequest,
+    start: Instant,
+    text: String,
+) -> DriverTurnOutput {
+    update_message_delta(
+        state,
+        &req.chat_id,
+        &req.message_id,
+        &req.bot.id,
+        &text,
+        false,
+    );
+    let duration_ms = start.elapsed().as_millis() as u64;
+    finish_active_run(
+        state,
+        &req.chat_id,
+        &req.message_id,
+        &req.bot.id,
+        "error",
+        duration_ms,
+        None,
+        None,
+        None,
+    );
+    DriverTurnOutput::error(text, duration_ms)
+}
+
+/// Normalizes an Ollama model name the way `ollama list` prints it.
+fn ollama_model_tag(model: &str) -> String {
+    if model.contains(':') {
+        model.to_string()
+    } else {
+        format!("{model}:latest")
+    }
+}
+
+/// `ollama run` downloads unknown models, which can be many gigabytes.
+async fn check_ollama_model(binary: &str, model: &str) -> Result<(), String> {
+    let mut command = Command::new(binary);
+    command
+        .arg("list")
+        .envs(user_environment().iter().map(|(k, v)| (k, v)))
+        .env("PATH", path_env_for_binary(binary))
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(10), command.output())
+        .await
+        .map_err(|_| "Ollama didn't respond. Make sure it is running (`ollama serve`), then send your message again.".to_string())?
+        .map_err(|error| format!("Couldn't run `ollama list`: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Ollama isn't ready: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let wanted = ollama_model_tag(model);
+    let installed = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_whitespace().next())
+        .any(|name| ollama_model_tag(name) == wanted);
+    if installed {
+        Ok(())
+    } else {
+        Err(format!("The Ollama model `{model}` isn't installed. Run `ollama pull {model}` in Terminal or choose an installed model in this bot's settings."))
+    }
+}
+
 pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) -> DriverTurnOutput {
     let start = Instant::now();
     let kind = req.bot.cli_driver;
 
     let Some((binary_path, extra_custom_args)) = resolve_driver_binary(&req.bot) else {
         let err_msg = format!(
-            "Local CLI binary for **{}** (`{}`) was not found on your PATH. Open **CLI Harnesses** in the sidebar to inspect or switch {}'s driver.",
+            "Local CLI binary for **{}** (`{}`) was not found. Open **Local tools** to check it, or edit {}'s custom command.",
             kind.display_name(),
             kind.as_str(),
             req.bot.name
         );
-        update_message_delta(
-            &state,
-            &req.chat_id,
-            &req.message_id,
-            &req.bot.id,
-            &err_msg,
-            false,
-        );
-        finish_active_run(
-            &state,
-            &req.chat_id,
-            &req.message_id,
-            &req.bot.id,
-            "error",
-            0,
-            None,
-            None,
-            None,
-        );
-        return DriverTurnOutput {
-            text: err_msg,
-            thinking: String::new(),
-            tool_calls: Vec::new(),
-            native_session_id: None,
-            duration_ms: start.elapsed().as_millis() as u64,
-            cost_usd: None,
-            input_tokens: None,
-            output_tokens: None,
-            status: "error".to_string(),
-        };
+        return fail_turn(&state, &req, start, err_msg);
     };
+
+    if !std::path::Path::new(&req.cwd).is_dir() {
+        let err_msg = format!(
+            "The working folder `{}` doesn't exist. Choose another folder for this chat or workspace, then send your message again.",
+            req.cwd
+        );
+        return fail_turn(&state, &req, start, err_msg);
+    }
 
     let combined_prompt = if req.system_context.trim().is_empty() {
         req.prompt.clone()
@@ -174,12 +391,12 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
 
     let mut cmd = Command::new(&binary_path);
     cmd.current_dir(&req.cwd)
-        .env("PATH", augmented_path_env())
+        .envs(user_environment().iter().map(|(k, v)| (k, v)))
+        .env("PATH", path_env_for_binary(&binary_path))
         .env("NO_COLOR", "1")
         .env("TERM", "dumb")
         .env_remove("CLAUDECODE")
         .env_remove("CLAUDE_CODE_ENTRYPOINT")
-        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -191,28 +408,29 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
     #[cfg(unix)]
     cmd.process_group(0);
 
+    // Prompts are passed after `--`, via `=`, or on stdin so text that starts
+    // with `-` is never parsed as a CLI option.
+    let mut stdin_prompt: Option<String> = None;
+    let mut approve_all_applied = !req.approve_all;
     match kind {
         CliDriverKind::Claude => {
             cmd.args([
                 "-p",
-                &req.prompt,
                 "--output-format",
                 "stream-json",
                 "--include-partial-messages",
                 "--verbose",
             ]);
             if !req.system_context.trim().is_empty() {
-                cmd.args(["--append-system-prompt", req.system_context.trim()]);
+                cmd.arg(format!(
+                    "--append-system-prompt={}",
+                    req.system_context.trim()
+                ));
             }
-            if let Some(sid) = req.resume_session_id.as_deref().filter(|s| !s.is_empty()) {
+            if let Some(sid) = req.resume_id() {
                 cmd.args(["--resume", sid]);
             }
-            if let Some(m) = req
-                .bot
-                .model
-                .as_deref()
-                .filter(|m| !m.is_empty() && *m != "default")
-            {
+            if let Some(m) = req.model() {
                 cmd.args(["--model", m]);
             }
             if matches!(req.bot.reasoning_effort.as_str(), "low" | "medium" | "high") {
@@ -224,27 +442,31 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
                 cmd.args(["--permission-mode", "acceptEdits"]);
             } else if req.approve_all || req.bot.permission_mode == "bypassPermissions" {
                 cmd.arg("--dangerously-skip-permissions");
+                approve_all_applied = true;
             }
+            stdin_prompt = Some(req.prompt.clone());
         }
         CliDriverKind::Codex => {
             cmd.arg("exec");
-            if let Some(sid) = req.resume_session_id.as_deref().filter(|s| !s.is_empty()) {
+            if let Some(sid) = req.resume_id() {
                 cmd.args(["resume", sid, "--json", "--skip-git-repo-check"]);
             } else {
                 cmd.args(["--json", "--skip-git-repo-check", "-C", &req.cwd]);
             }
-            if let Some(m) = req
-                .bot
-                .model
-                .as_deref()
-                .filter(|m| !m.is_empty() && *m != "default")
-            {
+            if let Some(m) = req.model() {
                 cmd.args(["-m", m]);
             }
+            // `codex exec` never asks for approval; the sandbox is the only control.
             if req.bot.permission_mode == "plan" {
                 cmd.args(["-c", "sandbox_mode=\"read-only\""]);
-            } else if req.approve_all {
+            } else if req.approve_all
+                || matches!(
+                    req.bot.permission_mode.as_str(),
+                    "acceptEdits" | "bypassPermissions"
+                )
+            {
                 cmd.args(["-c", "sandbox_mode=\"workspace-write\""]);
+                approve_all_applied = true;
             }
             if matches!(
                 req.bot.reasoning_effort.as_str(),
@@ -255,22 +477,18 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
                     &format!("model_reasoning_effort={:?}", req.bot.reasoning_effort),
                 ]);
             }
-            cmd.arg(&combined_prompt);
+            cmd.arg("-");
+            stdin_prompt = Some(combined_prompt.clone());
         }
         CliDriverKind::Opencode => {
             cmd.args(["run", "--format", "json", "--thinking"]);
-            if let Some(sid) = req.resume_session_id.as_deref().filter(|s| !s.is_empty()) {
+            if let Some(sid) = req.resume_id() {
                 cmd.args(["--session", sid]);
             }
-            if let Some(m) = req
-                .bot
-                .model
-                .as_deref()
-                .filter(|m| !m.is_empty() && *m != "default")
-            {
+            if let Some(m) = req.model() {
                 cmd.args(["-m", m]);
             }
-            cmd.arg(&combined_prompt);
+            cmd.args(["--", &combined_prompt]);
         }
         CliDriverKind::Cursor => {
             // Trust is scoped to the app-managed home and explicitly enabled in settings.
@@ -292,47 +510,38 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
                 cmd.arg("--plan");
             } else if req.approve_all {
                 cmd.arg("-f");
+                approve_all_applied = true;
             } else {
                 cmd.arg("--auto-review");
             }
-            if let Some(sid) = req.resume_session_id.as_deref().filter(|s| !s.is_empty()) {
+            if let Some(sid) = req.resume_id() {
                 cmd.args(["--resume", sid]);
             }
-            if let Some(m) = req
-                .bot
-                .model
-                .as_deref()
-                .filter(|m| !m.is_empty() && *m != "default")
-            {
+            if let Some(m) = req.model() {
                 cmd.args(["--model", m]);
             }
-            cmd.arg(&combined_prompt);
+            cmd.args(["--", &combined_prompt]);
         }
         CliDriverKind::Grok => {
+            cmd.arg(format!("--single={combined_prompt}"));
             cmd.args([
-                "-p",
-                &combined_prompt,
                 "--output-format",
                 "streaming-messages-json",
                 "--include-partial-messages",
                 "--cwd",
                 &req.cwd,
             ]);
-            if let Some(sid) = req.resume_session_id.as_deref().filter(|s| !s.is_empty()) {
+            if let Some(sid) = req.resume_id() {
                 cmd.args(["-r", sid]);
             }
-            if let Some(m) = req
-                .bot
-                .model
-                .as_deref()
-                .filter(|m| !m.is_empty() && *m != "default")
-            {
+            if let Some(m) = req.model() {
                 cmd.args(["-m", m]);
             }
             if req.bot.permission_mode == "plan" {
                 cmd.args(["--permission-mode", "plan"]);
             } else if req.approve_all {
                 cmd.arg("--always-approve");
+                approve_all_applied = true;
             } else {
                 cmd.args(["--permission-mode", "auto"]);
             }
@@ -342,92 +551,82 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
             if !req.system_context.trim().is_empty() {
                 cmd.args(["--append-system-prompt", req.system_context.trim()]);
             }
-            if let Some(sid) = req.resume_session_id.as_deref().filter(|s| !s.is_empty()) {
+            if let Some(sid) = req.resume_id() {
                 cmd.args(["--session", sid]);
             }
-            if let Some(m) = req
-                .bot
-                .model
-                .as_deref()
-                .filter(|m| !m.is_empty() && *m != "default")
-            {
+            if let Some(m) = req.model() {
                 cmd.args(["--model", m]);
             }
-            cmd.arg(&req.prompt);
+            cmd.args(["--", &req.prompt]);
         }
-        CliDriverKind::Gemini | CliDriverKind::Antigravity | CliDriverKind::Muse => {
-            cmd.args(["-p", &combined_prompt]);
-            if let Some(model) = req
-                .bot
-                .model
-                .as_deref()
-                .filter(|m| !m.is_empty() && *m != "default")
-            {
+        CliDriverKind::Muse => {
+            cmd.args(["exec", "--disable-request-user-input"]);
+            if let Some(m) = req.model() {
+                cmd.args(["--model", m]);
+            }
+            if matches!(
+                req.bot.reasoning_effort.as_str(),
+                "low" | "medium" | "high" | "xhigh"
+            ) {
+                cmd.args(["--reasoning-effort", &req.bot.reasoning_effort]);
+            }
+            if req.bot.permission_mode == "plan" {
+                cmd.args(["--disable-write", "--disable-shell"]);
+            } else if req.approve_all {
+                cmd.arg("--disable-approval");
+                approve_all_applied = true;
+            }
+            cmd.args(["--", &combined_prompt]);
+        }
+        CliDriverKind::Gemini | CliDriverKind::Antigravity => {
+            cmd.arg(format!("--prompt={combined_prompt}"));
+            if let Some(model) = req.model() {
                 cmd.args(["--model", model]);
+            }
+            if req.approve_all && kind == CliDriverKind::Gemini {
+                cmd.arg("--yolo");
+                approve_all_applied = true;
             }
         }
         CliDriverKind::Aider => {
-            cmd.args(["--no-pretty", "--message", &combined_prompt]);
+            // Omnibot reviews and commits changes itself; Aider's own commits
+            // would bypass that and rewrite the user's history.
+            cmd.args(["--no-pretty", "--no-auto-commits"]);
+            cmd.arg(format!("--message={combined_prompt}"));
             if req.approve_all {
                 cmd.arg("--yes-always");
+                approve_all_applied = true;
             }
             if req.bot.permission_mode == "plan" {
                 cmd.args(["--chat-mode", "ask"]);
             }
-            if let Some(model) = req
-                .bot
-                .model
-                .as_deref()
-                .filter(|m| !m.is_empty() && *m != "default")
-            {
+            if let Some(model) = req.model() {
                 cmd.args(["--model", model]);
             }
         }
         CliDriverKind::Ollama => {
-            let Some(model) = req
-                .bot
-                .model
-                .as_deref()
-                .filter(|model| !model.trim().is_empty() && *model != "default")
-            else {
-                let error = "Choose an installed Ollama model in this bot's settings before sending a message.";
-                update_message_delta(
+            let Some(model) = req.model() else {
+                return fail_turn(
                     &state,
-                    &req.chat_id,
-                    &req.message_id,
-                    &req.bot.id,
-                    error,
-                    false,
+                    &req,
+                    start,
+                    "Choose an installed Ollama model in this bot's settings before sending a message.".into(),
                 );
-                finish_active_run(
-                    &state,
-                    &req.chat_id,
-                    &req.message_id,
-                    &req.bot.id,
-                    "error",
-                    0,
-                    None,
-                    None,
-                    None,
-                );
-                return DriverTurnOutput {
-                    text: error.into(),
-                    thinking: String::new(),
-                    tool_calls: Vec::new(),
-                    native_session_id: None,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    cost_usd: None,
-                    input_tokens: None,
-                    output_tokens: None,
-                    status: "error".into(),
-                };
             };
-            cmd.args(["run", model, &combined_prompt]);
+            if let Err(error) = check_ollama_model(&binary_path, model).await {
+                return fail_turn(&state, &req, start, error);
+            }
+            cmd.args(["run", model, "--", &combined_prompt]);
         }
         CliDriverKind::Acp | CliDriverKind::Custom => {
             cmd.arg(&combined_prompt);
         }
     }
+    cmd.stdin(if stdin_prompt.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
 
     // Register active run
     if let Ok(mut guard) = state.write() {
@@ -451,60 +650,49 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
             cli_driver: kind,
             model: req.bot.model.clone(),
         });
+        if !approve_all_applied && kind != CliDriverKind::Custom {
+            guard.record_activity(
+                &format!("{} ({})", req.bot.name, kind.as_str()),
+                format!(
+                    "Approve all tools isn't supported by {}; it ran with its own default permissions.",
+                    kind.display_name()
+                ),
+                "warning",
+                0,
+            );
+        }
     }
 
     let terminal = crate::terminal::record_run(&state, &req);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let err_text = format!("Failed to spawn `{}`: {e}", binary_path);
+            let err_text = format!("Failed to start `{}`: {e}", binary_path);
             terminal.finish("error", None, Some(err_text.clone()));
-            update_message_delta(
-                &state,
-                &req.chat_id,
-                &req.message_id,
-                &req.bot.id,
-                &err_text,
-                false,
-            );
-            finish_active_run(
-                &state,
-                &req.chat_id,
-                &req.message_id,
-                &req.bot.id,
-                "error",
-                0,
-                None,
-                None,
-                None,
-            );
-            return DriverTurnOutput {
-                text: err_text,
-                thinking: String::new(),
-                tool_calls: Vec::new(),
-                native_session_id: None,
-                duration_ms: 0,
-                cost_usd: None,
-                input_tokens: None,
-                output_tokens: None,
-                status: "error".to_string(),
-            };
+            return fail_turn(&state, &req, start, err_text);
         }
     };
+    let _registered = RegisteredProcessGroup::new(child.id());
+
+    if let (Some(prompt), Some(mut stdin)) = (stdin_prompt, child.stdin.take()) {
+        // A CLI that exits without reading stdin just closes the pipe.
+        tokio::spawn(async move {
+            let _ = stdin.write_all(prompt.as_bytes()).await;
+            let _ = stdin.shutdown().await;
+        });
+    }
 
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
 
-    let mut stdout_lines = BufReader::new(crate::terminal::RecordedReader::new(
+    let mut stdout_lines = LineReader::new(crate::terminal::RecordedReader::new(
         stdout,
         terminal.clone(),
-    ))
-    .lines();
-    let mut stderr_lines = BufReader::new(crate::terminal::RecordedReader::new(
+    ));
+    let mut stderr_lines = LineReader::new(crate::terminal::RecordedReader::new(
         stderr,
         terminal.clone(),
-    ))
-    .lines();
+    ));
 
     let mut parser = StreamParserState::default();
     let mut stderr_buf = Vec::new();
@@ -513,7 +701,11 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
     let mut stderr_open = true;
     let mut hit_guardrail: Option<String> = None;
 
-    let timeout_limit = Duration::from_secs(req.turn_timeout_secs.clamp(30, 1800));
+    // The turn timeout measures silence, so long agent runs that keep
+    // producing output are not cut off; a hard cap still bounds runaway turns.
+    let idle_limit = Duration::from_secs(req.turn_timeout_secs.clamp(30, 1800));
+    let hard_limit = (idle_limit * 6).min(MAX_TURN_DURATION);
+    let mut last_output = Instant::now();
     let budget_limit = req
         .bot
         .max_turn_budget_usd
@@ -530,16 +722,26 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
             break;
         }
 
-        if start.elapsed() > timeout_limit {
+        if last_output.elapsed() > idle_limit {
             hit_guardrail = Some(format!(
-                "\n\n> **Guardrail triggered**: Turn exceeded {}s timeout limit.",
-                timeout_limit.as_secs()
+                "\n\n> **Guardrail triggered**: No output for {}s, so the turn was stopped.",
+                idle_limit.as_secs()
+            ));
+            terminate_process_tree(&mut child).await;
+            break;
+        }
+        if start.elapsed() > hard_limit {
+            hit_guardrail = Some(format!(
+                "\n\n> **Guardrail triggered**: Turn exceeded the {}-minute limit.",
+                hard_limit.as_secs() / 60
             ));
             terminate_process_tree(&mut child).await;
             break;
         }
 
-        if let (Some(limit), Some(actual_cost)) = (budget_limit, parser.cost_usd) {
+        if let (Some(limit), Some(actual_cost), false) =
+            (budget_limit, parser.cost_usd, parser.saw_final_result)
+        {
             if actual_cost > limit {
                 hit_guardrail = Some(format!(
                     "\n\n> **Budget guardrail triggered**: Turn cost (${:.3}) exceeded max turn budget (${:.2}).",
@@ -554,11 +756,13 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
             line_res = stdout_lines.next_line(), if stdout_open => {
                 match line_res {
                     Ok(Some(line)) => {
+                        last_output = Instant::now();
                         parse_cli_output_line(
                             &state,
                             &req.chat_id,
                             &req.message_id,
                             &req.bot.id,
+                            kind,
                             &line,
                             &mut parser,
                         );
@@ -570,6 +774,7 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
             err_res = stderr_lines.next_line(), if stderr_open => {
                 match err_res {
                     Ok(Some(line)) => {
+                        last_output = Instant::now();
                         let clean = strip_ansi(&line);
                         if !clean.trim().is_empty() && stderr_buf.len() < 40 {
                             stderr_buf.push(clean.chars().take(4000).collect::<String>());
@@ -578,12 +783,27 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
                     _ => stderr_open = false,
                 }
             }
-            _ = tokio::time::sleep(Duration::from_millis(160)) => {
-                if is_chat_cancelled(&state, &req.chat_id) {
-                    was_cancelled = true;
-                    terminate_process_tree(&mut child).await;
-                    break;
-                }
+            _ = tokio::time::sleep(Duration::from_millis(160)) => {}
+        }
+    }
+
+    if hit_guardrail.is_none() {
+        if let (Some(limit), Some(cost)) = (budget_limit, parser.cost_usd) {
+            if cost > limit {
+                // The CLI reports cost with its final result, after the work
+                // is done; stopping it then would only discard the answer.
+                let notice = format!(
+                    "\n\n> **Budget notice**: This turn cost ${cost:.3}, over the ${limit:.2} turn budget."
+                );
+                parser.accumulated_text.push_str(&notice);
+                update_message_delta(
+                    &state,
+                    &req.chat_id,
+                    &req.message_id,
+                    &req.bot.id,
+                    &notice,
+                    false,
+                );
             }
         }
     }
@@ -602,23 +822,31 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
 
     let exit_status = child.wait().await.ok();
     let duration_ms = start.elapsed().as_millis() as u64;
+    let exited_ok = exit_status.is_some_and(|s| s.success());
 
-    if !exit_status.is_some_and(|s| s.success())
-        && stderr_buf.is_empty()
-        && !was_cancelled
-        && hit_guardrail.is_none()
-    {
+    if !exited_ok && !was_cancelled && hit_guardrail.is_none() && !parser.failed {
+        if let Some(error) = parser.pending_error.take() {
+            if !parser.accumulated_text.contains(&error) {
+                let chunk = format!("\n\n{error}");
+                parser.accumulated_text.push_str(&chunk);
+                update_message_delta(
+                    &state,
+                    &req.chat_id,
+                    &req.message_id,
+                    &req.bot.id,
+                    &chunk,
+                    false,
+                );
+            }
+        }
+    }
+    if !exited_ok && stderr_buf.is_empty() && !was_cancelled && hit_guardrail.is_none() {
         stderr_buf.push(format!("CLI exited unsuccessfully: {exit_status:?}"));
     }
-    if !stderr_buf.is_empty()
-        && !was_cancelled
-        && !parser.failed
-        && !exit_status.is_some_and(|s| s.success())
-    {
+    if !stderr_buf.is_empty() && !was_cancelled && !parser.failed && !exited_ok {
         let joined_err = stderr_buf.join("\n");
-        // Check if session resume failed (e.g. expired or invalid session ID)
         let formatted_err = if joined_err.contains("Workspace Trust Required") {
-            "\n\nCursor needs workspace approval. For a bot home, enable **Trust bot homes in Cursor** in Settings → Team Rules & Trust, then send your message again. For a project, open `agent` in that project folder and approve it there. Tool permissions are unchanged.".to_string()
+            "\n\nCursor needs workspace approval. For a bot home, enable **Trust bot homes in Cursor** in Settings → Team Rules & Trust, then send your message again. For a project, open `cursor-agent` in that project folder and approve it there. Tool permissions are unchanged.".to_string()
         } else {
             format!("\n\n```\n{}\n```", joined_err.trim())
         };
@@ -635,7 +863,7 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
 
     let final_status = if was_cancelled || hit_guardrail.is_some() {
         "stopped"
-    } else if exit_status.is_some_and(|s| s.success()) && !parser.failed {
+    } else if exited_ok && !parser.failed {
         "complete"
     } else {
         "error"
@@ -686,12 +914,24 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
     }
 }
 
+/// SIGTERM first so CLIs can save session state, then SIGKILL the whole group.
 async fn terminate_process_tree(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
         // The child starts in a new process group, so this cannot signal the app's group.
+        let pgid = pid as i32;
         unsafe {
-            libc::kill(-(pid as i32), libc::SIGKILL);
+            libc::kill(-pgid, libc::SIGTERM);
+        }
+        let exited = tokio::time::timeout(TERMINATE_GRACE, child.wait())
+            .await
+            .is_ok();
+        // Helpers the CLI started share its group and can outlive it.
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+        if exited {
+            return;
         }
     }
     let _ = child.kill().await;
@@ -856,9 +1096,25 @@ fn parse_cli_output_line(
     chat_id: &str,
     message_id: &str,
     bot_id: &str,
+    kind: CliDriverKind,
     raw_line: &str,
     parser: &mut StreamParserState,
 ) {
+    if !streams_json(kind) {
+        let clean = strip_ansi(raw_line);
+        if parser.accumulated_text.is_empty() && clean.trim().is_empty() {
+            return;
+        }
+        let chunk = if parser.accumulated_text.is_empty() {
+            clean
+        } else {
+            format!("\n{clean}")
+        };
+        parser.accumulated_text.push_str(&chunk);
+        update_message_delta(state, chat_id, message_id, bot_id, &chunk, false);
+        return;
+    }
+
     let trimmed = raw_line.trim();
     if trimmed.is_empty() {
         return;
@@ -894,6 +1150,16 @@ fn parse_cli_output_line(
 
     // Provider-level failure envelopes can arrive even when the CLI exits zero.
     let event_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if matches!(event_type, "result" | "turn.completed") {
+        parser.saw_final_result = true;
+    }
+    if kind == CliDriverKind::Codex && event_type == "error" {
+        // Codex reports retries ("Reconnecting… 1/5") as `error` and then
+        // continues; only `turn.failed` or a failed exit ends the turn.
+        let error = val.get("message").or_else(|| val.get("error"));
+        parser.pending_error = Some(provider_error_description(error));
+        return;
+    }
     if event_type == "turn.failed"
         || event_type == "error"
         || val
@@ -926,7 +1192,7 @@ fn parse_cli_output_line(
                 .chats
                 .iter_mut()
                 .find(|c| c.id == chat_id)
-                .and_then(|c| c.messages.iter_mut().find(|m| m.id == message_id))
+                .and_then(|c| c.messages.iter_mut().rev().find(|m| m.id == message_id))
             {
                 message.model = Some(model);
                 message.model_reported = true;
@@ -1522,7 +1788,7 @@ fn update_message_delta(
         };
     }
     if let Some(chat) = guard.store.chats.iter_mut().find(|c| c.id == chat_id) {
-        if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+        if let Some(msg) = chat.messages.iter_mut().rev().find(|m| m.id == message_id) {
             if is_thinking {
                 msg.thinking.push_str(delta);
             } else {
@@ -1573,7 +1839,7 @@ fn upsert_tool_call(
         run.activity = format!("tool:{}", tool.name);
     }
     if let Some(chat) = guard.store.chats.iter_mut().find(|c| c.id == chat_id) {
-        if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+        if let Some(msg) = chat.messages.iter_mut().rev().find(|m| m.id == message_id) {
             if let Some(existing) = msg.tool_calls.iter_mut().find(|t| t.id == tool.id) {
                 existing.status = tool.status.clone();
                 if tool.output_summary.is_some() {
@@ -1635,7 +1901,7 @@ fn finish_active_run(
     };
     guard.active_runs.remove(message_id);
     if let Some(chat) = guard.store.chats.iter_mut().find(|c| c.id == chat_id) {
-        if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+        if let Some(msg) = chat.messages.iter_mut().rev().find(|m| m.id == message_id) {
             msg.status = status.to_string();
             msg.duration_ms = Some(duration_ms);
             msg.usage_reported = true;
@@ -1713,7 +1979,184 @@ mod tests {
     use serde_json::json;
 
     fn feed(f: &Fixture, parser: &mut StreamParserState, event: Value) {
-        parse_cli_output_line(&f.state, "room", "message", "A", &event.to_string(), parser);
+        feed_as(f, parser, CliDriverKind::Custom, &event.to_string());
+    }
+
+    fn feed_as(f: &Fixture, parser: &mut StreamParserState, kind: CliDriverKind, line: &str) {
+        parse_cli_output_line(&f.state, "room", "message", "A", kind, line, parser);
+    }
+
+    async fn run(f: &Fixture, kind: CliDriverKind, prompt: &str) -> DriverTurnOutput {
+        let mut bot = f.state.read().unwrap().store.bots[0].clone();
+        bot.cli_driver = kind;
+        execute_bot_turn(
+            f.state.clone(),
+            DriverTurnRequest {
+                chat_id: "room".into(),
+                message_id: "message".into(),
+                bot,
+                prompt: prompt.into(),
+                system_context: String::new(),
+                cwd: f.dir.to_string_lossy().into_owned(),
+                resume_session_id: None,
+                approve_all: false,
+                turn_timeout_secs: 5,
+                max_budget_usd: None,
+            },
+        )
+        .await
+    }
+
+    const RECORD_ARGS: &str = "printf '%s\\n' \"$@\" > cli-args.txt";
+
+    fn recorded_args(f: &Fixture) -> Vec<String> {
+        std::fs::read_to_string(f.dir.join("cli-args.txt"))
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn prompts_that_look_like_options_are_never_parsed_as_flags() {
+        let prompt = "--help -rf";
+        for kind in [CliDriverKind::Claude, CliDriverKind::Codex] {
+            let f = Fixture::new(&["A"]);
+            f.script("A", &format!("cat > prompt.txt\n{RECORD_ARGS}\necho Done"));
+            let result = run(&f, kind, prompt).await;
+            assert_eq!(result.status, "complete");
+            assert_eq!(
+                std::fs::read_to_string(f.dir.join("prompt.txt")).unwrap(),
+                prompt
+            );
+            assert!(!recorded_args(&f).iter().any(|a| a == prompt));
+        }
+        for kind in [
+            CliDriverKind::Opencode,
+            CliDriverKind::Cursor,
+            CliDriverKind::Pi,
+            CliDriverKind::Muse,
+        ] {
+            let f = Fixture::new(&["A"]);
+            f.script("A", &format!("{RECORD_ARGS}\necho Done"));
+            assert_eq!(run(&f, kind, prompt).await.status, "complete");
+            let args = recorded_args(&f);
+            assert_eq!(args[args.len() - 2], "--", "{kind:?}");
+            assert_eq!(args[args.len() - 1], prompt, "{kind:?}");
+        }
+        let f = Fixture::new(&["A"]);
+        f.script("A", &format!("{RECORD_ARGS}\necho Done"));
+        run(&f, CliDriverKind::Grok, prompt).await;
+        assert!(recorded_args(&f).contains(&format!("--single={prompt}")));
+    }
+
+    #[tokio::test]
+    async fn invalid_utf8_output_does_not_stop_reading() {
+        let f = Fixture::new(&["A"]);
+        f.script("A", "printf 'bad \\377\\376 bytes\\n'\necho Done");
+        let result = run(&f, CliDriverKind::Custom, "Hi").await;
+        assert_eq!(result.status, "complete");
+        assert!(result.text.contains("bad"));
+        assert!(result.text.ends_with("Done"));
+    }
+
+    #[tokio::test]
+    async fn oversized_lines_are_capped_and_reading_continues() {
+        let mut data = vec![b'x'; MAX_LINE_BYTES + 10];
+        data.extend_from_slice(b"\nnext\n");
+        let mut reader = LineReader::new(&data[..]);
+        assert_eq!(
+            reader.next_line().await.unwrap().unwrap().len(),
+            MAX_LINE_BYTES
+        );
+        assert_eq!(reader.next_line().await.unwrap().unwrap(), "next");
+        assert_eq!(reader.next_line().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn budget_reported_with_the_final_result_keeps_the_answer() {
+        let f = Fixture::new(&["A"]);
+        f.script(
+            "A",
+            "echo '{\"type\":\"result\",\"result\":\"Finished\",\"total_cost_usd\":5}'",
+        );
+        f.state.write().unwrap().store.bots[0].max_turn_budget_usd = Some(1.0);
+        let result = run(&f, CliDriverKind::Custom, "Hi").await;
+        assert_eq!(result.status, "complete");
+        assert!(result.text.starts_with("Finished"));
+        assert!(result.text.contains("Budget notice"));
+    }
+
+    #[tokio::test]
+    async fn missing_working_folder_fails_without_starting_the_cli() {
+        let f = Fixture::new(&["A"]);
+        f.script("A", "touch should-not-run");
+        let mut bot = f.state.read().unwrap().store.bots[0].clone();
+        bot.cli_driver = CliDriverKind::Custom;
+        let result = execute_bot_turn(
+            f.state.clone(),
+            DriverTurnRequest {
+                chat_id: "room".into(),
+                message_id: "message".into(),
+                bot,
+                prompt: "Hi".into(),
+                system_context: String::new(),
+                cwd: f.dir.join("missing").to_string_lossy().into_owned(),
+                resume_session_id: None,
+                approve_all: false,
+                turn_timeout_secs: 5,
+                max_budget_usd: None,
+            },
+        )
+        .await;
+        assert_eq!(result.status, "error");
+        assert!(result.text.contains("doesn't exist"));
+        assert!(!f.dir.join("should-not-run").exists());
+    }
+
+    #[test]
+    fn codex_retry_errors_are_not_fatal() {
+        let f = Fixture::new(&["A"]);
+        let mut p = StreamParserState::default();
+        feed_as(
+            &f,
+            &mut p,
+            CliDriverKind::Codex,
+            r#"{"type":"error","message":"Reconnecting... 1/5"}"#,
+        );
+        feed_as(
+            &f,
+            &mut p,
+            CliDriverKind::Codex,
+            r#"{"type":"item.completed","item":{"id":"a","type":"agent_message","text":"Done"}}"#,
+        );
+        feed_as(
+            &f,
+            &mut p,
+            CliDriverKind::Codex,
+            r#"{"type":"turn.completed"}"#,
+        );
+        assert!(!p.failed);
+        assert_eq!(p.accumulated_text, "Done");
+        assert!(p.pending_error.is_some());
+    }
+
+    #[test]
+    fn plain_text_drivers_never_interpret_json_output() {
+        let f = Fixture::new(&["A"]);
+        let mut p = StreamParserState::default();
+        let line = r#"{"type":"error","message":"example"}"#;
+        feed_as(&f, &mut p, CliDriverKind::Muse, line);
+        feed_as(&f, &mut p, CliDriverKind::Muse, "");
+        feed_as(&f, &mut p, CliDriverKind::Muse, "  indented");
+        assert!(!p.failed);
+        assert_eq!(p.accumulated_text, format!("{line}\n\n  indented"));
+    }
+
+    #[test]
+    fn ollama_model_names_match_their_default_tag() {
+        assert_eq!(ollama_model_tag("llama3"), "llama3:latest");
+        assert_eq!(ollama_model_tag("llama3:8b"), "llama3:8b");
     }
 
     #[test]
