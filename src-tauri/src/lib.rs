@@ -18,9 +18,8 @@ mod workflow;
 
 use computer::{
     get_system_overview, list_workspace_directory, open_on_desktop, read_workspace_file,
-    search_workspace_files, write_clipboard_text, LocalFileEntry, SystemOverview,
+    LocalFileEntry, SystemOverview,
 };
-use git_ops::read_file_diff;
 use orchestrator::{dispatch_chat_turn, SendMessageInput};
 use scanner::{test_cli_harness, CliDriverKind, CliHarnessTestResult};
 use server::{
@@ -36,6 +35,28 @@ use state::{
 use tauri::{Emitter, Manager, State};
 
 struct ManagedOmniState(SharedOmniState);
+struct ManagedApiToken(String);
+
+/// Keeps disk writes and process spawns off the main (UI) thread.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn workspace_root(state: &SharedOmniState) -> Result<String, String> {
+    let guard = state
+        .read()
+        .map_err(|_| "State lock poisoned".to_string())?;
+    Ok(guard.store.preferences.workspace_root.clone())
+}
+
+#[tauri::command]
+fn omni_api_token(token: State<'_, ManagedApiToken>) -> String {
+    token.0.clone()
+}
 
 #[tauri::command]
 fn omni_snapshot(state: State<'_, ManagedOmniState>) -> Result<OmniSnapshot, String> {
@@ -68,252 +89,294 @@ fn omni_stop_chat(
 }
 
 #[tauri::command]
-fn omni_create_chat(
+async fn omni_create_chat(
     state: State<'_, ManagedOmniState>,
     input: CreateChatInput,
 ) -> Result<(ChatThread, OmniSnapshot), String> {
-    create_chat_thread(&state.0, input)
+    let state = state.0.clone();
+    blocking(move || create_chat_thread(&state, input)).await
 }
 
 #[tauri::command]
-fn omni_complete_setup(
+async fn omni_complete_setup(
     state: State<'_, ManagedOmniState>,
     input: setup::SetupInput,
 ) -> Result<OmniSnapshot, String> {
-    setup::complete_setup(&state.0, input)
+    let state = state.0.clone();
+    blocking(move || setup::complete_setup(&state, input)).await
 }
 
 #[tauri::command]
-fn omni_pin_bot(
+async fn omni_pin_bot(
     state: State<'_, ManagedOmniState>,
     input: setup::PinBotInput,
 ) -> Result<OmniSnapshot, String> {
-    setup::pin_bot(&state.0, input)
+    let state = state.0.clone();
+    blocking(move || setup::pin_bot(&state, input)).await
 }
 
 #[tauri::command]
-fn omni_update_chat(
+async fn omni_update_chat(
     state: State<'_, ManagedOmniState>,
     input: UpdateChatInput,
 ) -> Result<OmniSnapshot, String> {
-    update_chat_thread(&state.0, input)
+    let state = state.0.clone();
+    blocking(move || update_chat_thread(&state, input)).await
 }
 
 #[tauri::command]
-fn omni_clear_chat(state: State<'_, ManagedOmniState>, id: String) -> Result<OmniSnapshot, String> {
-    clear_chat_thread(&state.0, &id)
-}
-
-#[tauri::command]
-fn omni_delete_chat(
+async fn omni_clear_chat(
     state: State<'_, ManagedOmniState>,
     id: String,
 ) -> Result<OmniSnapshot, String> {
-    delete_chat_thread(&state.0, &id)
+    let state = state.0.clone();
+    blocking(move || clear_chat_thread(&state, &id)).await
 }
 
 #[tauri::command]
-fn omni_upsert_bot(
+async fn omni_delete_chat(
+    state: State<'_, ManagedOmniState>,
+    id: String,
+) -> Result<OmniSnapshot, String> {
+    let state = state.0.clone();
+    blocking(move || delete_chat_thread(&state, &id)).await
+}
+
+#[tauri::command]
+async fn omni_upsert_bot(
     state: State<'_, ManagedOmniState>,
     bot: BotProfile,
 ) -> Result<OmniSnapshot, String> {
-    upsert_bot_profile(&state.0, bot)
+    let state = state.0.clone();
+    blocking(move || upsert_bot_profile(&state, bot)).await
 }
 
 #[tauri::command]
-fn omni_delete_bot(state: State<'_, ManagedOmniState>, id: String) -> Result<OmniSnapshot, String> {
-    delete_bot_profile(&state.0, &id)
+async fn omni_delete_bot(
+    state: State<'_, ManagedOmniState>,
+    id: String,
+) -> Result<OmniSnapshot, String> {
+    let state = state.0.clone();
+    blocking(move || delete_bot_profile(&state, &id)).await
 }
 
 #[tauri::command]
-fn omni_update_preferences(
+async fn omni_update_preferences(
     state: State<'_, ManagedOmniState>,
     preferences: OmniPreferences,
 ) -> Result<OmniSnapshot, String> {
-    update_omni_preferences(&state.0, preferences)
+    let state = state.0.clone();
+    blocking(move || update_omni_preferences(&state, preferences)).await
 }
 
 #[tauri::command]
-fn omni_upsert_workspace(
+async fn omni_upsert_workspace(
     state: State<'_, ManagedOmniState>,
     workspace: WorkspaceEntry,
 ) -> Result<OmniSnapshot, String> {
-    upsert_workspace_entry(&state.0, workspace)
+    let state = state.0.clone();
+    blocking(move || upsert_workspace_entry(&state, workspace)).await
 }
 
 #[tauri::command]
-fn omni_delete_workspace(
+async fn omni_delete_workspace(
     state: State<'_, ManagedOmniState>,
     id: String,
 ) -> Result<OmniSnapshot, String> {
-    delete_workspace_entry(&state.0, &id)
+    let state = state.0.clone();
+    blocking(move || delete_workspace_entry(&state, &id)).await
 }
 
 #[tauri::command]
-fn omni_upsert_routine(
+async fn omni_upsert_routine(
     state: State<'_, ManagedOmniState>,
     routine: RoutineEntry,
 ) -> Result<OmniSnapshot, String> {
-    upsert_routine_entry(&state.0, routine)
+    let state = state.0.clone();
+    blocking(move || upsert_routine_entry(&state, routine)).await
 }
 
 #[tauri::command]
-fn omni_delete_routine(
+async fn omni_delete_routine(
     state: State<'_, ManagedOmniState>,
     id: String,
 ) -> Result<OmniSnapshot, String> {
-    delete_routine_entry(&state.0, &id)
+    let state = state.0.clone();
+    blocking(move || delete_routine_entry(&state, &id)).await
 }
 
 #[tauri::command]
-fn omni_computer_overview(state: State<'_, ManagedOmniState>) -> Result<SystemOverview, String> {
-    let guard = state
-        .0
-        .read()
-        .map_err(|_| "State lock poisoned".to_string())?;
-    Ok(get_system_overview(&guard.store.preferences.workspace_root))
+async fn omni_computer_overview(
+    state: State<'_, ManagedOmniState>,
+) -> Result<SystemOverview, String> {
+    let root = workspace_root(&state.0)?;
+    blocking(move || Ok(get_system_overview(&root))).await
 }
 
 #[tauri::command]
-fn omni_list_local_files(
+async fn omni_list_local_files(
     state: State<'_, ManagedOmniState>,
     relative_path: Option<String>,
 ) -> Result<Vec<LocalFileEntry>, String> {
-    let root = {
-        let guard = state
-            .0
-            .read()
-            .map_err(|_| "State lock poisoned".to_string())?;
-        guard.store.preferences.workspace_root.clone()
-    };
-    list_workspace_directory(&root, relative_path.as_deref())
+    let root = workspace_root(&state.0)?;
+    blocking(move || list_workspace_directory(&root, relative_path.as_deref())).await
 }
 
 #[tauri::command]
-fn omni_read_local_file(
+async fn omni_read_local_file(
     state: State<'_, ManagedOmniState>,
     path: String,
     max_bytes: Option<usize>,
 ) -> Result<String, String> {
-    let root = {
-        let guard = state
-            .0
-            .read()
-            .map_err(|_| "State lock poisoned".to_string())?;
-        guard.store.preferences.workspace_root.clone()
-    };
-    read_workspace_file(&root, &path, max_bytes.unwrap_or(64_000))
+    let root = workspace_root(&state.0)?;
+    blocking(move || read_workspace_file(&root, &path, max_bytes.unwrap_or(64_000))).await
 }
 
 #[tauri::command]
-fn omni_search_local_files(
-    state: State<'_, ManagedOmniState>,
-    query: String,
-    base_path: Option<String>,
-) -> Result<Vec<LocalFileEntry>, String> {
-    let root = {
-        let guard = state
-            .0
-            .read()
-            .map_err(|_| "State lock poisoned".to_string())?;
-        guard.store.preferences.workspace_root.clone()
-    };
-    search_workspace_files(&root, &query, base_path.as_deref())
-}
-
-#[tauri::command]
-fn omni_open_local_item(
+async fn omni_open_local_item(
     state: State<'_, ManagedOmniState>,
     target: String,
     app_name: Option<String>,
     reveal_in_finder: Option<bool>,
 ) -> Result<String, String> {
-    let root = {
-        let guard = state
-            .0
-            .read()
-            .map_err(|_| "State lock poisoned".to_string())?;
-        guard.store.preferences.workspace_root.clone()
-    };
-    open_on_desktop(
-        &root,
-        &target,
-        app_name.as_deref(),
-        reveal_in_finder.unwrap_or(false),
-    )
+    let root = workspace_root(&state.0)?;
+    blocking(move || {
+        open_on_desktop(
+            &root,
+            &target,
+            app_name.as_deref(),
+            reveal_in_finder.unwrap_or(false),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-async fn omni_git_diff(
-    state: State<'_, ManagedOmniState>,
-    file_path: String,
-    chat_id: String,
-    task_id: Option<String>,
-) -> Result<String, String> {
-    let root = server::git_root(&state.0, Some(&chat_id), task_id.as_deref())?;
-    tokio::task::spawn_blocking(move || read_file_diff(&root, &file_path))
-        .await
-        .map_err(|e| e.to_string())?
+async fn omni_open_external_url(url: String) -> Result<(), String> {
+    blocking(move || computer::open_external_url(&url)).await
 }
 
 #[tauri::command]
-async fn omni_git_commit(
-    state: State<'_, ManagedOmniState>,
-    message: String,
-    chat_id: String,
-    task_id: Option<String>,
-) -> Result<OmniSnapshot, String> {
-    server::git_commit(state.0.clone(), chat_id, task_id, message).await
+async fn omni_test_harness(kind: CliDriverKind) -> Result<CliHarnessTestResult, String> {
+    blocking(move || Ok(test_cli_harness(kind))).await
 }
 
-#[tauri::command]
-async fn omni_git_discard(
-    state: State<'_, ManagedOmniState>,
-    file_path: String,
-    chat_id: String,
-    task_id: Option<String>,
-) -> Result<OmniSnapshot, String> {
-    server::git_discard(state.0.clone(), chat_id, task_id, file_path).await
+fn is_app_url(url: &tauri::Url) -> bool {
+    match url.scheme() {
+        "tauri" => url.host_str() == Some("localhost"),
+        "about" => url.path() == "blank",
+        "http" if cfg!(debug_assertions) => {
+            matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
+                && matches!(url.port(), Some(1420 | 1422))
+        }
+        _ => false,
+    }
 }
 
-#[tauri::command]
-fn omni_test_harness(kind: CliDriverKind) -> CliHarnessTestResult {
-    test_cli_harness(kind)
+/// Keeps the webview on the app's own pages; web and mail links open in the default app.
+fn navigation_guard<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::new("navigation-guard")
+        .on_navigation(|_, url| {
+            if is_app_url(url) {
+                return true;
+            }
+            if matches!(url.scheme(), "http" | "https" | "mailto") {
+                let url = url.to_string();
+                std::thread::spawn(move || {
+                    if let Err(error) = computer::open_external_url(&url) {
+                        eprintln!("Couldn't open {url}: {error}");
+                    }
+                });
+            }
+            false
+        })
+        .build()
 }
 
-#[tauri::command]
-fn omni_write_clipboard(text: String) -> Result<String, String> {
-    write_clipboard_text(&text)
+/// Shows a native alert, then exits. Text is passed as script arguments so it is never
+/// interpreted as AppleScript.
+fn fail_startup(message: &str, show_alert: bool) -> ! {
+    eprintln!("Omnibot couldn't start: {message}");
+    if show_alert {
+        let _ = std::process::Command::new("/usr/bin/osascript")
+            .args([
+                "-e",
+                "on run argv",
+                "-e",
+                "display alert (item 1 of argv) message (item 2 of argv) as critical",
+                "-e",
+                "end run",
+                "Omnibot couldn't start",
+                message,
+            ])
+            .status();
+    }
+    std::process::exit(1)
+}
+
+/// The single exit path for both the window app and `--server-only`.
+fn shutdown(state: &SharedOmniState) {
+    terminal::shutdown(state);
+}
+
+async fn wait_for_termination() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 pub fn run() {
-    let runtime = tokio::runtime::Runtime::new().expect("Failed to initialize Tokio runtime");
-    let (port, shared_state, event_tx) = runtime
+    let server_only = std::env::args().any(|a| a == "--server-only");
+    let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|error| {
+        fail_startup(
+            &format!("The background runtime couldn't start: {error}"),
+            !server_only,
+        )
+    });
+    let server = runtime
         .block_on(spawn_local_server())
-        .expect("Failed to start local Omnibot server");
+        .unwrap_or_else(|error| fail_startup(&error, !server_only));
+    let shared_state = server.state;
 
-    runtime.spawn(models::refresh(shared_state.clone()));
+    runtime.spawn(state::finish_startup_scan(shared_state.clone()));
     runtime.spawn(routines::scheduler(shared_state.clone()));
 
-    if std::env::args().any(|a| a == "--server-only") {
-        println!("Omnibot server listening on http://127.0.0.1:{port}");
-        runtime.block_on(async {
-            let _ = tokio::signal::ctrl_c().await;
-        });
-        terminal::shutdown(&shared_state);
+    if server_only {
+        println!(
+            "Omnibot server listening on http://127.0.0.1:{}",
+            server.port
+        );
+        runtime.block_on(wait_for_termination());
+        shutdown(&shared_state);
         return;
     }
 
     tauri::async_runtime::set(runtime.handle().clone());
 
-    let builder = tauri::Builder::default();
+    let builder = tauri::Builder::default().plugin(navigation_guard());
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_plugin_sparkle_updater::init());
     let shutdown_state = shared_state.clone();
-    builder
+    let event_tx = server.events;
+    let api_token = server.api_token;
+    let app = builder
         .setup(move |app| {
-            let _icon_bytes = include_bytes!("../icons/icon.icns");
             app.manage(ManagedOmniState(shared_state.clone()));
+            app.manage(ManagedApiToken(api_token.clone()));
             updates::configure(app.handle())?;
 
             // Forward broadcast stream events to Tauri window events as well
@@ -341,6 +404,7 @@ pub fn run() {
             updates::omni_update_status,
             updates::omni_check_for_updates,
             updates::omni_set_automatic_updates,
+            omni_api_token,
             omni_snapshot,
             omni_complete_setup,
             omni_pin_bot,
@@ -361,22 +425,43 @@ pub fn run() {
             omni_computer_overview,
             omni_list_local_files,
             omni_read_local_file,
-            omni_search_local_files,
             omni_open_local_item,
-            omni_git_diff,
-            omni_git_commit,
-            omni_git_discard,
+            omni_open_external_url,
             omni_test_harness,
-            omni_write_clipboard,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building Omnibot")
-        .run(move |_, event| {
-            if matches!(event, tauri::RunEvent::Exit) {
-                terminal::shutdown(&shutdown_state);
-            }
+        .unwrap_or_else(|error| {
+            fail_startup(
+                &format!("The app window couldn't be created: {error}"),
+                true,
+            )
         });
+    app.run(move |_, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            shutdown(&shutdown_state);
+        }
+    });
 }
 
 #[cfg(test)]
 mod test_support;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn navigation_stays_on_app_pages() {
+        let url = |s: &str| tauri::Url::parse(s).unwrap();
+        assert!(is_app_url(&url("tauri://localhost/index.html")));
+        assert!(is_app_url(&url("about:blank")));
+        assert!(!is_app_url(&url("tauri://elsewhere/")));
+        assert!(!is_app_url(&url("https://example.com/")));
+        assert!(!is_app_url(&url("http://localhost:3000/")));
+        assert!(!is_app_url(&url("file:///etc/passwd")));
+        assert_eq!(
+            is_app_url(&url("http://localhost:1420/")),
+            cfg!(debug_assertions)
+        );
+    }
+}

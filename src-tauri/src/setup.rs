@@ -160,10 +160,7 @@ pub fn complete_setup(state: &SharedOmniState, input: SetupInput) -> Result<Omni
         }
     }
     let previous = std::mem::replace(&mut guard.store, store);
-    if let Err(error) = guard.persist() {
-        guard.store = previous;
-        return Err(error);
-    }
+    guard.persist_or_restore(previous)?;
     guard.emit(OmniStreamEvent::StateUpdated { chat_id: None });
     Ok(guard.snapshot())
 }

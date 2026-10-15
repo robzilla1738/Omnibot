@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::UNIX_EPOCH;
+use tauri::Url;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -134,19 +135,74 @@ pub fn read_workspace_file(
     Ok(text)
 }
 
-pub fn search_workspace_files(
-    workspace_root: &str,
-    query: &str,
-    base_path: Option<&str>,
-) -> Result<Vec<LocalFileEntry>, String> {
-    let needle = query.trim().to_ascii_lowercase();
-    if needle.is_empty() {
-        return list_workspace_directory(workspace_root, base_path);
+/// Accepts only absolute web and mail links, normalized by the URL parser.
+pub fn external_url(url: &str) -> Result<Url, String> {
+    let parsed = Url::parse(url.trim()).map_err(|_| "This link is not a valid URL.")?;
+    match parsed.scheme() {
+        "http" | "https" if parsed.host_str().is_some() => Ok(parsed),
+        "mailto" => Ok(parsed),
+        _ => Err("Only web and email links can be opened.".into()),
     }
-    let root = resolve_existing_path(workspace_root, base_path.unwrap_or("."))?;
-    let mut matches = Vec::new();
-    walk_matching_files(&root, &needle, 0, &mut matches);
-    Ok(matches)
+}
+
+pub fn open_external_url(url: &str) -> Result<(), String> {
+    let url = external_url(url)?;
+    let status = Command::new("/usr/bin/open")
+        .arg(url.as_str())
+        .status()
+        .map_err(|e| format!("Failed to open link: {e}"))?;
+    if !status.success() {
+        return Err("macOS could not open this link.".into());
+    }
+    Ok(())
+}
+
+fn local_or_https_url(target: &str) -> Option<Result<Url, String>> {
+    let url = Url::parse(target).ok()?;
+    match url.scheme() {
+        "https" if url.host_str().is_some() => Some(Ok(url)),
+        "http" => Some(
+            matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+                .then_some(url)
+                .ok_or_else(|| "Only HTTPS and local http://localhost links can be opened.".into()),
+        ),
+        _ => None,
+    }
+}
+
+const LAUNCHABLE_EXTENSIONS: &[&str] = &[
+    "app",
+    "command",
+    "sh",
+    "bash",
+    "zsh",
+    "tool",
+    "terminal",
+    "workflow",
+    "action",
+    "pkg",
+    "mpkg",
+    "scpt",
+    "applescript",
+    "jar",
+];
+
+/// `open` runs scripts and installers, so those may only be revealed in Finder.
+fn is_launchable(path: &Path) -> bool {
+    let extension = path
+        .extension()
+        .map(|ext| ext.to_string_lossy().to_ascii_lowercase());
+    if extension.is_some_and(|ext| LAUNCHABLE_EXTENSIONS.contains(&ext.as_str())) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(path) {
+            return meta.is_file() && meta.permissions().mode() & 0o111 != 0;
+        }
+    }
+    false
 }
 
 pub fn open_on_desktop(
@@ -164,7 +220,7 @@ pub fn open_on_desktop(
                 "Provide either a file/folder/URL target or an application name.".to_string(),
             );
         };
-        let status = Command::new("open")
+        let status = Command::new("/usr/bin/open")
             .args(["-a", app])
             .status()
             .map_err(|e| format!("Failed to launch application '{app}': {e}"))?;
@@ -174,26 +230,30 @@ pub fn open_on_desktop(
         return Ok(format!("Opened application '{app}'."));
     }
 
-    if trimmed.starts_with("https://")
-        || trimmed.starts_with("http://localhost")
-        || trimmed.starts_with("http://127.0.0.1")
-    {
-        let mut cmd = Command::new("open");
+    if let Some(url) = local_or_https_url(trimmed) {
+        let url = url?;
+        let mut cmd = Command::new("/usr/bin/open");
         if let Some(app) = clean_app {
             cmd.args(["-a", app]);
         }
         let status = cmd
-            .arg(trimmed)
+            .arg(url.as_str())
             .status()
-            .map_err(|e| format!("Failed to open URL '{trimmed}': {e}"))?;
+            .map_err(|e| format!("Failed to open URL '{url}': {e}"))?;
         if !status.success() {
-            return Err(format!("macOS could not open URL '{trimmed}'."));
+            return Err(format!("macOS could not open URL '{url}'."));
         }
-        return Ok(format!("Opened URL '{trimmed}'."));
+        return Ok(format!("Opened URL '{url}'."));
     }
 
     let resolved = resolve_existing_path(workspace_root, trimmed)?;
-    let mut cmd = Command::new("open");
+    if !reveal_in_finder && is_launchable(&resolved) {
+        return Err(format!(
+            "'{}' is an app, script, or installer. Omnibot only reveals these in Finder.",
+            resolved.display()
+        ));
+    }
+    let mut cmd = Command::new("/usr/bin/open");
     if reveal_in_finder {
         cmd.arg("-R");
     } else if let Some(app) = clean_app {
@@ -215,28 +275,6 @@ pub fn open_on_desktop(
     } else {
         Ok(format!("Opened '{}'.", resolved.display()))
     }
-}
-
-pub fn write_clipboard_text(text: &str) -> Result<String, String> {
-    let mut child = Command::new("/usr/bin/pbcopy")
-        .stdin(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn pbcopy: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|e| format!("Failed to write to pbcopy: {e}"))?;
-    }
-    let status = child
-        .wait()
-        .map_err(|e| format!("Failed waiting for pbcopy: {e}"))?;
-    if !status.success() {
-        return Err("pbcopy exited with an error.".to_string());
-    }
-    Ok(format!(
-        "Copied {} characters to clipboard.",
-        text.chars().count()
-    ))
 }
 
 fn entry_from_path(path: &Path, name_override: Option<String>) -> LocalFileEntry {
@@ -261,58 +299,83 @@ fn entry_from_path(path: &Path, name_override: Option<String>) -> LocalFileEntry
     }
 }
 
-fn walk_matching_files(dir: &Path, needle: &str, depth: usize, out: &mut Vec<LocalFileEntry>) {
-    if depth > 5 || out.len() >= 80 {
-        return;
-    }
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
+/// Credential stores matched by a single path component anywhere in the path.
+const BLOCKED_NAMES: &[&str] = &[
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".npmrc",
+    ".netrc",
+    ".git-credentials",
+    ".pypirc",
+    ".kube",
+    ".claude.json",
+    "keychains",
+];
+
+/// Credential stores matched by consecutive path components (lowercase).
+const BLOCKED_SEQUENCES: &[&[&str]] = &[
+    &[".docker", "config.json"],
+    &[".config", "gh"],
+    &[".codex", "auth.json"],
+    &[".claude", ".credentials.json"],
+    &["library", "cookies"],
+    &["library", "safari"],
+    &["library", "containers", "com.apple.safari"],
+    &["application support", "google", "chrome"],
+    &["application support", "firefox"],
+    &["application support", "arc"],
+    &["application support", "bravesoftware"],
+    &["application support", "microsoft edge"],
+];
+
+fn omni_data_root() -> &'static Path {
+    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        let dir = crate::state::omni_data_dir();
+        fs::canonicalize(&dir).unwrap_or(dir)
+    })
+}
+
+/// Omnibot's own store and API token are private; bot homes, project notes, and
+/// worktrees are working folders the user may browse.
+fn is_private_app_data(path: &Path, data_root: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(data_root) else {
+        return false;
     };
-    for entry in entries.flatten() {
-        if out.len() >= 80 {
-            break;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') || name == "node_modules" || name == "target" || name == "dist" {
-            continue;
-        }
-        let path = entry.path();
-        if is_blocked_path(&path) {
-            continue;
-        }
-        let Ok(meta) = fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if meta.file_type().is_symlink() {
-            continue;
-        }
-        let is_dir = meta.is_dir();
-        if needle == "*" || name.to_ascii_lowercase().contains(needle) {
-            out.push(entry_from_path(&path, Some(name)));
-        }
-        if is_dir {
-            walk_matching_files(&path, needle, depth + 1, out);
-        }
+    let parts: Vec<_> = relative
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect();
+    !match parts.as_slice() {
+        [first, ..] if first == "projects" || first == "worktrees" => true,
+        [first, _, home, ..] if first == "bots" && home == "home" => true,
+        _ => false,
     }
 }
 
 fn is_blocked_path(path: &Path) -> bool {
-    for comp in path.components() {
-        let Component::Normal(os) = comp else {
-            continue;
-        };
-        let lower = os.to_string_lossy().to_ascii_lowercase();
-        if lower == ".env"
-            || lower.starts_with(".env.")
-            || matches!(
-                lower.as_str(),
-                ".ssh" | ".aws" | ".gnupg" | ".npmrc" | ".netrc" | "keychains"
-            )
-        {
-            return true;
-        }
+    is_blocked_path_in(path, omni_data_root())
+}
+
+fn is_blocked_path_in(path: &Path, data_root: &Path) -> bool {
+    if is_private_app_data(path, data_root) {
+        return true;
     }
-    false
+    let parts: Vec<String> = path
+        .components()
+        .filter_map(|comp| match comp {
+            Component::Normal(os) => Some(os.to_string_lossy().to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect();
+    parts.iter().any(|name| {
+        name == ".env" || name.starts_with(".env.") || BLOCKED_NAMES.contains(&name.as_str())
+    }) || BLOCKED_SEQUENCES.iter().any(|sequence| {
+        parts
+            .windows(sequence.len())
+            .any(|window| window.iter().zip(sequence.iter()).all(|(a, b)| a == b))
+    })
 }
 
 fn expand_candidate_path(workspace_root: &str, candidate: &str) -> Result<PathBuf, String> {
@@ -349,4 +412,85 @@ fn resolve_existing_path(workspace_root: &str, candidate: &str) -> Result<PathBu
         ));
     }
     Ok(canonical)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credential_stores_and_private_app_data_are_blocked() {
+        let data = Path::new("/Users/me/.omni-bot");
+        for path in [
+            "/Users/me/.ssh/id_ed25519",
+            "/Users/me/project/.env.local",
+            "/Users/me/.docker/config.json",
+            "/Users/me/.config/gh/hosts.yml",
+            "/Users/me/.codex/auth.json",
+            "/Users/me/.claude/.credentials.json",
+            "/Users/me/.claude.json",
+            "/Users/me/Library/Cookies/Cookies.binarycookies",
+            "/Users/me/Library/Application Support/Google/Chrome/Default/Login Data",
+            "/Users/me/Library/Application Support/BraveSoftware/Brave-Browser",
+            "/Users/me/Library/Safari/History.db",
+            "/Users/me/.omni-bot",
+            "/Users/me/.omni-bot/store.json",
+            "/Users/me/.omni-bot/api-token",
+            "/Users/me/.omni-bot/bots/41/memory.md",
+        ] {
+            assert!(is_blocked_path_in(Path::new(path), data), "{path}");
+        }
+        for path in [
+            "/Users/me/project/src/cookies/index.ts",
+            "/Users/me/.config/nvim/init.lua",
+            "/Users/me/.omni-bot/bots/41/home/notes.txt",
+            "/Users/me/.omni-bot/projects/70/memory.md",
+            "/Users/me/.omni-bot/worktrees/aa/bb/src",
+        ] {
+            assert!(!is_blocked_path_in(Path::new(path), data), "{path}");
+        }
+    }
+
+    #[test]
+    fn urls_are_parsed_instead_of_prefix_matched() {
+        assert!(local_or_https_url("http://localhost.attacker.example/")
+            .unwrap()
+            .is_err());
+        assert!(local_or_https_url("http://localhost:3000/app")
+            .unwrap()
+            .is_ok());
+        assert!(local_or_https_url("https://example.com").unwrap().is_ok());
+        assert!(local_or_https_url("README.md").is_none());
+        assert!(external_url("https://example.com/a?b=c").is_ok());
+        assert!(external_url("mailto:someone@example.com").is_ok());
+        for bad in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "x-apple.systempreferences:",
+            "-a Terminal",
+            "https://",
+        ] {
+            assert!(external_url(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn scripts_and_apps_are_only_revealed() {
+        let dir = std::env::temp_dir().join(format!("omni-open-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(dir.join("Tool.app")).unwrap();
+        let script = dir.join("run");
+        fs::write(&script, "#!/bin/sh\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(dir.join("notes.txt"), "hi").unwrap();
+        let root = dir.to_string_lossy();
+        for target in ["Tool.app", "run"] {
+            let error = open_on_desktop(&root, target, Some("TextEdit"), false).unwrap_err();
+            assert!(error.contains("only reveals"), "{error}");
+        }
+        assert!(is_launchable(&dir.join("Tool.app")));
+        assert!(!is_launchable(&dir.join("notes.txt")));
+        assert!(!is_launchable(&dir));
+        let _ = fs::remove_dir_all(dir);
+    }
 }

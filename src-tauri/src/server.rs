@@ -1,6 +1,5 @@
 use crate::computer::{
     get_system_overview, list_workspace_directory, open_on_desktop, read_workspace_file,
-    search_workspace_files,
 };
 use crate::git_ops::{git_discard_file, git_stage_and_commit, read_file_diff};
 use crate::orchestrator::{dispatch_chat_turn, SendMessageInput};
@@ -32,8 +31,14 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use tower_http::cors::CorsLayer;
 
-pub async fn spawn_local_server(
-) -> Result<(u16, SharedOmniState, broadcast::Sender<OmniStreamEvent>), String> {
+pub struct LocalServer {
+    pub port: u16,
+    pub state: SharedOmniState,
+    pub events: broadcast::Sender<OmniStreamEvent>,
+    pub api_token: String,
+}
+
+pub async fn spawn_local_server() -> Result<LocalServer, String> {
     let mut listener = None;
     let mut bound_port = 4321u16;
     for candidate in 4321..=4335 {
@@ -49,7 +54,7 @@ pub async fn spawn_local_server(
         None => {
             let l = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
                 .await
-                .map_err(|e| format!("Failed to bind local server: {e}"))?;
+                .map_err(|e| format!("Omnibot couldn't start its local service: {e}"))?;
             bound_port = l.local_addr().map(|a| a.port()).unwrap_or(4321);
             l
         }
@@ -57,18 +62,60 @@ pub async fn spawn_local_server(
 
     let (event_tx, _) = broadcast::channel::<OmniStreamEvent>(512);
     let runtime_state = OmniRuntimeState::load(bound_port, event_tx.clone())?;
+    let api_token = new_api_token();
+    write_api_token(&runtime_state.data_dir, &api_token)?;
     let shared: SharedOmniState = Arc::new(RwLock::new(runtime_state));
 
-    let app = local_router(shared.clone(), bound_port);
+    let app = local_router(shared.clone(), bound_port, api_token.clone());
 
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        if let Err(error) = axum::serve(listener, app).await {
+            eprintln!("Omnibot local API stopped: {error}");
+        }
     });
 
-    Ok((bound_port, shared, event_tx))
+    Ok(LocalServer {
+        port: bound_port,
+        state: shared,
+        events: event_tx,
+        api_token,
+    })
 }
 
-pub fn local_router(shared: SharedOmniState, bound_port: u16) -> Router {
+fn new_api_token() -> String {
+    // Two v4 UUIDs carry 244 random bits from the OS generator.
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+/// Local tools (such as the smoke test) read the token from here; the UI uses IPC.
+fn write_api_token(data_dir: &std::path::Path, token: &str) -> Result<(), String> {
+    use std::io::Write;
+    let path = data_dir.join("api-token");
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path)?;
+        // An older file may have been created with wider permissions.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(token.as_bytes())
+    })();
+    result.map_err(|e| format!("Omnibot couldn't write {}: {e}", path.display()))
+}
+
+pub fn local_router(shared: SharedOmniState, bound_port: u16, api_token: String) -> Router {
     Router::new()
         .route("/api/snapshot", get(http_snapshot))
         .route("/api/terminal/list", get(crate::terminal::http_list))
@@ -101,7 +148,6 @@ pub fn local_router(shared: SharedOmniState, bound_port: u16) -> Router {
         .route("/api/computer/overview", get(http_computer_overview))
         .route("/api/computer/files", get(http_list_files))
         .route("/api/computer/read", get(http_read_file))
-        .route("/api/computer/search", get(http_search_files))
         .route("/api/computer/open", post(http_open_item))
         .route("/api/git/status", get(http_git_status))
         .route("/api/git/diff", get(http_git_diff))
@@ -110,26 +156,49 @@ pub fn local_router(shared: SharedOmniState, bound_port: u16) -> Router {
         .route("/api/harness/test", post(http_test_harness))
         .layer(local_cors())
         .layer(middleware::from_fn_with_state(
-            bound_port,
+            LocalAccess {
+                port: bound_port,
+                token: api_token.into(),
+            },
             local_request_only,
         ))
         .with_state(shared)
 }
 
-const APP_ORIGINS: [&str; 6] = [
+const PACKAGED_ORIGIN: &str = "tauri://localhost";
+#[cfg(debug_assertions)]
+const DEV_ORIGINS: [&str; 4] = [
     "http://localhost:1420",
     "http://127.0.0.1:1420",
     "http://localhost:1422",
     "http://127.0.0.1:1422",
-    "tauri://localhost",
-    "http://tauri.localhost",
 ];
+#[cfg(not(debug_assertions))]
+const DEV_ORIGINS: [&str; 0] = [];
+
+fn is_app_origin(origin: &str) -> bool {
+    origin == PACKAGED_ORIGIN || DEV_ORIGINS.contains(&origin)
+}
 
 fn local_cors() -> CorsLayer {
     CorsLayer::new()
-        .allow_origin(APP_ORIGINS.map(|origin| origin.parse().unwrap()))
+        .allow_origin(
+            std::iter::once(PACKAGED_ORIGIN)
+                .chain(DEV_ORIGINS)
+                .map(|origin| origin.parse().unwrap())
+                .collect::<Vec<axum::http::HeaderValue>>(),
+        )
         .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
-        .allow_headers([axum::http::header::CONTENT_TYPE])
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+        ])
+}
+
+#[derive(Clone)]
+struct LocalAccess {
+    port: u16,
+    token: Arc<str>,
 }
 
 fn valid_local_request(headers: &axum::http::HeaderMap, port: u16) -> bool {
@@ -141,22 +210,63 @@ fn valid_local_request(headers: &axum::http::HeaderMap, port: u16) -> bool {
         return false;
     }
     if let Some(origin) = headers.get("origin") {
-        return origin.to_str().is_ok_and(|origin| {
-            APP_ORIGINS.contains(&origin) || origin == format!("http://{host}")
-        });
+        return origin
+            .to_str()
+            .is_ok_and(|origin| is_app_origin(origin) || origin == format!("http://{host}"));
     }
     !headers
         .get("sec-fetch-site")
         .is_some_and(|v| v == "cross-site")
 }
 
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
+}
+
+fn presented_token(request: &Request) -> Option<&str> {
+    let header = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    // EventSource cannot set headers, so the token may also arrive as `?token=`.
+    header.or_else(|| {
+        request
+            .uri()
+            .query()?
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("token="))
+    })
+}
+
+fn authorized(request: &Request, token: &str) -> bool {
+    // Preflights never carry credentials; the real request is checked afterwards.
+    if request.method() == axum::http::Method::OPTIONS {
+        return true;
+    }
+    if cfg!(debug_assertions)
+        && request
+            .headers()
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|origin| DEV_ORIGINS.contains(&origin))
+    {
+        return true;
+    }
+    presented_token(request)
+        .is_some_and(|given| constant_time_eq(given.as_bytes(), token.as_bytes()))
+}
+
 async fn local_request_only(
-    State(port): State<u16>,
+    State(access): State<LocalAccess>,
     request: Request,
     next: Next,
 ) -> axum::response::Response {
-    if !valid_local_request(request.headers(), port) {
+    if !valid_local_request(request.headers(), access.port) {
         return (StatusCode::FORBIDDEN, "Local app requests only").into_response();
+    }
+    if !authorized(&request, &access.token) {
+        return (StatusCode::UNAUTHORIZED, "Missing or invalid API token").into_response();
     }
     next.run(request).await
 }
@@ -252,6 +362,15 @@ pub fn stop_chat_runs(state: &SharedOmniState, chat_id: &str) -> Result<OmniSnap
     let mut guard = state
         .write()
         .map_err(|_| "State lock poisoned".to_string())?;
+    // Running work clears the flag when it finishes. A flag set on an idle chat would
+    // make the next commit, discard, or terminal fail with "Stopped while queued."
+    let running = guard.active_workflows.contains(chat_id)
+        || guard.active_runs.values().any(|run| run.chat_id == chat_id)
+        || crate::terminal::has_active_session(&guard, chat_id);
+    if !running {
+        guard.cancelled_chats.remove(chat_id);
+        return Ok(guard.snapshot());
+    }
     guard.cancelled_chats.insert(chat_id.to_string());
     // Keep runs visible until the child processes have actually stopped.
     guard.emit(OmniStreamEvent::StateUpdated {
@@ -452,10 +571,7 @@ pub fn create_chat_thread(
 
     let index = guard.store.chats.len().min(1);
     guard.store.chats.insert(index, chat.clone());
-    if let Err(error) = guard.persist() {
-        guard.store = previous;
-        return Err(error);
-    }
+    guard.persist_or_restore(previous)?;
     guard.emit(OmniStreamEvent::StateUpdated {
         chat_id: Some(chat.id.clone()),
     });
@@ -578,10 +694,7 @@ pub fn update_chat_thread(
         chat.max_swarm_turns = mt.clamp(1, 8);
     }
     chat.updated_at_ms = now_ms();
-    if let Err(error) = guard.persist() {
-        guard.store = previous;
-        return Err(error);
-    }
+    guard.persist_or_restore(previous)?;
     guard.emit(OmniStreamEvent::StateUpdated {
         chat_id: Some(input.chat_id),
     });
@@ -685,6 +798,7 @@ pub fn delete_chat_thread(state: &SharedOmniState, id: &str) -> Result<OmniSnaps
         }
     }
     guard.persist_or_restore(previous)?;
+    crate::terminal::remove_chat_sessions(&mut guard, id);
     guard.emit(OmniStreamEvent::StateUpdated { chat_id: None });
     Ok(guard.snapshot())
 }
@@ -797,10 +911,7 @@ pub fn upsert_bot_profile(
             });
         }
     }
-    if let Err(error) = guard.persist() {
-        guard.store = previous_store;
-        return Err(error);
-    }
+    guard.persist_or_restore(previous_store)?;
     guard.emit(OmniStreamEvent::StateUpdated { chat_id: None });
     Ok(guard.snapshot())
 }
@@ -873,6 +984,20 @@ async fn http_delete_bot(
     }
 }
 
+fn validate_workspace_root(path: &str) -> Result<String, String> {
+    let trimmed = path.trim();
+    let expanded = match trimmed.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => dirs::home_dir()
+            .map(|home| format!("{}{rest}", home.display()))
+            .unwrap_or_else(|| trimmed.to_string()),
+        _ => trimmed.to_string(),
+    };
+    if !std::path::Path::new(&expanded).is_dir() {
+        return Err("Choose an existing folder for the computer workspace.".into());
+    }
+    Ok(expanded)
+}
+
 pub fn update_omni_preferences(
     state: &SharedOmniState,
     mut prefs: OmniPreferences,
@@ -880,26 +1005,31 @@ pub fn update_omni_preferences(
     let mut guard = state
         .write()
         .map_err(|_| "State lock poisoned".to_string())?;
-    if !prefs.workflow_budget_usd.is_finite() || prefs.workflow_budget_usd <= 0.0 {
-        return Err("Workflow budget must be a positive finite number.".into());
+    if !crate::state::valid_budget(prefs.workflow_budget_usd) {
+        return Err("Workflow budget must be 0 (no limit) or a positive number.".into());
     }
+    if !crate::state::valid_budget(prefs.max_turn_budget_usd) {
+        return Err("Turn budget must be 0 (no limit) or a positive number.".into());
+    }
+    prefs.workspace_root = validate_workspace_root(&prefs.workspace_root)?;
     prefs.default_max_swarm_turns = prefs.default_max_swarm_turns.clamp(1, 8);
     prefs.max_context_messages = prefs.max_context_messages.clamp(2, 24);
     prefs.max_message_chars = prefs.max_message_chars.clamp(400, 6000);
     prefs.max_parallel_bots = prefs.max_parallel_bots.clamp(1, 6);
     prefs.turn_timeout_secs = prefs.turn_timeout_secs.clamp(30, 1800);
-    if !prefs.max_turn_budget_usd.is_finite() || prefs.max_turn_budget_usd <= 0.0 {
-        prefs.max_turn_budget_usd = 1.50;
-    }
 
+    let current = &guard.store.preferences;
     if !guard.active_workflows.is_empty()
-        && (guard.store.preferences.workflow_budget_usd != prefs.workflow_budget_usd
-            || guard.store.preferences.max_turn_budget_usd != prefs.max_turn_budget_usd
-            || guard.store.preferences.max_parallel_bots != prefs.max_parallel_bots
-            || guard.store.preferences.only_explicit_handoffs != prefs.only_explicit_handoffs
-            || guard.store.preferences.max_context_messages != prefs.max_context_messages
-            || guard.store.preferences.max_message_chars != prefs.max_message_chars
-            || guard.store.preferences.turn_timeout_secs != prefs.turn_timeout_secs)
+        && (current.workflow_budget_usd != prefs.workflow_budget_usd
+            || current.max_turn_budget_usd != prefs.max_turn_budget_usd
+            || current.max_parallel_bots != prefs.max_parallel_bots
+            || current.only_explicit_handoffs != prefs.only_explicit_handoffs
+            || current.max_context_messages != prefs.max_context_messages
+            || current.max_message_chars != prefs.max_message_chars
+            || current.turn_timeout_secs != prefs.turn_timeout_secs
+            || current.approve_all_tools != prefs.approve_all_tools
+            || current.prevent_handoff_loops != prefs.prevent_handoff_loops
+            || current.default_max_swarm_turns != prefs.default_max_swarm_turns)
     {
         return Err("Finish running chats before changing execution limits.".into());
     }
@@ -916,10 +1046,7 @@ pub fn update_omni_preferences(
         }
     }
     guard.store.preferences = prefs;
-    if let Err(error) = guard.persist() {
-        guard.store = previous;
-        return Err(error);
-    }
+    guard.persist_or_restore(previous)?;
     guard.emit(OmniStreamEvent::StateUpdated { chat_id: None });
     Ok(guard.snapshot())
 }
@@ -998,10 +1125,7 @@ pub fn upsert_workspace_entry(
             }
         }
     }
-    if let Err(error) = guard.persist() {
-        guard.store = previous;
-        return Err(error);
-    }
+    guard.persist_or_restore(previous)?;
     guard.emit(OmniStreamEvent::StateUpdated { chat_id: None });
     Ok(guard.snapshot())
 }
@@ -1044,9 +1168,9 @@ pub fn delete_workspace_entry(state: &SharedOmniState, id: &str) -> Result<OmniS
             chat.last_synced_msg_index.clear();
         }
     }
-    if let Err(error) = guard.persist() {
-        guard.store = previous;
-        return Err(error);
+    guard.persist_or_restore(previous)?;
+    if let Err(error) = crate::homes::remove_project_memory(&guard.data_dir, id) {
+        eprintln!("Couldn't remove exported project notes: {error}");
     }
     guard.emit(OmniStreamEvent::StateUpdated { chat_id: None });
     Ok(guard.snapshot())
@@ -1090,10 +1214,7 @@ pub fn upsert_routine_entry(
     } else {
         guard.store.routines.insert(0, routine);
     }
-    if let Err(error) = guard.persist() {
-        guard.store = previous;
-        return Err(error);
-    }
+    guard.persist_or_restore(previous)?;
     guard.emit(OmniStreamEvent::StateUpdated { chat_id: None });
     Ok(guard.snapshot())
 }
@@ -1129,12 +1250,28 @@ async fn http_delete_routine(
     }
 }
 
-async fn http_computer_overview(State(state): State<SharedOmniState>) -> impl IntoResponse {
-    let root = state
+fn workspace_root(state: &SharedOmniState) -> String {
+    state
         .read()
         .map(|g| g.store.preferences.workspace_root.clone())
-        .unwrap_or_else(|_| ".".to_string());
-    Json(get_system_overview(&root)).into_response()
+        .unwrap_or_else(|_| ".".to_string())
+}
+
+/// Runs work that spawns processes off the async workers.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+async fn http_computer_overview(State(state): State<SharedOmniState>) -> axum::response::Response {
+    let root = workspace_root(&state);
+    match blocking(move || Ok(get_system_overview(&root))).await {
+        Ok(overview) => Json(overview).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1143,18 +1280,13 @@ struct PathQuery {
     task_id: Option<String>,
     chat_id: Option<String>,
     path: Option<String>,
-    query: Option<String>,
 }
 
 async fn http_list_files(
     State(state): State<SharedOmniState>,
     Query(q): Query<PathQuery>,
 ) -> impl IntoResponse {
-    let root = state
-        .read()
-        .map(|g| g.store.preferences.workspace_root.clone())
-        .unwrap_or_else(|_| ".".to_string());
-    match list_workspace_directory(&root, q.path.as_deref()) {
+    match list_workspace_directory(&workspace_root(&state), q.path.as_deref()) {
         Ok(items) => Json(items).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
@@ -1164,28 +1296,9 @@ async fn http_read_file(
     State(state): State<SharedOmniState>,
     Query(q): Query<PathQuery>,
 ) -> impl IntoResponse {
-    let root = state
-        .read()
-        .map(|g| g.store.preferences.workspace_root.clone())
-        .unwrap_or_else(|_| ".".to_string());
     let path = q.path.unwrap_or_default();
-    match read_workspace_file(&root, &path, 64_000) {
+    match read_workspace_file(&workspace_root(&state), &path, 64_000) {
         Ok(content) => Json(serde_json::json!({ "content": content })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
-    }
-}
-
-async fn http_search_files(
-    State(state): State<SharedOmniState>,
-    Query(q): Query<PathQuery>,
-) -> impl IntoResponse {
-    let root = state
-        .read()
-        .map(|g| g.store.preferences.workspace_root.clone())
-        .unwrap_or_else(|_| ".".to_string());
-    let needle = q.query.unwrap_or_default();
-    match search_workspace_files(&root, &needle, q.path.as_deref()) {
-        Ok(items) => Json(items).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
 }
@@ -1202,16 +1315,17 @@ async fn http_open_item(
     State(state): State<SharedOmniState>,
     Json(body): Json<OpenItemBody>,
 ) -> impl IntoResponse {
-    let root = state
-        .read()
-        .map(|g| g.store.preferences.workspace_root.clone())
-        .unwrap_or_else(|_| ".".to_string());
-    match open_on_desktop(
-        &root,
-        &body.target,
-        body.app_name.as_deref(),
-        body.reveal_in_finder.unwrap_or(false),
-    ) {
+    let root = workspace_root(&state);
+    let result = blocking(move || {
+        open_on_desktop(
+            &root,
+            &body.target,
+            body.app_name.as_deref(),
+            body.reveal_in_finder.unwrap_or(false),
+        )
+    })
+    .await;
+    match result {
         Ok(msg) => Json(serde_json::json!({ "message": msg })).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
@@ -1375,8 +1489,11 @@ struct TestHarnessBody {
     kind: CliDriverKind,
 }
 
-async fn http_test_harness(Json(body): Json<TestHarnessBody>) -> impl IntoResponse {
-    Json(test_cli_harness(body.kind)).into_response()
+async fn http_test_harness(Json(body): Json<TestHarnessBody>) -> axum::response::Response {
+    match blocking(move || Ok(test_cli_harness(body.kind))).await {
+        Ok(result) => Json(result).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
 }
 
 #[cfg(test)]
@@ -1384,45 +1501,107 @@ mod tests {
     use super::*;
     use crate::test_support::Fixture;
 
-    #[tokio::test]
-    async fn packaged_app_cors_allows_local_preflights_and_rejects_foreign_sites() {
+    const TOKEN: &str = "test-token-0123456789abcdef";
+
+    async fn raw_request(port: u16, request: String) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            stream.read_to_string(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        response
+    }
+
+    async fn test_server() -> (u16, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let router = Router::new()
-            .route("/api/test", post(|| async { "ok" }))
+            .route("/api/test", post(|| async { "ok" }).get(|| async { "ok" }))
             .layer(local_cors())
-            .layer(middleware::from_fn_with_state(port, local_request_only));
+            .layer(middleware::from_fn_with_state(
+                LocalAccess {
+                    port,
+                    token: TOKEN.into(),
+                },
+                local_request_only,
+            ));
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        for origin in APP_ORIGINS.into_iter().chain(["https://attacker.example"]) {
-            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .unwrap();
-            let request = format!("OPTIONS /api/test HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: {origin}\r\nAccess-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: content-type\r\nConnection: close\r\n\r\n");
-            stream.write_all(request.as_bytes()).await.unwrap();
-            let mut response = String::new();
-            tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                stream.read_to_string(&mut response),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            if APP_ORIGINS.contains(&origin) {
+        (port, server)
+    }
+
+    #[tokio::test]
+    async fn packaged_app_cors_allows_local_preflights_and_rejects_foreign_sites() {
+        let (port, server) = test_server().await;
+        let app_origins: Vec<&str> = std::iter::once(PACKAGED_ORIGIN)
+            .chain(DEV_ORIGINS)
+            .collect();
+        for origin in app_origins
+            .iter()
+            .copied()
+            .chain(["https://attacker.example", "http://tauri.localhost"])
+        {
+            let request = format!("OPTIONS /api/test HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: {origin}\r\nAccess-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: content-type, authorization\r\nConnection: close\r\n\r\n");
+            let response = raw_request(port, request).await;
+            if app_origins.contains(&origin) {
                 assert!(
                     response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.1 204"),
                     "{response}"
                 );
+                let lower = response.to_lowercase();
                 assert!(
-                    response
-                        .to_lowercase()
-                        .contains(&format!("access-control-allow-origin: {origin}")),
+                    lower.contains(&format!("access-control-allow-origin: {origin}")),
                     "{response}"
                 );
+                assert!(lower.contains("authorization"), "{response}");
             } else {
-                assert!(response.starts_with("HTTP/1.1 403"));
+                assert!(response.starts_with("HTTP/1.1 403"), "{response}");
                 assert!(!response.contains("access-control-allow-origin"));
             }
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn api_requires_the_bearer_or_query_token() {
+        let (port, server) = test_server().await;
+        let get = |path: &str, extra: &str| {
+            format!(
+                "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{extra}Connection: close\r\n\r\n"
+            )
+        };
+        let missing = raw_request(port, get("/api/test", "")).await;
+        assert!(missing.starts_with("HTTP/1.1 401"), "{missing}");
+        let wrong = raw_request(port, get("/api/test", "Authorization: Bearer nope\r\n")).await;
+        assert!(wrong.starts_with("HTTP/1.1 401"), "{wrong}");
+        let near_miss =
+            raw_request(port, get("/api/test?token=test-token-0123456789abcdeX", "")).await;
+        assert!(near_miss.starts_with("HTTP/1.1 401"), "{near_miss}");
+        let packaged = raw_request(port, get("/api/test", "Origin: tauri://localhost\r\n")).await;
+        assert!(packaged.starts_with("HTTP/1.1 401"), "{packaged}");
+        let header = raw_request(
+            port,
+            get(
+                "/api/test",
+                &format!("Origin: tauri://localhost\r\nAuthorization: Bearer {TOKEN}\r\n"),
+            ),
+        )
+        .await;
+        assert!(header.starts_with("HTTP/1.1 200"), "{header}");
+        let query = raw_request(port, get(&format!("/api/test?x=1&token={TOKEN}"), "")).await;
+        assert!(query.starts_with("HTTP/1.1 200"), "{query}");
+        let dev = raw_request(port, get("/api/test", "Origin: http://localhost:1420\r\n")).await;
+        if cfg!(debug_assertions) {
+            assert!(dev.starts_with("HTTP/1.1 200"), "{dev}");
+        } else {
+            assert!(dev.starts_with("HTTP/1.1 403"), "{dev}");
         }
         server.abort();
     }
@@ -1434,7 +1613,7 @@ mod tests {
         f.script("A", "echo HTTP_FIXTURE_RESULT");
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let app = local_router(f.state.clone(), port);
+        let app = local_router(f.state.clone(), port, TOKEN.into());
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -1442,7 +1621,7 @@ mod tests {
             let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
                 .await
                 .unwrap();
-            stream.write_all(format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            stream.write_all(format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
             let mut bytes = Vec::new();
             stream.read_to_end(&mut bytes).await.unwrap();
             String::from_utf8(bytes).unwrap()
@@ -1482,10 +1661,130 @@ mod tests {
         assert!(valid_local_request(&h, 4321));
         h.insert("origin", "https://attacker.example".parse().unwrap());
         assert!(!valid_local_request(&h, 4321));
-        h.insert("origin", "http://localhost:1420".parse().unwrap());
+        h.insert("origin", "http://tauri.localhost".parse().unwrap());
+        assert!(!valid_local_request(&h, 4321));
+        h.insert("origin", "tauri://localhost".parse().unwrap());
         assert!(valid_local_request(&h, 4321));
+        h.insert("origin", "http://localhost:1420".parse().unwrap());
+        assert_eq!(valid_local_request(&h, 4321), cfg!(debug_assertions));
         h.insert("host", "attacker.example:4321".parse().unwrap());
         assert!(!valid_local_request(&h, 4321));
+    }
+
+    #[tokio::test]
+    async fn stopping_an_idle_chat_leaves_no_stale_cancellation() {
+        let f = Fixture::new(&["A"]);
+        f.state
+            .write()
+            .unwrap()
+            .cancelled_chats
+            .insert("room".into());
+        stop_chat_runs(&f.state, "room").unwrap();
+        assert!(!f.state.read().unwrap().cancelled_chats.contains("room"));
+        crate::execution::acquire(f.state.clone(), "room", "commit", "/tmp")
+            .await
+            .expect("an idle stop must not cancel later git operations");
+        f.state
+            .write()
+            .unwrap()
+            .active_workflows
+            .insert("room".into());
+        stop_chat_runs(&f.state, "room").unwrap();
+        assert!(f.state.read().unwrap().cancelled_chats.contains("room"));
+    }
+
+    #[test]
+    fn preferences_accept_zero_budgets_and_validate_workspace_root() {
+        let f = Fixture::new(&["A"]);
+        let mut prefs = f.state.read().unwrap().store.preferences.clone();
+        prefs.workflow_budget_usd = 0.0;
+        prefs.max_turn_budget_usd = 0.0;
+        let snapshot = update_omni_preferences(&f.state, prefs.clone()).unwrap();
+        assert_eq!(snapshot.preferences.workflow_budget_usd, 0.0);
+        assert_eq!(snapshot.preferences.max_turn_budget_usd, 0.0);
+        for (workflow, turn) in [
+            (-1.0, 1.0),
+            (1.0, -0.5),
+            (f64::NAN, 1.0),
+            (1.0, f64::INFINITY),
+        ] {
+            let mut bad = prefs.clone();
+            bad.workflow_budget_usd = workflow;
+            bad.max_turn_budget_usd = turn;
+            assert!(update_omni_preferences(&f.state, bad).is_err());
+        }
+        let mut bad = prefs.clone();
+        bad.workspace_root = f.dir.join("missing").to_string_lossy().into_owned();
+        assert!(update_omni_preferences(&f.state, bad).is_err());
+        let file = f.dir.join("file.txt");
+        std::fs::write(&file, "x").unwrap();
+        bad = prefs.clone();
+        bad.workspace_root = file.to_string_lossy().into_owned();
+        assert!(update_omni_preferences(&f.state, bad).is_err());
+        bad = prefs;
+        bad.workspace_root = "~".into();
+        let snapshot = update_omni_preferences(&f.state, bad).unwrap();
+        assert_eq!(
+            snapshot.preferences.workspace_root,
+            dirs::home_dir().unwrap().to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn workflow_preferences_are_locked_while_chats_run() {
+        let f = Fixture::new(&["A"]);
+        f.state
+            .write()
+            .unwrap()
+            .active_workflows
+            .insert("room".into());
+        let prefs = f.state.read().unwrap().store.preferences.clone();
+        for change in [
+            |p: &mut OmniPreferences| p.approve_all_tools = !p.approve_all_tools,
+            |p: &mut OmniPreferences| p.prevent_handoff_loops = !p.prevent_handoff_loops,
+            |p: &mut OmniPreferences| p.default_max_swarm_turns = 7,
+        ] {
+            let mut changed = prefs.clone();
+            change(&mut changed);
+            let error = update_omni_preferences(&f.state, changed).unwrap_err();
+            assert!(error.contains("execution limits"), "{error}");
+        }
+        assert!(update_omni_preferences(&f.state, prefs).is_ok());
+    }
+
+    #[test]
+    fn deleting_a_chat_removes_its_terminals() {
+        let f = Fixture::new(&["A"]);
+        let (chat, _) = create_chat_thread(
+            &f.state,
+            CreateChatInput {
+                model_overrides: HashMap::new(),
+                bot_home: None,
+                title: None,
+                subtitle: None,
+                participant_bot_ids: vec!["A".into()],
+                workspace_id: None,
+                workspace_path: None,
+                use_worktrees: None,
+            },
+        )
+        .unwrap();
+        let request = crate::drivers::DriverTurnRequest {
+            chat_id: chat.id.clone(),
+            message_id: "run".into(),
+            bot: crate::test_support::bot("A"),
+            prompt: String::new(),
+            system_context: String::new(),
+            cwd: "/tmp".into(),
+            resume_session_id: None,
+            approve_all: false,
+            turn_timeout_secs: 30,
+            max_budget_usd: None,
+        };
+        crate::terminal::record_run(&f.state, &request);
+        assert_eq!(f.state.read().unwrap().terminals.len(), 1);
+        delete_chat_thread(&f.state, &chat.id).unwrap();
+        assert!(f.state.read().unwrap().terminals.is_empty());
     }
 
     #[test]

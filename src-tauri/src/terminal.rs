@@ -2,13 +2,14 @@
 use crate::drivers::{resolve_driver_binary, DriverTurnRequest};
 use crate::execution;
 use crate::scanner::{augmented_path_env, CliDriverKind};
-use crate::state::{now_ms, OmniStreamEvent, SharedOmniState};
+use crate::state::{now_ms, OmniRuntimeState, OmniStreamEvent, SharedOmniState};
 use axum::{
     extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -17,15 +18,30 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc, Arc, Mutex, MutexGuard, PoisonError, RwLockReadGuard, RwLockWriteGuard,
     },
     task::{Context, Poll},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::io::{AsyncRead, ReadBuf};
 
 const OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const SESSION_LIMIT: usize = 32;
+const CHUNK_LIMIT: usize = 64 * 1024;
+/// How long to keep draining output after the process exits before giving up on a
+/// detached grandchild that still holds the PTY open.
+const DRAIN_AFTER_EXIT: Duration = Duration::from_millis(250);
+
+// Session data stays usable even if a panicking thread poisoned a lock.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+fn read(state: &SharedOmniState) -> RwLockReadGuard<'_, OmniRuntimeState> {
+    state.read().unwrap_or_else(PoisonError::into_inner)
+}
+fn write(state: &SharedOmniState) -> RwLockWriteGuard<'_, OmniRuntimeState> {
+    state.write().unwrap_or_else(PoisonError::into_inner)
+}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,7 +88,7 @@ impl TerminalSession {
     }
 
     pub fn append(&self, bytes: &[u8]) {
-        let mut output = self.output.lock().unwrap();
+        let mut output = lock(&self.output);
         output.end += bytes.len() as u64;
         if bytes.len() >= OUTPUT_LIMIT {
             output.bytes.clear();
@@ -85,7 +101,7 @@ impl TerminalSession {
     }
 
     pub fn finish(&self, status: &str, code: Option<u32>, error: Option<String>) {
-        let mut info = self.info.lock().unwrap();
+        let mut info = lock(&self.info);
         info.status = status.into();
         info.exit_code = code;
         info.error = error.or_else(|| {
@@ -94,13 +110,15 @@ impl TerminalSession {
                     .unwrap_or_else(|| "Process failed.".into())
             })
         });
-        self.commands.lock().unwrap().take();
+        lock(&self.commands).take();
+    }
+
+    fn is_active(&self) -> bool {
+        matches!(lock(&self.info).status.as_str(), "queued" | "running")
     }
 
     fn send(&self, input: Input) -> Result<(), String> {
-        self.commands
-            .lock()
-            .unwrap()
+        lock(&self.commands)
             .as_ref()
             .ok_or("This terminal is not accepting input.")?
             .try_send(input)
@@ -108,23 +126,43 @@ impl TerminalSession {
     }
 }
 
-fn register(state: &SharedOmniState, session: Arc<TerminalSession>) {
-    let id = session.info.lock().unwrap().id.clone();
-    let mut guard = state.write().unwrap();
+fn register(guard: &mut OmniRuntimeState, session: Arc<TerminalSession>) -> Result<(), String> {
     while guard.terminals.len() >= SESSION_LIMIT {
         let oldest = guard
             .terminals
             .iter()
-            .filter_map(|(id, session)| {
-                let info = session.info.lock().unwrap();
-                (!matches!(info.status.as_str(), "queued" | "running"))
-                    .then_some((id.clone(), info.started_at_ms))
-            })
-            .min_by_key(|(_, started)| *started);
-        let Some((oldest, _)) = oldest else { break };
+            .filter(|(_, session)| !session.is_active())
+            .min_by_key(|(_, session)| lock(&session.info).started_at_ms)
+            .map(|(id, _)| id.clone());
+        let Some(oldest) = oldest else {
+            return Err(format!(
+                "{SESSION_LIMIT} terminals are already running. Stop one before starting another."
+            ));
+        };
         guard.terminals.remove(&oldest);
     }
+    let id = lock(&session.info).id.clone();
     guard.terminals.insert(id, session);
+    Ok(())
+}
+
+pub fn has_active_session(guard: &OmniRuntimeState, chat_id: &str) -> bool {
+    guard
+        .terminals
+        .values()
+        .any(|session| session.is_active() && lock(&session.info).chat_id == chat_id)
+}
+
+/// Stops and forgets every terminal that belongs to a deleted chat.
+pub fn remove_chat_sessions(guard: &mut OmniRuntimeState, chat_id: &str) {
+    // Called from chat deletion, which already requires the chat to be idle.
+    guard.terminals.retain(|_, session| {
+        if lock(&session.info).chat_id != chat_id {
+            return true;
+        }
+        session.stop.store(true, Ordering::Relaxed);
+        false
+    });
 }
 
 pub fn record_run(state: &SharedOmniState, req: &DriverTurnRequest) -> Arc<TerminalSession> {
@@ -141,7 +179,13 @@ pub fn record_run(state: &SharedOmniState, req: &DriverTurnRequest) -> Arc<Termi
         error: None,
         resumed: req.resume_session_id.is_some(),
     });
-    register(state, session.clone());
+    // At capacity the run still records output; it just isn't listed in the panel.
+    if let Err(error) = register(&mut write(state), session.clone()) {
+        eprintln!(
+            "Terminal output for {} is not listed: {error}",
+            req.message_id
+        );
+    }
     session
 }
 
@@ -193,7 +237,8 @@ pub struct ChatQuery {
 #[derive(Deserialize)]
 pub struct WriteInput {
     pub id: String,
-    pub data: Vec<u8>,
+    /// Standard base64 with padding.
+    pub data: String,
 }
 #[derive(Deserialize)]
 pub struct ResizeInput {
@@ -233,7 +278,7 @@ struct InteractiveOwner {
 }
 impl Drop for InteractiveOwner {
     fn drop(&mut self) {
-        let mut guard = self.state.write().unwrap();
+        let mut guard = write(&self.state);
         if let Some(chat) = guard.store.chats.iter_mut().find(|c| c.id == self.chat_id) {
             // Terminal conversations are not parsed as chat messages. A new automated
             // turn must rebuild context instead of silently trusting an unseen transcript.
@@ -243,7 +288,7 @@ impl Drop for InteractiveOwner {
         }
         guard.active_workflows.remove(&self.chat_id);
         guard.cancelled_chats.remove(&self.chat_id);
-        let mut info = self.session.info.lock().unwrap();
+        let mut info = lock(&self.session.info);
         if matches!(info.status.as_str(), "queued" | "running") {
             info.status = "error".into();
             info.error = Some("The terminal ended unexpectedly.".into());
@@ -273,7 +318,7 @@ impl Drop for InteractiveOwner {
 pub fn start(state: SharedOmniState, input: StartInput) -> Result<TerminalInfo, String> {
     dimensions(input.cols, input.rows)?;
     let terminal_id = format!("terminal-{}", uuid::Uuid::new_v4());
-    let (bot, resume, instructions, old_cwd) = {
+    let (bot, resume, instructions, old_cwd, info, session) = {
         let mut guard = state.write().map_err(|_| "State lock poisoned")?;
         if guard.active_workflows.contains(&input.chat_id) {
             return Err("Stop this chat and wait for its workflow to finish before taking terminal control.".into());
@@ -357,13 +402,28 @@ pub fn start(state: SharedOmniState, input: StartInput) -> Result<TerminalInfo, 
                 message.text.chars().take(2000).collect::<String>()
             ));
         }
+        let info = TerminalInfo {
+            id: terminal_id.clone(),
+            chat_id: input.chat_id.clone(),
+            bot_id: bot.id.clone(),
+            bot_name: bot.name.clone(),
+            mode: "interactive",
+            status: "queued".into(),
+            cwd: String::new(),
+            started_at_ms: now_ms(),
+            exit_code: None,
+            error: None,
+            resumed: false,
+        };
+        let session = TerminalSession::new(info.clone());
+        register(&mut guard, session.clone())?;
         let previous = guard.store.clone();
         let chat = guard
             .store
             .chats
             .iter_mut()
             .find(|chat| chat.id == input.chat_id)
-            .unwrap();
+            .ok_or("Chat not found")?;
         chat.tasks.push(crate::state::WorkflowTask {
             id: terminal_id.clone(),
             workflow_id: terminal_id.clone(),
@@ -375,29 +435,17 @@ pub fn start(state: SharedOmniState, input: StartInput) -> Result<TerminalInfo, 
             reason: Some("Automatic handoffs are paused during terminal control.".into()),
             workspace_path: None,
         });
-        guard.persist_or_restore(previous)?;
+        if let Err(error) = guard.persist_or_restore(previous) {
+            guard.terminals.remove(&terminal_id);
+            return Err(error);
+        }
         guard.cancelled_chats.remove(&input.chat_id);
         guard.active_workflows.insert(input.chat_id.clone());
         guard.emit(OmniStreamEvent::StateUpdated {
             chat_id: Some(input.chat_id.clone()),
         });
-        (bot, resume, instructions, old_cwd)
+        (bot, resume, instructions, old_cwd, info, session)
     };
-    let info = TerminalInfo {
-        id: terminal_id.clone(),
-        chat_id: input.chat_id.clone(),
-        bot_id: bot.id.clone(),
-        bot_name: bot.name.clone(),
-        mode: "interactive",
-        status: "queued".into(),
-        cwd: String::new(),
-        started_at_ms: now_ms(),
-        exit_code: None,
-        error: None,
-        resumed: false,
-    };
-    let session = TerminalSession::new(info.clone());
-    register(&state, session.clone());
     let owner = InteractiveOwner {
         state: state.clone(),
         session: session.clone(),
@@ -407,10 +455,8 @@ pub fn start(state: SharedOmniState, input: StartInput) -> Result<TerminalInfo, 
     tokio::spawn(async move {
         let result: Result<(), String> = async {
             let cwd = execution::workspace(&state, &input.chat_id, &input.bot_id).await?;
-            session.info.lock().unwrap().cwd = cwd.clone();
-            if let Some(task) = state
-                .write()
-                .unwrap()
+            lock(&session.info).cwd = cwd.clone();
+            if let Some(task) = write(&state)
                 .store
                 .chats
                 .iter_mut()
@@ -432,6 +478,10 @@ pub fn start(state: SharedOmniState, input: StartInput) -> Result<TerminalInfo, 
             command.env("PATH", augmented_path_env());
             command.env("TERM", "xterm-256color");
             command.env("COLORTERM", "truecolor");
+            // Finder-launched apps have no locale, which makes CLIs print non-ASCII as `?`.
+            if std::env::var_os("LANG").is_none() {
+                command.env("LANG", "en_US.UTF-8");
+            }
             command.env_remove("NO_COLOR");
             command.env_remove("CLAUDECODE");
             command.env_remove("CLAUDE_CODE_ENTRYPOINT");
@@ -439,7 +489,7 @@ pub fn start(state: SharedOmniState, input: StartInput) -> Result<TerminalInfo, 
                 if old_cwd.as_deref() == Some(&cwd) {
                     if let Some(resume) = resume {
                         command.args(["--resume", &resume]);
-                        session.info.lock().unwrap().resumed = true;
+                        lock(&session.info).resumed = true;
                     }
                 }
                 command.args(["--append-system-prompt", &instructions]);
@@ -480,12 +530,7 @@ pub fn start(state: SharedOmniState, input: StartInput) -> Result<TerminalInfo, 
         .await;
         if let Err(error) = result {
             let status = if session.stop.load(Ordering::Relaxed)
-                || owner
-                    .state
-                    .read()
-                    .unwrap()
-                    .cancelled_chats
-                    .contains(&owner.chat_id)
+                || read(&owner.state).cancelled_chats.contains(&owner.chat_id)
             {
                 "stopped"
             } else {
@@ -560,11 +605,11 @@ fn run_pty(
         reader_done: reader_done.clone(),
     };
     let (sender, receiver) = mpsc::sync_channel(64);
-    *session.commands.lock().unwrap() = Some(sender);
-    session.info.lock().unwrap().status = "running".into();
+    *lock(&session.commands) = Some(sender);
+    lock(&session.info).status = "running".into();
     {
-        let info = session.info.lock().unwrap().clone();
-        let mut guard = state.write().unwrap();
+        let info = lock(&session.info).clone();
+        let mut guard = write(&state);
         if let Some(task) = guard
             .store
             .chats
@@ -583,7 +628,15 @@ fn run_pty(
     let output_session = session.clone();
     let reader_thread = std::thread::spawn(move || {
         let mut bytes = [0; 8192];
+        let mut drain_until = None;
         loop {
+            // A detached grandchild can keep the PTY open and busy after the child exits.
+            if reader_finished.load(Ordering::Relaxed)
+                && Instant::now()
+                    >= *drain_until.get_or_insert_with(|| Instant::now() + DRAIN_AFTER_EXIT)
+            {
+                break;
+            }
             match reader.read(&mut bytes) {
                 Ok(0) => break,
                 Ok(count) => output_session.append(&bytes[..count]),
@@ -604,11 +657,11 @@ fn run_pty(
             }
         }
     });
-    let chat_id = session.info.lock().unwrap().chat_id.clone();
+    let chat_id = lock(&session.info).chat_id.clone();
     let mut pending = VecDeque::<u8>::new();
     let result = loop {
-        let cancelled = session.stop.load(Ordering::Relaxed)
-            || state.read().unwrap().cancelled_chats.contains(&chat_id);
+        let cancelled =
+            session.stop.load(Ordering::Relaxed) || read(&state).cancelled_chats.contains(&chat_id);
         if cancelled {
             break Ok(("stopped", None));
         }
@@ -663,19 +716,19 @@ fn run_pty(
 }
 
 pub fn shutdown(state: &SharedOmniState) {
-    let sessions: Vec<_> = state.read().unwrap().terminals.values().cloned().collect();
+    let sessions: Vec<_> = read(state).terminals.values().cloned().collect();
     for session in &sessions {
-        let info = session.info.lock().unwrap().clone();
+        let info = lock(&session.info).clone();
         if info.mode == "interactive" {
             let _ = stop(state, &info.id);
         }
     }
     // Let workers reap their process groups before the runtime exits.
     for _ in 0..50 {
-        if sessions.iter().all(|s| {
-            let info = s.info.lock().unwrap();
-            info.mode != "interactive" || !matches!(info.status.as_str(), "running" | "queued")
-        }) {
+        if sessions
+            .iter()
+            .all(|s| lock(&s.info).mode != "interactive" || !s.is_active())
+        {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -693,12 +746,12 @@ pub async fn http_list(
     State(state): State<SharedOmniState>,
     Query(query): Query<ChatQuery>,
 ) -> Response {
-    let guard = state.read().unwrap();
+    let guard = read(&state);
     let mut sessions: Vec<_> = guard
         .terminals
         .values()
         .filter_map(|s| {
-            let info = s.info.lock().unwrap();
+            let info = lock(&s.info);
             (info.chat_id == query.chat_id).then(|| info.clone())
         })
         .collect();
@@ -711,27 +764,51 @@ pub async fn http_start(
 ) -> Response {
     response(start(state, input))
 }
+
+#[derive(Serialize)]
+pub struct OutputChunk {
+    /// Standard base64 with padding.
+    data: String,
+    offset: u64,
+    truncated: bool,
+    status: String,
+}
+
+fn read_output(session: &TerminalSession, requested: u64) -> OutputChunk {
+    let output = lock(&session.output);
+    let start = output.end - output.bytes.len() as u64;
+    let offset = requested.clamp(start, output.end);
+    let skip = (offset - start) as usize;
+    let take = (output.bytes.len() - skip).min(CHUNK_LIMIT);
+    let bytes: Vec<u8> = output.bytes.range(skip..skip + take).copied().collect();
+    drop(output);
+    OutputChunk {
+        data: BASE64.encode(&bytes),
+        offset: offset + bytes.len() as u64,
+        truncated: requested < start,
+        status: lock(&session.info).status.clone(),
+    }
+}
+
 pub async fn http_output(
     State(state): State<SharedOmniState>,
     Query(query): Query<SessionQuery>,
 ) -> Response {
-    response(session(&state, &query.id).map(|session| {
-        let output = session.output.lock().unwrap();
-        let start = output.end - output.bytes.len() as u64;
-        let offset = query.offset.clamp(start, output.end);
-        let bytes: Vec<_> = output.bytes.iter().skip((offset - start) as usize).take(65536).copied().collect();
-        serde_json::json!({ "data": bytes, "offset": offset + bytes.len() as u64, "truncated": query.offset < start, "status": session.info.lock().unwrap().status })
-    }))
+    response(session(&state, &query.id).map(|session| read_output(&session, query.offset)))
 }
 pub async fn http_write(
     State(state): State<SharedOmniState>,
     Json(input): Json<WriteInput>,
 ) -> Response {
     response((|| {
-        if input.data.len() > 65536 {
+        // Base64 is 4/3 the decoded size; reject oversized input before decoding it.
+        if input.data.len() > CHUNK_LIMIT.div_ceil(3) * 4 {
             return Err("Paste at most 64 KiB at a time.".into());
         }
-        session(&state, &input.id)?.send(Input::Write(input.data))
+        let data = BASE64
+            .decode(input.data.as_bytes())
+            .map_err(|_| "Terminal input must be base64 encoded.")?;
+        session(&state, &input.id)?.send(Input::Write(data))
     })())
 }
 pub async fn http_resize(
@@ -757,7 +834,7 @@ pub fn stop(state: &SharedOmniState, id: &str) -> Result<(), String> {
         .get(id)
         .cloned()
         .ok_or("Terminal is no longer available.")?;
-    let info = session.info.lock().unwrap();
+    let info = lock(&session.info);
     if info.mode != "interactive" {
         return Err("Use Stop response to stop an automated workflow.".into());
     }
@@ -998,5 +1075,96 @@ mod tests {
                 .collect::<Vec<_>>(),
             b"liat"
         );
+    }
+
+    fn fixture_session(
+        id: &str,
+        chat_id: &str,
+        status: &str,
+        started_at_ms: u64,
+    ) -> Arc<TerminalSession> {
+        TerminalSession::new(TerminalInfo {
+            id: id.into(),
+            chat_id: chat_id.into(),
+            bot_id: "A".into(),
+            bot_name: "A".into(),
+            mode: "output",
+            status: status.into(),
+            cwd: "/tmp".into(),
+            started_at_ms,
+            exit_code: None,
+            error: None,
+            resumed: false,
+        })
+    }
+
+    #[test]
+    fn output_chunks_are_base64_and_resume_from_offsets() {
+        let session = fixture_session("t", "room", "running", 0);
+        session.append("héllo".as_bytes());
+        let chunk = read_output(&session, 0);
+        assert_eq!(BASE64.decode(&chunk.data).unwrap(), "héllo".as_bytes());
+        assert_eq!(chunk.offset, 6);
+        assert!(!chunk.truncated);
+        session.append(b"!");
+        let next = read_output(&session, chunk.offset);
+        assert_eq!(BASE64.decode(&next.data).unwrap(), b"!");
+        assert_eq!(read_output(&session, 99).data, "");
+        session.append(&vec![b'x'; OUTPUT_LIMIT]);
+        let late = read_output(&session, 0);
+        assert!(late.truncated);
+        assert_eq!(BASE64.decode(&late.data).unwrap().len(), CHUNK_LIMIT);
+    }
+
+    #[test]
+    fn session_limit_evicts_finished_sessions_and_refuses_when_all_are_active() {
+        let f = Fixture::new(&["A"]);
+        let mut guard = f.state.write().unwrap();
+        for index in 0..SESSION_LIMIT {
+            let status = if index == 3 { "exited" } else { "running" };
+            register(
+                &mut guard,
+                fixture_session(&format!("t{index}"), "room", status, index as u64),
+            )
+            .unwrap();
+        }
+        register(&mut guard, fixture_session("new", "room", "running", 100)).unwrap();
+        assert_eq!(guard.terminals.len(), SESSION_LIMIT);
+        assert!(!guard.terminals.contains_key("t3"));
+        let error =
+            register(&mut guard, fixture_session("extra", "room", "running", 101)).unwrap_err();
+        assert!(error.contains("Stop one"), "{error}");
+        assert_eq!(guard.terminals.len(), SESSION_LIMIT);
+    }
+
+    #[test]
+    fn deleting_a_chat_forgets_only_its_terminals() {
+        let f = Fixture::new(&["A"]);
+        let mut guard = f.state.write().unwrap();
+        let mine = fixture_session("mine", "room", "running", 0);
+        register(&mut guard, mine.clone()).unwrap();
+        register(
+            &mut guard,
+            fixture_session("other", "elsewhere", "exited", 0),
+        )
+        .unwrap();
+        remove_chat_sessions(&mut guard, "room");
+        assert!(mine.stop.load(Ordering::Relaxed));
+        assert_eq!(guard.terminals.keys().collect::<Vec<_>>(), ["other"]);
+    }
+
+    #[tokio::test]
+    async fn detached_grandchild_holding_the_pty_does_not_hang_exit() {
+        let f = Fixture::new(&["A"]);
+        f.script(
+            "A",
+            "perl -MPOSIX -e 'POSIX::setsid(); exec \"yes\"' & sleep 0.3; printf DONE; exit 0",
+        );
+        let info = start(f.state.clone(), request()).unwrap();
+        let terminal = session(&f.state, &info.id).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), f.wait())
+            .await
+            .expect("terminal exit hung on a detached grandchild");
+        assert_eq!(terminal.info.lock().unwrap().status, "exited");
     }
 }
