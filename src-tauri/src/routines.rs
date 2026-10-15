@@ -55,8 +55,8 @@ pub fn validate(state: &OmniRuntimeState, routine: &RoutineEntry) -> Result<(), 
     }
     if routine
         .model
-        .as_ref()
-        .is_some_and(|m| m.len() > 256 || m.chars().any(char::is_control))
+        .as_deref()
+        .is_some_and(|m| !crate::lifecycle::valid_model_id(m))
     {
         return Err("Use a valid CLI model ID.".into());
     }
@@ -236,6 +236,9 @@ mod tests {
     fn invalid_routines_do_not_persist() {
         let f = Fixture::new(&["A"]);
         let mut r = routine();
+        r.model = Some("-p".into());
+        assert!(crate::server::upsert_routine_entry(&f.state, r.clone()).is_err());
+        r.model = None;
         r.bot_id = "missing".into();
         assert!(crate::server::upsert_routine_entry(&f.state, r).is_err());
         assert!(f.state.read().unwrap().store.routines.is_empty());

@@ -22,6 +22,13 @@ pub fn unique_name(store: &PersistedStore, base: &str) -> String {
     name
 }
 
+/// A leading "-" would be parsed as a CLI flag rather than a model name.
+pub fn valid_model_id(model: &str) -> bool {
+    model.len() <= 256
+        && !model.chars().any(char::is_control)
+        && !model.trim_start().starts_with('-')
+}
+
 pub fn validate_profile(store: &PersistedStore, bot: &mut BotProfile) -> Result<(), String> {
     bot.name = bot.name.trim().into();
     if bot.name.is_empty()
@@ -57,11 +64,7 @@ pub fn validate_profile(store: &PersistedStore, bot: &mut BotProfile) -> Result<
         suffix += 1;
     }
     bot.slug = slug;
-    if bot
-        .model
-        .as_ref()
-        .is_some_and(|m| m.len() > 256 || m.chars().any(char::is_control))
-    {
+    if bot.model.as_deref().is_some_and(|m| !valid_model_id(m)) {
         return Err("Use a valid CLI model ID.".into());
     }
     if !matches!(
@@ -233,6 +236,17 @@ mod tests {
         f.state.write().unwrap().store.bots.push(bot);
         let mut collision = crate::test_support::bot("a-2");
         assert!(validate_profile(&f.state.read().unwrap().store, &mut collision).is_err());
+    }
+
+    #[test]
+    fn model_ids_that_look_like_cli_flags_are_rejected() {
+        let f = Fixture::new(&[]);
+        let store = &f.state.read().unwrap().store;
+        let mut bot = crate::test_support::bot("A");
+        bot.model = Some("--yolo".into());
+        assert!(validate_profile(store, &mut bot).is_err());
+        bot.model = Some("claude-sonnet-4-5".into());
+        assert!(validate_profile(store, &mut bot).is_ok());
     }
 
     #[test]
