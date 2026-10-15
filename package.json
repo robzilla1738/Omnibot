@@ -1,11 +1,12 @@
 {
   "name": "omnibot",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Omnibot — Local AI bots, projects, and group chats powered by your coding CLIs",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:connect": "python3 scripts/dev-browser.py",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",

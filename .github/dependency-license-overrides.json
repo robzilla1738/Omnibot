@@ -1,0 +1,265 @@
+{
+  "standardLicenses": {
+    "MIT": {
+      "path": "MIT.txt",
+      "url": "https://raw.githubusercontent.com/spdx/license-list-data/279b7e997a87c09be00dd6bdda189519ade502cf/text/MIT.txt",
+      "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5"
+    },
+    "MPL-2.0": {
+      "path": "MPL-2.0.txt",
+      "url": "https://raw.githubusercontent.com/spdx/license-list-data/f91a5bae39a51863221095e9e293b9fde095cf63/text/MPL-2.0.txt",
+      "sha256": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172"
+    }
+  },
+  "cargo": {
+    "alloc-stdlib@0.3.0": {
+      "repository": "dropbox/rust-alloc-no-stdlib",
+      "commit": "0a81fd6928ea3b33c8cd484aa4575d50ffb98012",
+      "declaredLicense": "BSD-3-Clause",
+      "files": [
+        {
+          "path": "LICENSE",
+          "url": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/0a81fd6928ea3b33c8cd484aa4575d50ffb98012/LICENSE",
+          "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
+        }
+      ],
+      "reason": "Published crate omits the workspace-root license files; preserve exact upstream files at its recorded source commit."
+    },
+    "block2@0.6.2": {
+      "repository": "madsmtm/objc2",
+      "commit": "b4167b582b2f75f9a1be75495c41b765344fd03c",
+      "declaredLicense": "MIT",
+      "files": [
+        {
+          "path": "LICENSE.md",
+          "url": "https://raw.githubusercontent.com/madsmtm/objc2/b4167b582b2f75f9a1be75495c41b765344fd03c/LICENSE.md",
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+        }
+      ],
+      "reason": "Published crate omits the workspace-root license files; preserve exact upstream files at its recorded source commit."
+    },
+    "defmt-parser@1.0.0": {
+      "repository": "knurling-rs/defmt",
+      "commit": "4a8cdb44891ed57b8ff5a023b6bec7137c48708f",
+      "declaredLicense": "MIT OR Apache-2.0",
+      "files": [
+        {
+          "path": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-MIT",
+          "sha256": "2710a622a896bba67356913d4d0492cab5465f61b2ecce6d880aeb483834fb50"
+        },
+        {
+          "path": "LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-APACHE",
+          "sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90"
+        }
+      ],
+      "reason": "Published crate omits the workspace-root license files; preserve exact upstream files at its recorded source commit."
+    },
+    "dispatch@0.2.0": {
+      "repository": "SSheldon/rust-dispatch",
+      "commit": "82d6c7a5b75dc0c71c3f46f87bb6c16a476f7748",
+      "declaredLicense": "MIT",
+      "declarations": [
+        "Cargo.toml.orig"
+      ],
+      "standardLicense": "MIT",
+      "reason": "Exact upstream package and repository contain no separate license file. Preserve published license declarations and standard terms; authors metadata is not a copyright notice."
+    },
+    "dispatch2@0.3.1": {
+      "repository": "madsmtm/objc2",
+      "commit": "8852b424193ca41602281b3d7540d7c8ed51e49a",
+      "declaredLicense": "Zlib OR Apache-2.0 OR MIT",
+      "files": [
+        {
+          "path": "LICENSE.md",
+          "url": "https://raw.githubusercontent.com/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md",
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+        }
+      ],
+      "reason": "Published crate omits the workspace-root license files; preserve exact upstream files at its recorded source commit."
+    },
+    "objc2@0.6.5": {
+      "repository": "madsmtm/objc2",
+      "commit": "d7d2fa23ceaa5e6096c923b081040e5d81b3b9df",
+      "declaredLicense": "MIT",
+      "files": [
+        {
+          "path": "LICENSE.md",
+          "url": "https://raw.githubusercontent.com/madsmtm/objc2/d7d2fa23ceaa5e6096c923b081040e5d81b3b9df/LICENSE.md",
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+        }
+      ],
+      "reason": "Published crate omits the workspace-root license files; preserve exact upstream files at its recorded source commit."
+    },
+    "objc2-app-kit@0.3.2": {
+      "repository": "madsmtm/objc2",
+      "commit": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+      "declaredLicense": "Zlib OR Apache-2.0 OR MIT",
+      "files": [
+        {
+          "path": "LICENSE.md",
+          "url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+        }
+      ],
+      "reason": "Published crate omits the workspace-root license files; preserve exact upstream files at its recorded source commit."
+    },
+    "objc2-core-foundation@0.3.2": {
+      "repository": "madsmtm/objc2",
+      "commit": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+      "declaredLicense": "Zlib OR Apache-2.0 OR MIT",
+      "files": [
+        {
+          "path": "LICENSE.md",
+          "url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+        }
+      ],
+      "reason": "Published crate omits the workspace-root license files; preserve exact upstream files at its recorded source commit."
+    },
+    "objc2-core-graphics@0.3.2": {
+      "repository": "madsmtm/objc2",
+      "commit": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+      "declaredLicense": "Zlib OR Apache-2.0 OR MIT",
+      "files": [
+        {
+          "path": "LICENSE.md",
+          "url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+        }
+      ],
+      "reason": "Published crate omits the workspace-root license files; preserve exact upstream files at its recorded source commit."
+    },
+    "objc2-encode@4.1.0": {
+      "repository": "madsmtm/objc2",
+      "commit": "8d214f5477365ffcbcbb7de058c86ed9a518efb7",
+      "declaredLicense": "MIT",
+      "files": [
+        {
+          "path": "LICENSE.md",
+          "url": "https://raw.githubusercontent.com/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.md",
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+        }
+      ],
+      "reason": "Published crate omits the workspace-root license files; preserve exact upstream files at its recorded source commit."
+    },
+    "objc2-exception-helper@0.1.1": {
+      "repository": "madsmtm/objc2",
+      "commit": "8d214f5477365ffcbcbb7de058c86ed9a518efb7",
+      "declaredLicense": "Zlib OR Apache-2.0 OR MIT",
+      "files": [
+        {
+          "path": "LICENSE.md",
+          "url": "https://raw.githubusercontent.com/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.md",
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+        }
+      ],
+      "reason": "Published crate omits the workspace-root license files; preserve exact upstream files at its recorded source commit."
+    },
+    "objc2-io-surface@0.3.2": {
+      "repository": "madsmtm/objc2",
+      "commit": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+      "declaredLicense": "Zlib OR Apache-2.0 OR MIT",
+      "files": [
+        {
+          "path": "LICENSE.md",
+          "url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+        }
+      ],
+      "reason": "Published crate omits the workspace-root license files; preserve exact upstream files at its recorded source commit."
+    },
+    "objc2-quartz-core@0.3.2": {
+      "repository": "madsmtm/objc2",
+      "commit": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+      "declaredLicense": "Zlib OR Apache-2.0 OR MIT",
+      "files": [
+        {
+          "path": "LICENSE.md",
+          "url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+        }
+      ],
+      "reason": "Published crate omits the workspace-root license files; preserve exact upstream files at its recorded source commit."
+    },
+    "objc2-web-kit@0.3.2": {
+      "repository": "madsmtm/objc2",
+      "commit": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+      "declaredLicense": "Zlib OR Apache-2.0 OR MIT",
+      "files": [
+        {
+          "path": "LICENSE.md",
+          "url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+        }
+      ],
+      "reason": "Published crate omits the workspace-root license files; preserve exact upstream files at its recorded source commit."
+    },
+    "selectors@0.38.0": {
+      "repository": "servo/stylo",
+      "commit": "572ecba2d1600e7c3d490586692a209faf703baa",
+      "declaredLicense": "MPL-2.0",
+      "declarations": [
+        "Cargo.toml.orig",
+        "lib.rs"
+      ],
+      "standardLicense": "MPL-2.0",
+      "reason": "Exact upstream package and repository contain no separate license file. Preserve published license declarations and standard terms; authors metadata is not a copyright notice."
+    },
+    "sparkle-updater@0.1.0": {
+      "repository": "ahonn/tauri-plugin-sparkle-updater",
+      "commit": "7e7bdaf70f4c37e88cbf7772740c7c1981b62178",
+      "declaredLicense": "MIT",
+      "declarations": [
+        "Cargo.toml.orig"
+      ],
+      "standardLicense": "MIT",
+      "reason": "Exact upstream package and repository contain no separate license file. Preserve published license declarations and standard terms; authors metadata is not a copyright notice."
+    },
+    "tauri-plugin@2.7.2": {
+      "repository": "tauri-apps/tauri",
+      "commit": "59b63ab500da9859f12d8888c3298bc29bba0b92",
+      "declaredLicense": "Apache-2.0 OR MIT",
+      "files": [
+        {
+          "path": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/tauri-apps/tauri/59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE-MIT",
+          "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
+        },
+        {
+          "path": "LICENSE-APACHE-2.0",
+          "url": "https://raw.githubusercontent.com/tauri-apps/tauri/59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE-APACHE-2.0",
+          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+        }
+      ],
+      "reason": "Published crate omits the workspace-root license files; preserve exact upstream files at its recorded source commit."
+    },
+    "tauri-plugin-sparkle-updater@0.3.0": {
+      "repository": "ahonn/tauri-plugin-sparkle-updater",
+      "commit": "10da453ea35e53b81549968dd1dbe18f04c2d142",
+      "declaredLicense": "MIT",
+      "declarations": [
+        "Cargo.toml.orig"
+      ],
+      "standardLicense": "MIT",
+      "reason": "Exact upstream package and repository contain no separate license file. Preserve published license declarations and standard terms; authors metadata is not a copyright notice."
+    }
+  },
+  "npm": {
+    "@xterm/addon-serialize@0.14.0": {
+      "repository": "xtermjs/xterm.js",
+      "commit": "f447274f430fd22513f6adbf9862d19524471c04",
+      "declaredLicense": "MIT",
+      "registryMetadata": "https://registry.npmjs.org/@xterm%2faddon-serialize/0.14.0",
+      "reason": "Published npm package omits its workspace-root license. The registry version metadata identifies this source commit.",
+      "files": [
+        {
+          "path": "LICENSE",
+          "url": "https://raw.githubusercontent.com/xtermjs/xterm.js/f447274f430fd22513f6adbf9862d19524471c04/LICENSE",
+          "sha256": "b569f629d00f2626a8100df2a1798210535621e42164dfd426a6fe5aac7b0ccd"
+        }
+      ]
+    }
+  }
+}

@@ -217,6 +217,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_profile_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OmniPreferences {
@@ -254,6 +258,10 @@ pub struct OmniPreferences {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedStore {
+    #[serde(default = "default_profile_id")]
+    pub profile_id: String,
+    #[serde(default)]
+    pub schema_version: u32,
     #[serde(default)]
     pub home_layout_version: u32,
     pub preferences: OmniPreferences,
@@ -268,6 +276,7 @@ pub struct PersistedStore {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OmniSnapshot {
+    pub profile_id: String,
     pub instance_id: String,
     pub revision: u64,
     pub storage_error: Option<String>,
@@ -395,6 +404,7 @@ pub fn omni_data_dir() -> PathBuf {
 
 const STORE_FILE: &str = "store.json";
 const BACKUP_FILE: &str = "store.json.bak";
+const CURRENT_SCHEMA_VERSION: u32 = 1;
 /// Fresh stores already have the layout every `homes`/`lifecycle` migration produces.
 const CURRENT_HOME_LAYOUT_VERSION: u32 = 4;
 
@@ -484,8 +494,8 @@ impl OmniRuntimeState {
     ) -> Result<Self, String> {
         let data_dir = omni_data_dir();
         let store_lock = open_data_dir(&data_dir)?;
-        remove_stale_temp_files(&data_dir);
         let loaded = load_store_at(&data_dir)?;
+        remove_stale_temp_files(&data_dir);
         // Setup needs the CLI list immediately; everyone else gets it from the
         // background scan in `finish_startup_scan` so the window opens sooner.
         let scan_now = loaded
@@ -504,26 +514,7 @@ impl OmniRuntimeState {
             Some(loaded) => loaded,
             None => (initialize_store(&harnesses), None),
         };
-        migrate_application_identity(&mut store);
-        normalize_preferences(&mut store);
-        remove_legacy_welcome(&mut store);
-        crate::homes::migrate(&mut store);
-        crate::lifecycle::migrate(&mut store);
-        for chat in &mut store.chats {
-            if chat.id == "chat-swarm-core" && chat.title == "Core Coding Swarm" {
-                chat.title = "Core Coding Group".into();
-            }
-            for message in &mut chat.messages {
-                if message.status == "streaming" {
-                    message.status = "stopped".into();
-                    for tool in &mut message.tool_calls {
-                        if tool.status == "running" {
-                            tool.status = "stopped".into();
-                        }
-                    }
-                }
-            }
-        }
+        migrate_store_at(&mut store, &data_dir)?;
         save_store_at(&store, &data_dir).map_err(|error| {
             format!(
                 "Omnibot couldn't save its data in {}: {error}",
@@ -602,6 +593,7 @@ impl OmniRuntimeState {
         active_runs.sort_by_key(|r| r.started_at_ms);
 
         OmniSnapshot {
+            profile_id: self.store.profile_id.clone(),
             instance_id: self.instance_id.clone(),
             revision: self.revision.load(std::sync::atomic::Ordering::SeqCst),
             storage_error: self.storage_error.clone(),
@@ -623,27 +615,51 @@ impl OmniRuntimeState {
     }
 }
 
-// Change only application-identifying phrases in saved instructions, never bot names or history.
+fn migrate_store_at(store: &mut PersistedStore, data_dir: &Path) -> Result<(), String> {
+    if store.schema_version < CURRENT_SCHEMA_VERSION
+        || store.home_layout_version < CURRENT_HOME_LAYOUT_VERSION
+    {
+        let original = fs::read(data_dir.join(STORE_FILE))
+            .map_err(|error| format!("Couldn't read data before migration: {error}"))?;
+        let backup = data_dir.join(format!(
+            "store.pre-migration-schema-{}-home-{}-{}.json",
+            store.schema_version,
+            store.home_layout_version,
+            uuid::Uuid::new_v4()
+        ));
+        write_atomic(&backup, &original)
+            .map_err(|error| format!("Couldn't preserve data before migration: {error}"))?;
+    }
+    store.schema_version = CURRENT_SCHEMA_VERSION;
+    migrate_application_identity(store);
+    normalize_preferences(store);
+    remove_legacy_welcome(store);
+    crate::homes::migrate(store);
+    crate::lifecycle::migrate(store);
+    for chat in &mut store.chats {
+        if chat.id == "chat-swarm-core" && chat.title == "Core Coding Swarm" {
+            chat.title = "Core Coding Group".into();
+        }
+        for message in &mut chat.messages {
+            if message.status == "streaming" {
+                message.status = "stopped".into();
+                for tool in &mut message.tool_calls {
+                    if tool.status == "running" {
+                        tool.status = "stopped".into();
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// Bundled artwork has a known identity; saved prompts may contain user edits.
 fn migrate_application_identity(store: &mut PersistedStore) {
-    let mut changed = HashSet::new();
     for bot in &mut store.bots {
         if bot.avatar_image.as_deref() == Some("/botfinity-gauntlet.png") {
             bot.avatar_image = Some("/omnibot-gauntlet.png".into());
         }
-        let prompt = bot
-            .system_prompt
-            .replace("CLI inside Botfinity.", "CLI inside Omnibot.")
-            .replace("CLI inside Omni Bot.", "CLI inside Omnibot.")
-            .replace("Bot in Omni Bot on macOS.", "Bot in Omnibot on macOS.");
-        if prompt != bot.system_prompt {
-            bot.system_prompt = prompt;
-            changed.insert(bot.id.clone());
-        }
-    }
-    for chat in &mut store.chats {
-        chat.native_sessions.retain(|id, _| !changed.contains(id));
-        chat.last_synced_msg_index
-            .retain(|id, _| !changed.contains(id));
     }
 }
 
@@ -669,13 +685,37 @@ pub fn remove_legacy_welcome(store: &mut PersistedStore) {
     }
 }
 
-/// Returns `None` for a first launch. A damaged store is replaced by the last-good backup
-/// (keeping the damaged copy beside it); without a valid backup the file is left untouched.
+// Check before typed deserialization: a newer schema may also have incompatible fields.
+fn check_store_version(raw: &[u8]) -> Result<(), String> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(raw) else {
+        return Ok(());
+    };
+    for (field, supported) in [
+        ("schemaVersion", CURRENT_SCHEMA_VERSION),
+        ("homeLayoutVersion", CURRENT_HOME_LAYOUT_VERSION),
+    ] {
+        let Some(version) = value.get(field) else {
+            continue;
+        };
+        let version = version
+            .as_u64()
+            .ok_or_else(|| format!("Saved data has an invalid {field}; it was left unchanged."))?;
+        if version > u64::from(supported) {
+            return Err(format!(
+                "Saved data uses a newer {field} ({version}; this app supports {supported}). Open it with a newer Omnibot. The data was left unchanged."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Only an absent primary and absent backup mean first launch. Recovery preserves both
+/// the last-good backup and damaged bytes until a durable replacement is in place.
 fn load_store_at(dir: &Path) -> Result<Option<(PersistedStore, Option<String>)>, String> {
     let path = dir.join(STORE_FILE);
     let raw = match fs::read(&path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Ok(raw) => Some(raw),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
             return Err(format!(
                 "Omnibot couldn't read its saved data at {}: {e}",
@@ -683,34 +723,42 @@ fn load_store_at(dir: &Path) -> Result<Option<(PersistedStore, Option<String>)>,
             ))
         }
     };
-    let parse_error = match serde_json::from_slice(&raw) {
-        Ok(store) => return Ok(Some((store, None))),
-        Err(error) => error,
+    let problem = if let Some(raw) = &raw {
+        check_store_version(raw)?;
+        match serde_json::from_slice(raw) {
+            Ok(store) => return Ok(Some((store, None))),
+            Err(error) => format!("damaged ({error})"),
+        }
+    } else {
+        "missing".into()
     };
     let backup_path = dir.join(BACKUP_FILE);
-    let backup = fs::read(&backup_path)
-        .ok()
-        .and_then(|raw| serde_json::from_slice::<PersistedStore>(&raw).ok());
-    let Some(backup) = backup else {
-        return Err(format!(
-            "Omnibot's saved data at {} is damaged and couldn't be read ({parse_error}). No usable backup was found, so the file was left unchanged. Move or repair it, then open Omnibot again.",
-            path.display()
-        ));
-    };
-    let corrupt_path = dir.join(format!("store.corrupt-{}.json", now_ms()));
-    fs::rename(&path, &corrupt_path).map_err(|e| {
-        format!(
-            "Omnibot's saved data at {} is damaged, and setting it aside failed: {e}",
-            path.display()
-        )
-    })?;
-    Ok(Some((
-        backup,
-        Some(format!(
-            "your saved data was damaged, so Omnibot restored the last good backup. The most recent change may be missing. The damaged file was kept at {}",
-            corrupt_path.display()
+    let backup_raw = match fs::read(&backup_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && raw.is_none() => {
+            return Ok(None);
+        }
+        Err(error) => return Err(format!(
+            "Omnibot's saved data at {} is {problem}. Couldn't read its backup: {error}. Existing data was left unchanged.", path.display()
         )),
-    )))
+    };
+    check_store_version(&backup_raw)?;
+    let backup = serde_json::from_slice::<PersistedStore>(&backup_raw).map_err(|error| {
+        format!("Omnibot's saved data at {} is {problem}, and its backup is unusable ({error}). Existing data was left unchanged.", path.display())
+    })?;
+    let mut notice = format!("your saved data was {problem}, so Omnibot restored the last good backup. The most recent change may be missing.");
+    if let Some(raw) = raw {
+        let corrupt_path = dir.join(format!("store.corrupt-{}.json", uuid::Uuid::new_v4()));
+        write_atomic(&corrupt_path, &raw)
+            .map_err(|error| format!("Couldn't preserve damaged saved data: {error}"))?;
+        notice.push_str(&format!(
+            " The damaged file was kept at {}",
+            corrupt_path.display()
+        ));
+    }
+    write_atomic(&path, &backup_raw)
+        .map_err(|error| format!("Couldn't restore the saved data backup: {error}"))?;
+    Ok(Some((backup, Some(notice))))
 }
 
 fn initialize_store(harnesses: &[CliHarnessInfo]) -> PersistedStore {
@@ -728,7 +776,9 @@ fn initialize_store(harnesses: &[CliHarnessInfo]) -> PersistedStore {
         name: "Omni".to_string(),
         slug: "omni".to_string(),
         role_title: "Your personal assistant".to_string(),
-        description: "Your personal assistant for ideas, plans, memories, and working with your team.".to_string(),
+        description:
+            "Your personal assistant for ideas, plans, memories, and working with your team."
+                .to_string(),
         avatar_image: Some("/omnibot-gauntlet.png".to_string()),
         shape: "blob".to_string(),
         color: "cyan".to_string(),
@@ -737,7 +787,7 @@ fn initialize_store(harnesses: &[CliHarnessInfo]) -> PersistedStore {
         model: None,
         reasoning_effort: "high".to_string(),
         permission_mode: "auto".to_string(),
-        system_prompt: "Help the user with any task supported by the available tools: thinking, research, writing, coding, files, and coordinating their team. Remember saved preferences. Projects provide optional workspace context. Follow the user’s explicit requests within configured permissions. Delegate only to available teammates using complete explicit handoff blocks.".to_string(),
+        system_prompt: crate::homes::DEFAULT_SYSTEM_PROMPT.to_string(),
         memories: Vec::new(),
         auto_created_for_cli: false,
         custom_command: None,
@@ -771,6 +821,8 @@ fn initialize_store(harnesses: &[CliHarnessInfo]) -> PersistedStore {
     let routines = Vec::new();
 
     PersistedStore {
+        profile_id: default_profile_id(),
+        schema_version: CURRENT_SCHEMA_VERSION,
         home_layout_version: CURRENT_HOME_LAYOUT_VERSION,
         preferences: OmniPreferences {
             summarize_team_results: false,
@@ -917,6 +969,25 @@ fn create_private_file(path: &Path) -> std::io::Result<fs::File> {
     options.open(path)
 }
 
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "Missing data directory")
+    })?;
+    let temp = dir.join(format!("store-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut file = create_private_file(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp, path)?;
+        fs::File::open(dir)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result
+}
+
 /// Point `store.json.bak` at the current store before it is replaced. The hard link keeps
 /// the old inode alive after the rename, so the backup costs no copy.
 fn refresh_backup(dir: &Path) -> std::io::Result<()> {
@@ -935,6 +1006,11 @@ fn refresh_backup(dir: &Path) -> std::io::Result<()> {
 }
 
 fn save_store_at(store: &PersistedStore, dir: &Path) -> Result<(), String> {
+    if store.schema_version > CURRENT_SCHEMA_VERSION
+        || store.home_layout_version > CURRENT_HOME_LAYOUT_VERSION
+    {
+        return Err("Cannot save data from a newer Omnibot version.".into());
+    }
     fs::create_dir_all(dir).map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
     let json = serde_json::to_vec(store).map_err(|e| format!("Failed to serialize store: {e}"))?;
     // Replace atomically so a crash cannot leave a half-written transcript.
@@ -1030,7 +1106,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn application_rename_preserves_profiles_and_refreshes_affected_sessions_once() {
+    fn application_rename_preserves_custom_prompts_and_sessions() {
         let mut store = initialize_store(&[]);
         let bot = &mut store.bots[0];
         bot.name = "My assistant".into();
@@ -1047,16 +1123,12 @@ mod tests {
             store.bots[0].avatar_image.as_deref(),
             Some("/omnibot-gauntlet.png")
         );
-        assert_eq!(store.bots[0].system_prompt, "You are Omni, the lead coordinator Bot in Omnibot on macOS. Keep my custom instructions.");
-        assert!(!store.chats[0].native_sessions.contains_key(&id));
-        assert!(!store.chats[0].last_synced_msg_index.contains_key(&id));
-        store.chats[0]
-            .native_sessions
-            .insert(id.clone(), "new-session".into());
+        assert_eq!(store.bots[0].system_prompt, "You are Omni, the lead coordinator Bot in Omni Bot on macOS. Keep my custom instructions.");
+        assert_eq!(store.chats[0].last_synced_msg_index.get(&id), Some(&4));
         migrate_application_identity(&mut store);
         assert_eq!(
             store.chats[0].native_sessions.get(&id).map(String::as_str),
-            Some("new-session")
+            Some("old-session")
         );
     }
 
@@ -1076,6 +1148,35 @@ mod tests {
         assert!(!store.preferences.approve_all_tools);
         assert!(store.preferences.shared_memories.is_empty());
         assert!(store.routines.is_empty());
+    }
+
+    #[test]
+    fn profile_identity_is_unique_persisted_and_independent_of_runtime_identity() {
+        let first = initialize_store(&[]);
+        let second = initialize_store(&[]);
+        assert_ne!(first.profile_id, second.profile_id);
+        assert!(uuid::Uuid::parse_str(&first.profile_id).is_ok());
+        assert!(uuid::Uuid::parse_str(&second.profile_id).is_ok());
+
+        let f = Fixture::new(&["A"]);
+        let mut legacy = serde_json::to_value(first).unwrap();
+        legacy.as_object_mut().unwrap().remove("profileId");
+        fs::write(f.dir.join(STORE_FILE), serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let (mut store, _) = load_store_at(&f.dir).unwrap().unwrap();
+        assert!(uuid::Uuid::parse_str(&store.profile_id).is_ok());
+        let profile_id = store.profile_id.clone();
+        migrate_store_at(&mut store, &f.dir).unwrap();
+        save_store_at(&store, &f.dir).unwrap();
+        for _ in 0..3 {
+            let (reloaded, _) = load_store_at(&f.dir).unwrap().unwrap();
+            assert_eq!(reloaded.profile_id, profile_id);
+            let mut runtime = f.state.write().unwrap();
+            runtime.store = reloaded;
+            runtime.instance_id = uuid::Uuid::new_v4().to_string();
+            let snapshot = serde_json::to_value(runtime.snapshot()).unwrap();
+            assert_eq!(snapshot["profileId"], profile_id);
+            assert_ne!(snapshot["instanceId"], profile_id);
+        }
     }
 
     use crate::test_support::Fixture;
@@ -1160,7 +1261,13 @@ mod tests {
         let (store, notice) = load_store_at(&dir).unwrap().unwrap();
         assert_eq!(store.bots[0].name, "A");
         assert!(notice.unwrap().contains("store.corrupt-"));
-        assert!(!dir.join(STORE_FILE).exists());
+        assert_eq!(
+            fs::read(dir.join(STORE_FILE)).unwrap(),
+            fs::read(dir.join(BACKUP_FILE)).unwrap()
+        );
+        let (reloaded, notice) = load_store_at(&dir).unwrap().unwrap();
+        assert_eq!(reloaded.bots[0].name, "A");
+        assert!(notice.is_none());
         let corrupt: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .flatten()
@@ -1185,6 +1292,155 @@ mod tests {
         assert!(error.contains(&dir.join(STORE_FILE).display().to_string()));
         assert_eq!(fs::read(dir.join(STORE_FILE)).unwrap(), b"not json");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn missing_primary_recovers_without_rotating_the_backup() {
+        let f = Fixture::new(&["A"]);
+        let dir = f.dir.join("recovery");
+        fs::create_dir(&dir).unwrap();
+        assert!(load_store_at(&dir).unwrap().is_none());
+        let raw = serde_json::to_vec_pretty(&initialize_store(&[])).unwrap();
+        fs::write(dir.join(BACKUP_FILE), &raw).unwrap();
+        // An interrupted older recovery may have moved the primary aside already.
+        fs::write(dir.join("store.corrupt-interrupted.json"), b"damaged").unwrap();
+        fs::write(dir.join("store-interrupted.tmp"), b"partial replacement").unwrap();
+        remove_stale_temp_files(&dir);
+        let (_, notice) = load_store_at(&dir).unwrap().unwrap();
+        assert!(notice.unwrap().contains("missing"));
+        assert_eq!(fs::read(dir.join(STORE_FILE)).unwrap(), raw);
+        assert_eq!(fs::read(dir.join(BACKUP_FILE)).unwrap(), raw);
+        assert_eq!(
+            fs::read(dir.join("store.corrupt-interrupted.json")).unwrap(),
+            b"damaged"
+        );
+        assert!(load_store_at(&dir).unwrap().unwrap().1.is_none());
+    }
+
+    #[test]
+    fn missing_primary_with_invalid_backup_is_not_a_first_launch() {
+        let f = Fixture::new(&["A"]);
+        fs::write(f.dir.join(BACKUP_FILE), b"damaged backup").unwrap();
+        assert!(load_store_at(&f.dir).unwrap_err().contains("unusable"));
+        assert!(!f.dir.join(STORE_FILE).exists());
+        assert_eq!(
+            fs::read(f.dir.join(BACKUP_FILE)).unwrap(),
+            b"damaged backup"
+        );
+    }
+
+    #[test]
+    fn newer_schemas_are_rejected_without_falling_back_or_rewriting() {
+        let f = Fixture::new(&["A"]);
+        let current = serde_json::to_vec(&initialize_store(&[])).unwrap();
+        for field in ["schemaVersion", "homeLayoutVersion"] {
+            // Even an incompatible document must trigger the version guard first.
+            let newer =
+                serde_json::to_vec(&serde_json::json!({field: 999, "futureData": "keep"})).unwrap();
+            fs::write(f.dir.join(STORE_FILE), &newer).unwrap();
+            fs::write(f.dir.join(BACKUP_FILE), &current).unwrap();
+            assert!(load_store_at(&f.dir).unwrap_err().contains("newer"));
+            assert_eq!(fs::read(f.dir.join(STORE_FILE)).unwrap(), newer);
+            assert_eq!(fs::read(f.dir.join(BACKUP_FILE)).unwrap(), current);
+            fs::remove_file(f.dir.join(STORE_FILE)).unwrap();
+            fs::write(f.dir.join(BACKUP_FILE), &newer).unwrap();
+            assert!(load_store_at(&f.dir).unwrap_err().contains("newer"));
+            assert!(!f.dir.join(STORE_FILE).exists());
+            assert_eq!(fs::read(f.dir.join(BACKUP_FILE)).unwrap(), newer);
+        }
+        let mut future = initialize_store(&[]);
+        future.schema_version = CURRENT_SCHEMA_VERSION + 1;
+        assert!(save_store_at(&future, &f.dir)
+            .unwrap_err()
+            .contains("newer"));
+        assert!(!f.dir.join(STORE_FILE).exists());
+    }
+
+    #[test]
+    fn historical_layouts_keep_exact_migration_backups_across_restarts_and_saves() {
+        let f = Fixture::new(&["A"]);
+        for layout in 0..=CURRENT_HOME_LAYOUT_VERSION {
+            let dir = f.dir.join(format!("layout-{layout}"));
+            fs::create_dir(&dir).unwrap();
+            let mut legacy = serde_json::to_value(initialize_store(&[])).unwrap();
+            legacy.as_object_mut().unwrap().remove("schemaVersion");
+            legacy["homeLayoutVersion"] = layout.into();
+            legacy["bots"][0]["memories"] = serde_json::json!(["Preserve my note"]);
+            legacy["routines"] = serde_json::json!([{
+                "id":"routine-old", "name":"Saved task", "prompt":"Preserve this task",
+                "botId":"bot-omni", "enabled":true, "chatId":legacy["chats"][0]["id"]
+            }]);
+            if layout < 4 {
+                let chat = legacy["chats"][0].as_object_mut().unwrap();
+                for field in ["ownerBotId", "modelOverrides", "sessionContexts", "tasks"] {
+                    chat.remove(field);
+                }
+                if layout < 3 {
+                    chat.remove("isBotHome");
+                }
+            }
+            legacy["chats"][0]["messages"] = serde_json::json!([{
+                "id":"historical", "role":"user", "text":"Preserve my conversation",
+                "thinking":"", "toolCalls":[], "handoffs":[], "mentionedBotIds":[],
+                "status":"complete", "createdAtMs":0
+            }]);
+            if layout == 0 {
+                legacy.as_object_mut().unwrap().remove("homeLayoutVersion");
+                legacy["chats"][0]["workspacePath"] = serde_json::json!(f.dir);
+            }
+            let original = serde_json::to_vec_pretty(&legacy).unwrap();
+            fs::write(dir.join(STORE_FILE), &original).unwrap();
+            let (mut store, _) = load_store_at(&dir).unwrap().unwrap();
+            migrate_store_at(&mut store, &dir).unwrap();
+            save_store_at(&store, &dir).unwrap();
+            let migrated = serde_json::to_value(&store).unwrap();
+            assert_eq!(store.schema_version, CURRENT_SCHEMA_VERSION);
+            assert_eq!(store.home_layout_version, CURRENT_HOME_LAYOUT_VERSION);
+            assert_eq!(store.bots[0].memories, ["Preserve my note"]);
+            let routine_chat = store
+                .chats
+                .iter()
+                .find(|chat| Some(&chat.id) == store.routines[0].chat_id.as_ref())
+                .unwrap();
+            assert_eq!(routine_chat.messages[0].text, "Preserve my conversation");
+            assert_eq!(store.routines[0].prompt, "Preserve this task");
+            assert_eq!(
+                store
+                    .chats
+                    .iter()
+                    .flat_map(|c| &c.messages)
+                    .filter(|m| m.id == "historical")
+                    .count(),
+                1
+            );
+            for _ in 0..3 {
+                let (mut reloaded, _) = load_store_at(&dir).unwrap().unwrap();
+                migrate_store_at(&mut reloaded, &dir).unwrap();
+                assert_eq!(serde_json::to_value(&reloaded).unwrap(), migrated);
+                save_store_at(&reloaded, &dir).unwrap();
+            }
+            let backups: Vec<_> = fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("store.pre-migration-")
+                })
+                .collect();
+            assert_eq!(backups.len(), 1);
+            assert_eq!(fs::read(backups[0].path()).unwrap(), original);
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(backups[0].path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
     }
 
     #[test]
@@ -1216,6 +1472,7 @@ mod tests {
         assert_eq!(before, serde_json::to_value(&store).unwrap());
         // Running the version-3 upgrade on a fresh store must produce the same data.
         let mut legacy = initialize_store(&[]);
+        legacy.profile_id = store.profile_id.clone();
         legacy.home_layout_version = 3;
         legacy.chats[0].updated_at_ms = store.chats[0].updated_at_ms;
         crate::homes::migrate(&mut legacy);

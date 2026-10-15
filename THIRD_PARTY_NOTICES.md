@@ -2,6 +2,14 @@
 
 Omnibot's MIT license applies to its own code. Dependencies retain their respective licenses; installing dependencies includes their upstream notices.
 
+Run `python3 scripts/license-inventory.py` after a frozen pnpm install to produce `release-artifacts/license-inventory.json` and `release-artifacts/THIRD-PARTY-LICENSES.txt`. The text preserves available upstream LICENSE, COPYING, NOTICE and COPYRIGHT files for installed frontend production packages and resolved Rust normal/build dependencies on Apple Silicon and Intel. Exact source-download links are included, including for MPL-covered components. The JSON records package versions, source checksums where available, package-relative notice paths and content hashes; it contains no local installation paths.
+
+CI archives both files. The public release script copies them into the app's `Contents/Resources` before signing, verifies their integrity after archive extraction, and includes them as release assets/checksum entries. Development packaging does not by itself create this complete dependency notice resource; use the public release pipeline for redistribution.
+
+Some published crates omit their workspace-root license files. [Reviewed overrides](.github/dependency-license-overrides.json) identify exact upstream commits, paths and SHA-256 checksums. Four crates also omit separate license files in their upstream repositories: `dispatch 0.2.0`, `selectors 0.38.0`, `sparkle-updater 0.1.0` and `tauri-plugin-sparkle-updater 0.3.0`. Their overrides preserve the actual published license declarations (and the MPL header for `selectors`), author metadata and pinned canonical license terms. They explicitly distinguish authors from copyright notices; no copyright holder or year is invented. Unknown missing texts, changed source commits and checksum mismatches stop generation. Maintainers must review changed license obligations before updating these mappings. This is a collection of upstream material, not legal certification.
+
+The separately bundled notices below cover explicitly incorporated components and assets. Dependency security audits also include development-only dependencies even though their licenses are outside the redistribution inventory.
+
 ## T3 Code provider icon components
 
 Provider SVG components in `src/components/icons/OmarchyIcons.tsx` were adapted from [T3 Code](https://github.com/pingdotgg/t3code). T3 Code is copyright 2026 T3 Tools Inc., distributed under the MIT license. The required notice is included in [licenses/T3-Code-MIT.txt](licenses/T3-Code-MIT.txt).

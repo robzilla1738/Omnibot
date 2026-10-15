@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   type EventChannelStatus,
   getChatGitStatus,
@@ -21,6 +21,7 @@ import {
   rescanOmniEnvironment,
   saveOmniPreferences,
   sendOmniMessage,
+  setDraftPersistenceBlocked,
   stopOmniChat,
   subscribeOmniEvents,
   updateOmniChat,
@@ -38,6 +39,7 @@ import type {
 import { uniqueBotName } from "../../lib/bots";
 import { hasPrimaryModifier, isEditableTarget, isModalOpen } from "../../lib/keyboard";
 import { shareSnapshot } from "../../lib/snapshot";
+import { readChatDrafts, writeChatDrafts, type ChatDraft, type ChatDrafts } from "../../lib/drafts";
 import { ChatWorkspace } from "../chat/ChatWorkspace";
 import {
   InspectorDrawer,
@@ -117,7 +119,48 @@ export function DesktopShell({
     participantBotIds?: string[];
   }>({ open: false, mode: "search" });
 
-  const [projectDraft, setProjectDraft] = useState<{ chatId: string; text: string } | null>(null);
+  const draftProfileId = snapshot.profileId || snapshot.serverBaseUrl;
+  const loadDraftStorage = (profileId: string) => {
+    try { return { profileId, drafts: readChatDrafts(profileId), error: "" }; }
+    catch { return { profileId, drafts: {} as ChatDrafts, error: "Saved drafts could not be loaded. Keep this window open while working on new drafts." }; }
+  };
+  const [draftStorage, setDraftStorage] = useState(() => loadDraftStorage(draftProfileId));
+  const draftsRef = useRef(draftStorage);
+  const [draftPersistenceBlocked, setDraftBlocked] = useState(!!draftStorage.error);
+  const drafts = draftStorage.profileId === draftProfileId ? draftStorage.drafts : {};
+  useLayoutEffect(() => {
+    if (draftsRef.current.profileId === draftProfileId) return;
+    const loaded = loadDraftStorage(draftProfileId);
+    draftsRef.current = loaded;
+    setDraftStorage(loaded);
+    setDraftBlocked(!!loaded.error);
+  }, [draftProfileId]);
+  useEffect(() => { if (draftStorage.error) notifyError(draftStorage.error); }, [draftStorage.error, notifyError]);
+  useEffect(() => {
+    void setDraftPersistenceBlocked(draftPersistenceBlocked).catch(() => notifyError("Could not update the draft restart guard. Keep this window open while drafts are unsaved."));
+    if (!draftPersistenceBlocked) return;
+    const preventUnload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", preventUnload);
+    return () => window.removeEventListener("beforeunload", preventUnload);
+  }, [draftPersistenceBlocked, notifyError]);
+  const updateDraft = useCallback((chatId: string, update: (current: ChatDraft) => ChatDraft | undefined) => {
+    const current = draftsRef.current;
+    // A reply from a previous profile must not modify the newly connected profile's drafts.
+    if (current.profileId !== draftProfileId) return;
+    const next = { ...current.drafts };
+    const draft = update(next[chatId] ?? { text: "" });
+    if (draft && (draft.text || draft.skillSlug || draft.overrideBotId || draft.overrideModel || draft.overrideEffort || draft.parallelMode)) next[chatId] = draft;
+    else delete next[chatId];
+    draftsRef.current = { ...current, drafts: next };
+    setDraftStorage(draftsRef.current);
+    // Preserve unreadable saved data rather than replacing it with an empty store.
+    if (current.error) return;
+    try { writeChatDrafts(draftProfileId, next); setDraftBlocked(false); }
+    catch {
+      setDraftBlocked(true);
+      notifyError("Draft changes could not be saved on this device. Keep this window open to retain them.");
+    }
+  }, [draftProfileId, notifyError]);
   const [channelStatus, setChannelStatus] = useState<EventChannelStatus>("connecting");
   const [showReconnecting, setShowReconnecting] = useState(false);
   useEffect(() => {
@@ -312,7 +355,9 @@ export function DesktopShell({
       });
       setSnapshot(nextSnap);
       setActiveChatId(chat.id);
-      if (params.draftPrompt) setProjectDraft({ chatId: chat.id, text: params.draftPrompt });
+      if (params.draftPrompt || (params.skillSlug && !params.initialPrompt)) {
+        updateDraft(chat.id, () => ({ text: params.draftPrompt ?? "", skillSlug: params.skillSlug }));
+      }
 
       if (params.initialPrompt) {
         await sendOmniMessage({
@@ -322,7 +367,7 @@ export function DesktopShell({
         });
       }
     },
-    [setSnapshot]
+    [setSnapshot, updateDraft]
   );
 
   const startSkillChat = (skill: { name: string; slug: string }, initialPrompt?: string) =>
@@ -337,12 +382,13 @@ export function DesktopShell({
     async (chatId: string) => {
       const next = await deleteOmniChat(chatId);
       setSnapshot(next);
+      updateDraft(chatId, () => undefined);
       setActiveChatId(current => {
         if (current !== chatId) return current;
         return next.chats.find((c) => c.isPrimary)?.id ?? current;
       });
     },
-    [setSnapshot]
+    [setSnapshot, updateDraft]
   );
 
   const handleToggleBotInChat = useCallback(
@@ -463,7 +509,8 @@ export function DesktopShell({
       /></Suspense> : <ChatWorkspace
         key={activeChat.id}
         chat={activeChat}
-        initialDraft={projectDraft?.chatId === activeChat.id ? projectDraft.text : undefined}
+        draft={drafts[activeChat.id] ?? { text: "" }}
+        onDraftChange={update => updateDraft(activeChat.id, update)}
         summarizeTeamResults={snapshot.preferences.summarizeTeamResults}
         onChooseProject={(prompt) => setCommandModal({ open: true, mode: activeChat.isGroup ? "new-group" : "new-chat", projectRequired: true, prompt, participantBotIds: activeChat.participantBotIds })}
         onManageTeam={openLibrary}
@@ -497,7 +544,6 @@ export function DesktopShell({
             chatId: activeChat.id,
             ...params,
           });
-          setProjectDraft(null);
           try { setSnapshot(await getOmniSnapshot()); } catch { /* The event channel or poll picks the send up. */ }
         }}
         onStopChat={() => applySnapshot(stopOmniChat(activeChat.id))}

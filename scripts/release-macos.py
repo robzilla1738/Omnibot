@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build a signed, notarized universal release candidate. Publication is separate."""
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -54,10 +55,24 @@ def validate_app(app, version, team):
         raise SystemExit("Release requires the expected Developer ID, hardened runtime, and timestamp.")
     if not (app / "Contents/Frameworks/Sparkle.framework").exists():
         raise SystemExit("Missing Sparkle framework.")
+    validate_notices(app)
     rpaths = run("otool", "-l", binary, capture=True).stdout
     if any(str(ROOT) in line for line in rpaths.splitlines() if line.strip().startswith("path ")):
         raise SystemExit("Release contains a development framework search path.")
     run("codesign", "--verify", "--deep", "--strict", app)
+
+
+def validate_notices(app):
+    resources = app / "Contents/Resources"
+    inventory = resources / "dependency-license-inventory.json"
+    notices = resources / "THIRD-PARTY-LICENSES.txt"
+    if not inventory.is_file() or not notices.is_file():
+        raise SystemExit("Release is missing its dependency notice bundle or provenance inventory.")
+    report = json.loads(inventory.read_text())
+    if report["noticeBundle"]["sha256"] != hashlib.sha256(notices.read_bytes()).hexdigest():
+        raise SystemExit("Bundled dependency notices do not match their provenance inventory.")
+    if not report["packages"] or any(not package["noticeFiles"] for package in report["packages"]):
+        raise SystemExit("Release dependency notice coverage is incomplete.")
 
 
 def notarize(path, profile):
@@ -84,9 +99,48 @@ def check_versions(version):
 def check_source():
     if run("git", "status", "--porcelain", capture=True).stdout.strip():
         raise SystemExit("Commit or stash local changes; releases must build the exact committed source.")
-    run("git", "fetch", "--quiet", "origin")
-    if not run("git", "branch", "--remotes", "--contains", "HEAD", capture=True).stdout.strip():
-        raise SystemExit("HEAD is not on the remote. Push it and wait for CI to pass before releasing.")
+    origin = run("git", "remote", "get-url", "origin", capture=True).stdout.strip()
+    if origin.removesuffix(".git") not in {f"https://github.com/{REPO}", f"git@github.com:{REPO}"}:
+        raise SystemExit(f"origin must be the release repository {REPO}.")
+    source = run("git", "rev-parse", "HEAD", capture=True).stdout.strip()
+    run("git", "fetch", "--quiet", "origin", "main")
+    run("git", "merge-base", "--is-ancestor", source, "FETCH_HEAD")
+    response = json.loads(run("gh", "api", "--method", "GET",
+        f"repos/{REPO}/actions/workflows/ci.yml/runs", "-f", f"head_sha={source}",
+        "-f", "event=push", "-f", "branch=main", "-f", "per_page=100", capture=True).stdout)
+    ci = verified_ci_run(response["workflow_runs"], source)
+    tag = run("git", "ls-remote", "--tags", "origin", f"refs/tags/v{release_version()}", capture=True).stdout
+    if tag.strip():
+        raise SystemExit("This version already has a remote tag. Never replace a published version.")
+    return source, ci
+
+
+def verified_ci_run(runs, source):
+    candidates = [item for item in runs if item["head_sha"] == source
+                  and item["event"] == "push" and item["head_branch"] == "main"]
+    if not candidates:
+        raise SystemExit("No main-branch CI run exists for the exact source commit.")
+    latest = max(candidates, key=lambda item: (item["run_number"], item["run_attempt"]))
+    if latest["status"] != "completed" or latest["conclusion"] != "success":
+        raise SystemExit("The latest CI run for this source commit must complete successfully.")
+    return {key: latest[key] for key in ("id", "run_attempt", "html_url", "head_sha")}
+
+
+def release_version():
+    version = json.loads((ROOT / "package.json").read_text())["version"]
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise SystemExit("Public releases require a stable major.minor.patch version.")
+    return version
+
+
+def check_source_unchanged(source, version):
+    if run("git", "rev-parse", "HEAD", capture=True).stdout.strip() != source:
+        raise SystemExit("Source commit changed during the release build; discard this candidate.")
+    if run("git", "status", "--porcelain", capture=True).stdout.strip():
+        raise SystemExit("Source files changed during the release build; discard this candidate.")
+    if release_version() != version:
+        raise SystemExit("Release version changed during the build; discard this candidate.")
+    check_versions(version)
 
 
 def main():
@@ -99,9 +153,9 @@ def main():
     team_match = re.search(r"\(([A-Z0-9]{10})\)$", args.identity)
     if not team_match:
         parser.error("Identity must include its 10-character Apple team ID.")
-    version = json.loads((ROOT / "package.json").read_text())["version"]
+    version = release_version()
     check_versions(version)
-    check_source()
+    source, ci = check_source()
     # Validate credentials before spending time compiling. Never log account history.
     run("xcrun", "notarytool", "history", "--keychain-profile", args.keychain_profile,
         "--output-format", "json", capture=True)
@@ -113,13 +167,17 @@ def main():
     run("rustup", "target", "add", "aarch64-apple-darwin", "x86_64-apple-darwin")
     run("pnpm", "tauri:build", "--target", "universal-apple-darwin", "--bundles", "app",
         "--config", json.dumps({"bundle": {"macOS": {"signingIdentity": args.identity}}}))
+    check_source_unchanged(source, version)
     app = ROOT / "src-tauri/target/universal-apple-darwin/release/bundle/macos/Omnibot.app"
-    sign_app(app, args.identity)
-    validate_app(app, version, team_match[1])
     out = ROOT / "release-artifacts" / version
     if out.exists():
         raise SystemExit(f"Candidate already exists at {out}; archive it before building a replacement.")
     out.mkdir(parents=True)
+    run("python3", ROOT / "scripts/license-inventory.py", "--output", out / "license-inventory.json")
+    shutil.copyfile(out / "THIRD-PARTY-LICENSES.txt", app / "Contents/Resources/THIRD-PARTY-LICENSES.txt")
+    shutil.copyfile(out / "license-inventory.json", app / "Contents/Resources/dependency-license-inventory.json")
+    sign_app(app, args.identity)
+    validate_app(app, version, team_match[1])
     with tempfile.TemporaryDirectory(prefix="omnibot-notarize-") as temp:
         upload = Path(temp) / "Omnibot.zip"
         run("ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", app, upload)
@@ -164,8 +222,17 @@ def main():
         raise SystemExit("Generated feed does not match final archive.")
     signature = enclosure.attrib["{http://www.andymatuschak.org/xml-namespaces/sparkle}edSignature"]
     run(tools / "sign_update", "--account", ACCOUNT, "--verify", archive, signature)
+    check_source_unchanged(source, version)
+    manifest = {"version": version, "sourceCommit": source, "repository": REPO,
+                "createdAt": datetime.now(timezone.utc).isoformat(), "ci": ci,
+                "artifacts": {str(p.relative_to(out)): hashlib.sha256(p.read_bytes()).hexdigest()
+                              for p in (archive, dmg, feed, out / "license-inventory.json", out / "THIRD-PARTY-LICENSES.txt")},
+                "lockfiles": {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
+                              for p in (ROOT / "pnpm-lock.yaml", ROOT / "src-tauri/Cargo.lock")}}
+    (out / "release-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     (out / "SHA256SUMS.txt").write_text("".join(
-        f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n" for p in [archive, dmg]))
+        f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n"
+        for p in [archive, dmg, out / "release-manifest.json", out / "license-inventory.json", out / "THIRD-PARTY-LICENSES.txt"]))
     print(f"Verified release candidate: {out}\nPublish the assets before publishing {feed}.")
 
 

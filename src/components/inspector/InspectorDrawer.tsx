@@ -24,7 +24,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import {
   getComputerOverview,
   getGitFileDiff,
@@ -159,8 +159,18 @@ export function InspectorDrawer({
   const disclosureId = useId();
   const [customizeAvatarOpen, setCustomizeAvatarOpen] = useState(false);
   const [swarmMembersOpen, setSwarmMembersOpen] = useState(false);
-  const botNameEdit = useInlineEdit(activeBot.name, name => act(`Couldn’t rename ${activeBot.name}`, () => onUpsertBot({ ...activeBot, name })));
-  const botRoleEdit = useInlineEdit(activeBot.roleTitle, roleTitle => act(`Couldn’t update ${activeBot.name}`, () => onUpsertBot({ ...activeBot, roleTitle })));
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const [botSaving, setBotSaving] = useState(false);
+  const botSavePending = useRef(false);
+  const saveBot = async (bot: BotProfile) => {
+    if (botSavePending.current) throw new Error("Wait for the current profile change to finish.");
+    botSavePending.current = true;
+    setBotSaving(true);
+    try { await onUpsertBot(bot); }
+    finally { botSavePending.current = false; setBotSaving(false); }
+  };
+  const botNameEdit = useInlineEdit(activeBot.name, name => act(`Couldn’t rename ${activeBot.name}`, () => saveBot({ ...activeBot, name })));
+  const botRoleEdit = useInlineEdit(activeBot.roleTitle, roleTitle => act(`Couldn’t update ${activeBot.name}`, () => saveBot({ ...activeBot, roleTitle })));
 
   useEffect(() => {
     if (openStudioSignal && openStudioSignal > 0) {
@@ -176,6 +186,18 @@ export function InspectorDrawer({
   const [commitMessage, setCommitMessage] = useState("");
   const [committing, setCommitting] = useState(false);
   const [gitError, setGitError] = useState("");
+  const gitContext = JSON.stringify([chat.id, chat.workspacePath, gitTaskId, gitStatus.rootPath]);
+  const gitContextRef = useRef(0);
+  const diffRequest = useRef(0);
+  useLayoutEffect(() => {
+    gitContextRef.current++;
+    diffRequest.current++;
+    setSelectedDiffFile(null);
+    setSelectedDiffContent("");
+    setCommitMessage("");
+    setCommitting(false);
+    setGitError("");
+  }, [gitContext]);
 
   const [systemOverview, setSystemOverview] = useState<SystemOverview | null>(
     null
@@ -206,6 +228,8 @@ export function InspectorDrawer({
   }, [open, activeTab, loadComputerData]);
 
   const handleLoadFileDiff = async (filePath: string) => {
+    const context = gitContextRef.current;
+    const request = ++diffRequest.current;
     if (selectedDiffFile === filePath) {
       setSelectedDiffFile(null);
       return;
@@ -214,8 +238,9 @@ export function InspectorDrawer({
     setSelectedDiffContent("Loading diff...");
     try {
       const diff = await getGitFileDiff(filePath, chat.id, gitTaskId);
-      setSelectedDiffContent(diff || "(No diff output)");
+      if (request === diffRequest.current && gitContextRef.current === context) setSelectedDiffContent(diff || "(No diff output)");
     } catch (err) {
+      if (request !== diffRequest.current || gitContextRef.current !== context) return;
       setSelectedDiffContent(
         err instanceof Error ? err.message : "Could not load diff"
       );
@@ -224,33 +249,40 @@ export function InspectorDrawer({
 
   const handleCommitAll = async () => {
     if (!commitMessage.trim() || committing) return;
+    const context = gitContextRef.current;
+    const submitted = commitMessage;
     setCommitting(true);
     setGitError("");
     try {
-      await onCommitGit(commitMessage.trim());
-      setCommitMessage("");
+      await onCommitGit(submitted.trim());
+      if (gitContextRef.current !== context) return;
+      setCommitMessage(current => current === submitted ? "" : current);
+      diffRequest.current++;
       setSelectedDiffFile(null);
     } catch (error) {
-      setGitError(`Commit failed: ${errorMessage(error)}`);
+      if (gitContextRef.current === context) setGitError(`Commit failed: ${errorMessage(error)}`);
     } finally {
-      setCommitting(false);
+      if (gitContextRef.current === context) setCommitting(false);
     }
   };
 
   const handleDiscardFile = async (filePath: string) => {
+    const context = gitContextRef.current;
     const confirmed = await confirm({
       title: "Discard changes?",
       message: <>All uncommitted changes to <code className="text-zinc-100 break-all">{filePath}</code> will be lost. This can’t be undone.</>,
       confirmLabel: "Discard changes",
       destructive: true,
     });
-    if (!confirmed) return;
+    if (!confirmed || gitContextRef.current !== context) return;
     setGitError("");
     try {
       await onDiscardGitFile(filePath);
-      if (selectedDiffFile === filePath) setSelectedDiffFile(null);
+      if (gitContextRef.current !== context) return;
+      diffRequest.current++;
+      setSelectedDiffFile(null);
     } catch (error) {
-      setGitError(`Couldn’t discard ${filePath}: ${errorMessage(error)}`);
+      if (gitContextRef.current === context) setGitError(`Couldn’t discard ${filePath}: ${errorMessage(error)}`);
     }
   };
 
@@ -400,7 +432,7 @@ export function InspectorDrawer({
           {activeTab === "details" && (
             <div className="space-y-5">
               {/* Collapsible Character & CLI Studio */}
-              <Collapse open={customizeAvatarOpen} id={disclosureId + '-customizeAvatarOpen'}><div className="liquid-glass-card rounded-2xl p-4 space-y-4">
+              <Collapse open={customizeAvatarOpen} id={disclosureId + '-customizeAvatarOpen'}><fieldset disabled={avatarBusy || botSaving} className="liquid-glass-card rounded-2xl p-4 space-y-4 min-w-0">
                   <div className="flex items-center justify-between">
                     <span className="text-[13.5px] font-semibold text-white">
                       {activeBot.name} · Character &amp; CLI
@@ -448,7 +480,7 @@ export function InspectorDrawer({
                             key={h.id}
                             type="button"
                             onClick={() =>
-                              act(`Couldn’t switch ${activeBot.name} to ${h.name}`, () => onUpsertBot({
+                              act(`Couldn’t switch ${activeBot.name} to ${h.name}`, () => saveBot({
                                 ...activeBot,
                                 cliDriver: h.kind,
                                 customCommand: null,
@@ -469,9 +501,9 @@ export function InspectorDrawer({
                     </div>
                   </div>
 
-                  <BotModelSelect value={activeBot.model ?? null} harness={installedHarnesses.find(h => h.kind === activeBot.cliDriver)} onChange={model => onUpsertBot({ ...activeBot, model })} />
+                  <BotModelSelect key={activeBot.id} value={activeBot.model ?? null} harness={installedHarnesses.find(h => h.kind === activeBot.cliDriver)} onChange={model => saveBot({ ...activeBot, model })} />
 
-                  <AvatarPicker key={activeBot.id} value={activeBot} onChange={async appearance => { await onUpsertBot({ ...activeBot, ...appearance }); }} />
+                  <AvatarPicker key={activeBot.id} active={open && customizeAvatarOpen} onBusyChange={setAvatarBusy} value={activeBot} onChange={async appearance => { await saveBot({ ...activeBot, ...appearance }); }} />
 
                   {!activeBot.isPrimary && onDeleteBot && (
                     <div className="pt-2 flex justify-end">
@@ -488,7 +520,7 @@ export function InspectorDrawer({
                       </button>
                     </div>
                   )}
-                </div></Collapse>
+                </fieldset></Collapse>
 
               <div className="rounded-2xl liquid-glass-card px-4 py-4 space-y-3">
                 <div className="text-sm text-zinc-200">{chat.workspacePath ? "This chat’s project" : "Personal conversation"}</div>

@@ -1,5 +1,6 @@
 //! Native Sparkle updates. Feed URLs and trust keys are fixed in Info.plist.
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Manager};
 #[cfg(target_os = "macos")]
 use tauri_plugin_sparkle_updater::SparkleUpdaterExt;
@@ -12,9 +13,31 @@ pub struct UpdateStatus {
     automatically_checks: bool,
 }
 
+pub struct DraftPersistenceBlocked(pub AtomicBool);
+
+#[tauri::command]
+pub fn omni_set_draft_persistence_blocked(app: AppHandle, blocked: bool) {
+    app.state::<DraftPersistenceBlocked>()
+        .0
+        .store(blocked, Ordering::SeqCst);
+    refresh_install_permission(&app);
+}
+
 fn idle(app: &AppHandle) -> bool {
+    if app
+        .try_state::<DraftPersistenceBlocked>()
+        .is_none_or(|state| state.0.load(Ordering::SeqCst))
+    {
+        return false;
+    }
     app.try_state::<crate::ManagedOmniState>()
-        .and_then(|state| state.0.read().ok().map(|s| s.active_workflows.is_empty()))
+        .and_then(|state| {
+            state
+                .0
+                .read()
+                .ok()
+                .map(|s| s.active_workflows.is_empty() && s.storage_error.is_none())
+        })
         .unwrap_or(false)
 }
 
@@ -42,7 +65,7 @@ pub async fn omni_check_for_updates(app: AppHandle) -> Result<(), String> {
 
 fn check(app: &AppHandle) -> Result<(), String> {
     if !idle(app) {
-        return Err("Finish or stop running tasks before checking for an update.".into());
+        return Err("Finish or stop running tasks and resolve any unsaved draft or storage errors before updating.".into());
     }
     #[cfg(target_os = "macos")]
     if let Some(updater) = app.sparkle_updater() {
@@ -66,9 +89,11 @@ pub async fn omni_set_automatic_updates(app: AppHandle, enabled: bool) -> Result
 pub fn refresh_install_permission(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     {
-        let allowed = idle(app);
         let handle = app.clone();
         let _ = app.run_on_main_thread(move || {
+            // Read at application time: concurrently queued callbacks must not reopen
+            // installation using a stale value captured before a workflow/draft change.
+            let allowed = idle(&handle);
             if let Some(updater) = handle.sparkle_updater() {
                 let _ = updater.set_should_proceed_with_update(allowed);
                 let _ = updater.set_should_relaunch_application(allowed);
@@ -78,6 +103,8 @@ pub fn refresh_install_permission(app: &AppHandle) {
 }
 
 pub fn configure(app: &AppHandle) -> tauri::Result<()> {
+    // The frontend clears this after loading its durable drafts successfully.
+    app.manage(DraftPersistenceBlocked(AtomicBool::new(true)));
     #[cfg(target_os = "macos")]
     {
         use tauri::menu::{Menu, MenuItem};

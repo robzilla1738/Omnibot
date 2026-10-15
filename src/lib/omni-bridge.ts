@@ -29,9 +29,34 @@ export function isTauriRuntime(): boolean {
   );
 }
 
-/** The debug backend accepts the dev origin without a token, so browser mode never sends one. */
+export async function setDraftPersistenceBlocked(blocked: boolean): Promise<void> {
+  if (isTauriRuntime()) await invoke("omni_set_draft_persistence_blocked", { blocked });
+}
+
+type BrowserConnection = { token: string; baseUrl: string };
+let browserConnection: BrowserConnection | null | undefined;
+
+function developmentConnection(): BrowserConnection | null {
+  if (browserConnection !== undefined) return browserConnection;
+  const fragment = new URLSearchParams(window.location.hash.slice(1));
+  const token = fragment.get("omniToken");
+  const baseUrl = fragment.get("omniServer");
+  // Never leave credentials for a later page served from a reused development port.
+  try { sessionStorage.removeItem("omni-dev-connection"); } catch { /* Storage is optional. */ }
+  if (token) window.history.replaceState(null, "", window.location.pathname + window.location.search);
+  const saved = token && baseUrl ? { token, baseUrl } : null;
+  if (!saved) return (browserConnection = null);
+  const url = new URL(saved.baseUrl);
+  if (!/^[a-f0-9]{64}$/.test(saved.token) || url.protocol !== "http:" || url.hostname !== "127.0.0.1" || !url.port || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
+    throw new Error("Invalid development connection. Run pnpm dev:connect again.");
+  }
+  browserConnection = { token: saved.token, baseUrl: url.origin };
+  cachedServerBaseUrl = browserConnection.baseUrl;
+  return browserConnection;
+}
+
 function apiToken(): Promise<string | null> {
-  if (!isTauriRuntime()) return Promise.resolve(null);
+  if (!isTauriRuntime()) return Promise.resolve(developmentConnection()?.token ?? null);
   apiTokenPromise ??= invoke<string>("omni_api_token").catch(error => {
     apiTokenPromise = null;
     throw error;
@@ -39,53 +64,70 @@ function apiToken(): Promise<string | null> {
   return apiTokenPromise;
 }
 
+async function requestJson<T>(url: string, init: RequestInit, timeoutMs: number): Promise<T> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const cancel = () => controller.abort();
+  init.signal?.addEventListener("abort", cancel, { once: true });
+  if (init.signal?.aborted) cancel();
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+  try {
+    const res = await fetch(url, { ...init, redirect: "error", signal: controller.signal });
+    if (!res.ok) {
+      if (res.status === 401 && !isTauriRuntime()) {
+        throw new Error("Development connection expired or missing. Run pnpm dev:connect to reconnect.");
+      }
+      const message = await res.text();
+      throw new Error(message || `HTTP ${res.status}`);
+    }
+    return await res.json() as T;
+  } catch (error) {
+    if (timedOut) throw new Error("Omnibot didn’t respond in time. Try again.");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    init.signal?.removeEventListener("abort", cancel);
+  }
+}
+
 async function httpJson<T>(path: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
   const { timeoutMs = DEFAULT_TIMEOUT_MS, ...requestInit } = init ?? {};
   const token = await apiToken();
-  let res: Response;
-  try {
-    res = await fetch(`${cachedServerBaseUrl}${path}`, {
-      ...requestInit,
-      signal: AbortSignal.timeout(timeoutMs),
-      headers: {
-        "Content-Type": "application/json",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...requestInit.headers,
-      },
-    });
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "TimeoutError") {
-      throw new Error("Omnibot didn’t respond in time. Try again.");
-    }
-    throw error;
-  }
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "Request failed");
-    throw new Error(txt || `HTTP ${res.status}`);
-  }
-  return (await res.json()) as T;
+  return requestJson<T>(`${cachedServerBaseUrl}${path}`, {
+    ...requestInit,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...requestInit.headers,
+    },
+  }, timeoutMs);
 }
 
 function rememberServer(snap: OmniSnapshot, fallbackBaseUrl = cachedServerBaseUrl): OmniSnapshot {
-  cachedServerBaseUrl = snap.serverBaseUrl || fallbackBaseUrl;
+  const url = new URL(snap.serverBaseUrl || fallbackBaseUrl);
+  if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || !url.port || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
+    throw new Error("The backend returned an invalid local address.");
+  }
+  cachedServerBaseUrl = url.origin;
   return snap;
 }
 
-/** The dev server may bind any of 15 ports; probe them together and keep the first that answers. */
 async function discoverServer(): Promise<OmniSnapshot> {
+  const token = await apiToken();
+  if (developmentConnection()) return rememberServer(await httpJson<OmniSnapshot>("/api/snapshot"));
   const winner = new AbortController();
   const probes = Array.from({ length: 15 }, async (_, index) => {
     const candidate = `http://127.0.0.1:${4321 + index}`;
-    const res = await fetch(`${candidate}/api/snapshot`, {
-      signal: AbortSignal.any([winner.signal, AbortSignal.timeout(2000)]),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return rememberServer((await res.json()) as OmniSnapshot, candidate);
+    const snap = await requestJson<OmniSnapshot>(`${candidate}/api/snapshot`, {
+      signal: winner.signal,
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    }, 2000);
+    return rememberServer(snap, candidate);
   });
   try {
     return await Promise.any(probes);
   } catch {
-    throw new Error("Could not reach the Omnibot local backend.");
+    throw new Error("Could not connect to Omnibot. Start the backend, then run pnpm dev:connect.");
   } finally {
     winner.abort();
   }

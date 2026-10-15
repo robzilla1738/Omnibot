@@ -27,15 +27,47 @@ jobs:
         with:
           workspaces: src-tauri
       - run: pnpm install --frozen-lockfile
+      - name: Install pinned dependency auditor
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Audit dependency advisories and scoped exceptions
+        run: python3 scripts/dependency-audit.py
+      - name: Verify release safeguards
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Collect dependency licenses and upstream notices
+        run: python3 scripts/license-inventory.py
+      - name: Upload dependency license inventory
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dependency-license-inventory
+          path: |
+            release-artifacts/license-inventory.json
+            release-artifacts/THIRD-PARTY-LICENSES.txt
+          if-no-files-found: error
+          retention-days: 30
       - run: pnpm setup:sparkle
       - run: pnpm build
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: pnpm test:rust
       - run: pnpm check:rust
-      - run: pnpm exec playwright install chromium
-      - run: pnpm test
+      - run: pnpm exec playwright install chromium webkit
+      - name: Chromium browser tests
+        run: pnpm test
+      - name: WebKit browser tests
+        run: pnpm test
+        env:
+          PLAYWRIGHT_BROWSER: webkit
       - name: Package native app
-        run: pnpm tauri:build --debug --bundles app
+        # CI has no Developer ID. Disable library validation only in this local debug build;
+        # the public release script requires Developer ID and hardened runtime.
+        run: pnpm tauri:build --debug --bundles app --config '{"bundle":{"macOS":{"hardenedRuntime":false}}}'
+      - name: Native backend smoke with an isolated profile
+        shell: bash
+        run: |
+          if launchctl print "gui/$(id -u)" >/dev/null 2>&1; then
+            python3 scripts/smoke-local.py --binary src-tauri/target/debug/bundle/macos/Omnibot.app/Contents/MacOS/Omnibot
+          else
+            echo "Native smoke not run: this runner has no GUI login session. Run the documented native qualification command on macOS before release." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Upload browser failure artifacts
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

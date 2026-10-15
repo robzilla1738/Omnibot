@@ -12,6 +12,8 @@ use tokio::process::Command;
 
 /// Longest single output line kept; the rest of an oversized line is dropped.
 const MAX_LINE_BYTES: usize = 1 << 20;
+const MAX_TURN_OUTPUT_BYTES: usize = 16 << 20;
+const MAX_TURN_TOOL_CALLS: usize = 1000;
 const MAX_TURN_DURATION: Duration = Duration::from_secs(3 * 60 * 60);
 const TERMINATE_GRACE: Duration = Duration::from_secs(3);
 
@@ -174,6 +176,12 @@ impl RegisteredProcessGroup {
 impl Drop for RegisteredProcessGroup {
     fn drop(&mut self) {
         if let Some(pgid) = self.0 {
+            // A successful leader can leave background helpers with closed output pipes.
+            // End their authority before forgetting the group, including on task abort.
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
             running_process_groups().remove(&pgid);
         }
     }
@@ -215,6 +223,7 @@ struct LineReader<R> {
     inner: BufReader<R>,
     buf: Vec<u8>,
     discarding: bool,
+    bytes_read: usize,
 }
 
 impl<R: AsyncRead + Unpin> LineReader<R> {
@@ -223,6 +232,7 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
             inner: BufReader::new(inner),
             buf: Vec::new(),
             discarding: false,
+            bytes_read: 0,
         }
     }
 
@@ -244,6 +254,10 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
             }
             let newline = available.iter().position(|b| *b == b'\n');
             let used = newline.map_or(available.len(), |i| i + 1);
+            self.bytes_read += used;
+            if self.bytes_read > MAX_TURN_OUTPUT_BYTES {
+                return Err(std::io::Error::other("CLI output exceeded 16 MB"));
+            }
             if !self.discarding {
                 let room = MAX_LINE_BYTES.saturating_sub(self.buf.len());
                 self.buf.extend_from_slice(&available[..used.min(room)]);
@@ -713,6 +727,16 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
         .filter(|b| *b > 0.0);
 
     loop {
+        if stdout_lines
+            .bytes_read
+            .saturating_add(stderr_lines.bytes_read)
+            > MAX_TURN_OUTPUT_BYTES
+            || parser.tool_calls.len() >= MAX_TURN_TOOL_CALLS
+        {
+            hit_guardrail = Some("\n\n> **Output guardrail triggered**: The turn exceeded 16 MB of output or 1,000 tool calls and was stopped. Narrow the task and try again.".into());
+            terminate_process_tree(&mut child).await;
+            break;
+        }
         if !stdout_open && !stderr_open && child.try_wait().ok().flatten().is_some() {
             break;
         }
@@ -1822,6 +1846,9 @@ fn upsert_tool_call(
             existing.output_summary = tool.output_summary.clone();
         }
     } else {
+        if local_tools.len() >= MAX_TURN_TOOL_CALLS {
+            return;
+        }
         local_tools.push(tool.clone());
     }
 
@@ -2064,6 +2091,51 @@ mod tests {
         );
         assert_eq!(reader.next_line().await.unwrap().unwrap(), "next");
         assert_eq!(reader.next_line().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn successful_turn_stops_background_descendants_with_closed_pipes() {
+        let f = Fixture::new(&["A"]);
+        f.script("A", "(while [ ! -f release-helper ]; do sleep 0.02; done; touch escaped-helper) </dev/null >/dev/null 2>&1 &\necho Done");
+        assert_eq!(
+            run(&f, CliDriverKind::Custom, "Hi").await.status,
+            "complete"
+        );
+        std::fs::write(f.dir.join("release-helper"), "go").unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!f.dir.join("escaped-helper").exists());
+    }
+
+    #[test]
+    fn one_event_cannot_exceed_the_tool_call_limit() {
+        let f = Fixture::new(&["A"]);
+        let mut parser = StreamParserState::default();
+        let content: Vec<_> = (0..MAX_TURN_TOOL_CALLS + 10)
+            .map(
+                |i| json!({"type":"tool_use", "id":format!("tool-{i}"), "name":"bash", "input":{}}),
+            )
+            .collect();
+        feed(
+            &f,
+            &mut parser,
+            json!({"type":"assistant", "message":{"content":content}}),
+        );
+        assert_eq!(parser.tool_calls.len(), MAX_TURN_TOOL_CALLS);
+    }
+
+    #[tokio::test]
+    async fn aggregate_output_guardrail_stops_a_cli_even_without_newlines() {
+        let f = Fixture::new(&["A"]);
+        f.script("A", "head -c 20000000 /dev/zero | tr '\\000' x\nsleep 30");
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run(&f, CliDriverKind::Custom, "Hi"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.status, "stopped");
+        assert!(result.text.contains("Output guardrail triggered"));
+        assert!(result.text.len() < MAX_LINE_BYTES + 1000);
     }
 
     #[tokio::test]

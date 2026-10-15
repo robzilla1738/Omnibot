@@ -5,6 +5,7 @@ import { defineConfig } from "vite";
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   clearScreen: false,
+  build: { target: "safari14", cssTarget: "safari14" },
   server: {
     port: 1420,
     strictPort: true,

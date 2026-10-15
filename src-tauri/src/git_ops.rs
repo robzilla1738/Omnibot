@@ -47,9 +47,16 @@ enum Git {
 }
 
 const DIFF_PREVIEW_BYTES: u64 = 24_000;
+const FILE_DIFF_BYTES: u64 = 256_000;
 
 fn run_git(cwd: &str, args: &[&str], kind: Git) -> Result<String, String> {
-    run_git_limited(cwd, args, kind, None).map(|(stdout, _)| stdout)
+    let (stdout, truncated) = run_git_limited(cwd, args, kind, Some(8 * 1024 * 1024))?;
+    if truncated {
+        return Err(
+            "Git output exceeded 8 MB. Narrow the repository changes and try again.".into(),
+        );
+    }
+    Ok(stdout)
 }
 
 /// Returns stdout and whether it was cut at `limit` bytes. Git is stopped once it writes past
@@ -77,7 +84,8 @@ fn run_git_limited(
     let _cleanup = OutputDir(output_dir.clone());
     let stdout_path = output_dir.join("stdout");
     let stdout = fs::File::create(&stdout_path).map_err(|e| e.to_string())?;
-    let stderr = fs::File::create(output_dir.join("stderr")).map_err(|e| e.to_string())?;
+    let stderr_path = output_dir.join("stderr");
+    let stderr = fs::File::create(&stderr_path).map_err(|e| e.to_string())?;
     let mut command = Command::new("git");
     command
         .args(args)
@@ -103,19 +111,23 @@ fn run_git_limited(
         Git::Read | Git::Write => 15,
     });
     let stdout_len = || fs::metadata(&stdout_path).map_or(0, |m| m.len());
+    let stderr_overflow = || fs::metadata(&stderr_path).is_ok_and(|m| m.len() > 1024 * 1024);
     let start = std::time::Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             break Some(status);
         }
         let overflow = limit.is_some_and(|limit| stdout_len() > limit);
-        if overflow || start.elapsed() > timeout {
+        if overflow || stderr_overflow() || start.elapsed() > timeout {
             #[cfg(unix)]
             unsafe {
                 libc::kill(-(child.id() as i32), libc::SIGKILL);
             }
             let _ = child.kill();
             let _ = child.wait();
+            if stderr_overflow() {
+                return Err("Git error output exceeded 1 MB; the operation was stopped.".into());
+            }
             if overflow {
                 break None;
             }
@@ -123,8 +135,16 @@ fn run_git_limited(
         }
         std::thread::sleep(Duration::from_millis(10));
     };
+    if stderr_overflow() {
+        return Err(
+            "Git error output exceeded 1 MB. Inspect repository hooks before retrying.".into(),
+        );
+    }
     if status.is_some_and(|status| !status.success()) {
-        let stderr = fs::read(output_dir.join("stderr")).map_err(|e| e.to_string())?;
+        let mut stderr = Vec::new();
+        fs::File::open(output_dir.join("stderr"))
+            .and_then(|file| file.take(16_000).read_to_end(&mut stderr))
+            .map_err(|e| e.to_string())?;
         let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
         return Err(if stderr.is_empty() {
             "git command failed".to_string()
@@ -151,16 +171,22 @@ fn run_git_limited(
     ))
 }
 
+pub fn repository_root(workspace_root: &str) -> Result<String, String> {
+    let output = run_git(workspace_root, &["rev-parse", "--show-toplevel"], Git::Read)?;
+    let path = output.strip_suffix('\n').unwrap_or(&output);
+    fs::canonicalize(path)
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|error| format!("Could not resolve repository: {error}"))
+}
+
 pub fn inspect_git_status(workspace_root: &str) -> GitRepoStatus {
-    let Ok(top_level) = run_git(workspace_root, &["rev-parse", "--show-toplevel"], Git::Read)
-    else {
+    let Ok(root_path) = repository_root(workspace_root) else {
         return GitRepoStatus {
             is_repo: false,
             root_path: workspace_root.to_string(),
             ..Default::default()
         };
     };
-    let root_path = top_level.trim().to_string();
     let git = |args: &[&str]| run_git(&root_path, args, Git::Read);
     // Unborn branches still have a symbolic HEAD; only a detached HEAD has no branch name.
     let branch = git(&["symbolic-ref", "--short", "-q", "HEAD"])
@@ -492,23 +518,51 @@ fn workspace_file(workspace_root: &str, file_path: &str) -> Result<PathBuf, Stri
 }
 
 pub fn read_file_diff(workspace_root: &str, file_path: &str) -> Result<String, String> {
+    let root = repository_root(workspace_root)?;
+    let workspace_root = root.as_str();
     let full = workspace_file(workspace_root, file_path)?;
-    let diff = run_git(
+    let (mut diff, truncated) = run_git_limited(
         workspace_root,
         &["--literal-pathspecs", "diff", "HEAD", "--", file_path],
         Git::Read,
+        Some(FILE_DIFF_BYTES),
     )
     .or_else(|_| {
-        run_git(
+        run_git_limited(
             workspace_root,
             &["--literal-pathspecs", "diff", "--", file_path],
             Git::Read,
+            Some(FILE_DIFF_BYTES),
         )
     })?;
+    if truncated {
+        diff.push_str("\n... [file diff truncated at 256 KB]");
+    }
     if !diff.trim().is_empty() {
         return Ok(diff);
     }
-    fs::read_to_string(&full).map_err(|e| format!("Could not read {file_path}: {e}"))
+    if !fs::metadata(&full).map_err(|e| e.to_string())?.is_file() {
+        return Err("Only regular files can be previewed.".into());
+    }
+    let file = fs::File::open(&full).map_err(|e| format!("Could not read {file_path}: {e}"))?;
+    let mut bytes = Vec::new();
+    file.take(FILE_DIFF_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    let truncated = bytes.len() > FILE_DIFF_BYTES as usize;
+    bytes.truncate(FILE_DIFF_BYTES as usize);
+    if bytes.contains(&0) {
+        return Ok("Binary file (preview unavailable)".into());
+    }
+    let valid = match std::str::from_utf8(&bytes) {
+        Err(error) if truncated && error.error_len().is_none() => error.valid_up_to(),
+        _ => bytes.len(),
+    };
+    let mut content = String::from_utf8_lossy(&bytes[..valid]).into_owned();
+    if truncated {
+        content.push_str("\n... [file truncated at 256 KB]");
+    }
+    Ok(content)
 }
 
 pub fn git_stage_and_commit(workspace_root: &str, message: &str) -> Result<String, String> {
@@ -516,11 +570,14 @@ pub fn git_stage_and_commit(workspace_root: &str, message: &str) -> Result<Strin
     if trimmed.is_empty() {
         return Err("Commit message cannot be empty.".to_string());
     }
-    run_git(workspace_root, &["add", "-A"], Git::Long)?;
-    run_git(workspace_root, &["commit", "-m", trimmed], Git::Long)
+    let root = repository_root(workspace_root)?;
+    run_git(&root, &["add", "-A"], Git::Long)?;
+    run_git(&root, &["commit", "-m", trimmed], Git::Long)
 }
 
 pub fn git_discard_file(workspace_root: &str, file_path: &str) -> Result<String, String> {
+    let root = repository_root(workspace_root)?;
+    let workspace_root = root.as_str();
     let full = workspace_file(workspace_root, file_path)?;
     let tracked = run_git(
         workspace_root,
@@ -541,20 +598,75 @@ pub fn git_discard_file(workspace_root: &str, file_path: &str) -> Result<String,
         )
         .is_ok();
     if tracked {
-        // Restore tracked changes, including staged deletions. Never delete on a Git error.
-        run_git(
+        let branch = run_git(
             workspace_root,
             &[
-                "--literal-pathspecs",
-                "restore",
-                "--source=HEAD",
-                "--staged",
-                "--worktree",
-                "--",
-                file_path,
+                "status",
+                "--porcelain=v2",
+                "--branch",
+                "--untracked-files=no",
             ],
-            Git::Write,
+            Git::Read,
         )?;
+        if branch.lines().any(|line| line == "# branch.oid (initial)") {
+            if !full.is_file() {
+                return Err(
+                    "Only individual files can be discarded before the first commit.".into(),
+                );
+            }
+            run_git(
+                workspace_root,
+                &[
+                    "--literal-pathspecs",
+                    "rm",
+                    "--cached",
+                    "--force",
+                    "--",
+                    file_path,
+                ],
+                Git::Write,
+            )?;
+            fs::remove_file(&full)
+                .map_err(|e| format!("Unstaged {file_path}, but could not remove it: {e}"))?;
+            return Ok(format!("Discarded new file {file_path}"));
+        }
+        let status = run_git(
+            workspace_root,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=no"],
+            Git::Read,
+        )?;
+        let mut entries = status.split('\0').filter(|entry| !entry.is_empty());
+        let mut original = None;
+        while let Some(entry) = entries.next() {
+            if entry.len() < 4 || !entry.is_char_boundary(3) {
+                continue;
+            }
+            if entry[..2].contains(['R', 'C']) {
+                let source = entries.next().ok_or("Incomplete Git rename status")?;
+                if entry[..2].contains('R') && &entry[3..] == file_path {
+                    let source_path = workspace_file(workspace_root, source)?;
+                    if source_path.symlink_metadata().is_ok() {
+                        return Err("The original rename path now exists. Preserve that file before discarding the rename.".into());
+                    }
+                    original = Some(source);
+                    break;
+                }
+            }
+        }
+        // Restore tracked changes, including staged deletions. Never delete on a Git error.
+        let mut args = vec![
+            "--literal-pathspecs",
+            "restore",
+            "--source=HEAD",
+            "--staged",
+            "--worktree",
+            "--",
+            file_path,
+        ];
+        if let Some(original) = original {
+            args.push(original);
+        }
+        run_git(workspace_root, &args, Git::Write)?;
     } else if full.is_file() {
         fs::remove_file(&full).map_err(|e| format!("Failed to remove {file_path}: {e}"))?;
     } else {
@@ -657,6 +769,124 @@ mod tests {
         git_discard_file(root, "*.txt").unwrap();
         assert!(f.dir.join("tracked.txt").exists());
         assert!(!f.dir.join("*.txt").exists());
+    }
+
+    #[test]
+    fn subfolder_actions_use_the_same_repository_relative_paths_as_status() {
+        let f = repository();
+        let root = f.dir.to_str().unwrap();
+        fs::create_dir_all(f.dir.join("sub/sub")).unwrap();
+        for name in ["sub/file.txt", "sub/sub/file.txt"] {
+            fs::write(f.dir.join(name), "original\n").unwrap();
+        }
+        git_stage_and_commit(root, "nested files").unwrap();
+        fs::write(f.dir.join("sub/file.txt"), "selected edit\n").unwrap();
+        fs::write(f.dir.join("sub/sub/file.txt"), "keep this edit\n").unwrap();
+        let sub = f.dir.join("sub");
+        let sub = sub.to_str().unwrap();
+        assert!(inspect_git_status(sub)
+            .changed_files
+            .iter()
+            .any(|f| f.path == "sub/file.txt"));
+        let diff = read_file_diff(sub, "sub/file.txt").unwrap();
+        assert!(diff.contains("+selected edit"));
+        assert!(!diff.contains("keep this edit"));
+        git_discard_file(sub, "sub/file.txt").unwrap();
+        assert_eq!(
+            fs::read_to_string(f.dir.join("sub/file.txt")).unwrap(),
+            "original\n"
+        );
+        assert_eq!(
+            fs::read_to_string(f.dir.join("sub/sub/file.txt")).unwrap(),
+            "keep this edit\n"
+        );
+        fs::write(f.dir.join("tracked.txt"), "root edit\n").unwrap();
+        git_stage_and_commit(sub, "all displayed repository changes").unwrap();
+        assert!(inspect_git_status(sub).changed_files.is_empty());
+    }
+
+    #[test]
+    fn individual_file_previews_are_bounded_for_tracked_and_untracked_files() {
+        let f = repository();
+        let root = f.dir.to_str().unwrap();
+        for name in ["tracked.txt", "untracked.txt"] {
+            fs::write(f.dir.join(name), "💻".repeat(100_000)).unwrap();
+            let diff = read_file_diff(root, name).unwrap();
+            assert!(diff.contains("truncated"));
+            assert!(diff.len() < FILE_DIFF_BYTES as usize + 64);
+            assert!(!diff.contains('\u{FFFD}'));
+        }
+    }
+
+    #[test]
+    fn discard_rename_restores_both_paths_and_preserves_recreated_originals() {
+        let f = repository();
+        let root = f.dir.to_str().unwrap();
+        run_git(root, &["mv", "tracked.txt", "renamed.txt"]).unwrap();
+        fs::write(f.dir.join("tracked.txt"), "new work at old path").unwrap();
+        assert!(git_discard_file(root, "renamed.txt").is_err());
+        assert_eq!(
+            fs::read_to_string(f.dir.join("tracked.txt")).unwrap(),
+            "new work at old path"
+        );
+        fs::remove_file(f.dir.join("tracked.txt")).unwrap();
+        git_discard_file(root, "renamed.txt").unwrap();
+        assert_eq!(
+            fs::read_to_string(f.dir.join("tracked.txt")).unwrap(),
+            "original\n"
+        );
+        assert!(!f.dir.join("renamed.txt").exists());
+        assert!(inspect_git_status(root).changed_files.is_empty());
+    }
+
+    #[test]
+    fn discard_staged_new_file_works_before_and_after_the_first_commit() {
+        for f in [Fixture::new(&[]), repository()] {
+            let root = f.dir.to_str().unwrap();
+            run_git(root, &["init", "-q"]).unwrap();
+            fs::write(f.dir.join("new.txt"), "new work").unwrap();
+            run_git(root, &["add", "new.txt"]).unwrap();
+            git_discard_file(root, "new.txt").unwrap();
+            assert!(!f.dir.join("new.txt").exists());
+            assert!(inspect_git_status(root).changed_files.is_empty());
+        }
+    }
+
+    #[test]
+    fn worktree_discard_never_touches_the_main_checkout() {
+        let f = repository();
+        let root = f.dir.to_str().unwrap();
+        let data = Fixture::new(&[]);
+        let worktree = ensure_bot_worktree_in(root, "room", "bot", &data.dir).unwrap();
+        fs::write(f.dir.join("tracked.txt"), "keep main checkout edit").unwrap();
+        fs::write(Path::new(&worktree).join("tracked.txt"), "worktree edit").unwrap();
+        git_discard_file(&worktree, "tracked.txt").unwrap();
+        assert_eq!(
+            fs::read_to_string(f.dir.join("tracked.txt")).unwrap(),
+            "keep main checkout edit"
+        );
+        assert_eq!(
+            fs::read_to_string(Path::new(&worktree).join("tracked.txt")).unwrap(),
+            "original\n"
+        );
+    }
+
+    #[test]
+    fn noisy_git_hook_is_stopped_with_bounded_error_output() {
+        let f = repository();
+        let root = f.dir.to_str().unwrap();
+        let hooks = f.dir.join("hooks");
+        fs::create_dir(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        fs::write(&hook, "#!/bin/sh\nexec yes noisy-hook >&2\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o700)).unwrap();
+        run_git(root, &["config", "core.hooksPath", hooks.to_str().unwrap()]).unwrap();
+        fs::write(f.dir.join("tracked.txt"), "edit").unwrap();
+        let start = std::time::Instant::now();
+        let error = git_stage_and_commit(root, "hook must stop").unwrap_err();
+        assert!(error.contains("error output exceeded"), "{error}");
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

@@ -309,6 +309,7 @@ export interface OmniPreferences {
 }
 
 export interface OmniSnapshot {
+  profileId: string;
   instanceId: string;
   revision: number;
   storageError?: string | null;

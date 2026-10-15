@@ -2,7 +2,7 @@
 
 A local macOS app for working with AI bots, projects, and group chats through your installed coding CLIs. Built with Tauri, Rust, React, and TypeScript.
 
-[Getting started](#getting-started) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [MIT license](LICENSE)
+[Download for macOS](https://github.com/robzilla1738/Omnibot/releases/latest) · [Changelog](CHANGELOG.md) · [Getting started](#getting-started) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [MIT license](LICENSE)
 
 ## What you can do
 
@@ -17,7 +17,15 @@ Omnibot stores its own conversations, preferences, and memories locally. When yo
 
 ## Getting started
 
-Omnibot is early-stage software. macOS is the supported platform; other platforms have not been validated. Build from source using:
+Download the signed, Apple-notarized universal app from [GitHub Releases](https://github.com/robzilla1738/Omnibot/releases/latest). Open the DMG, drag **Omnibot** to **Applications**, and launch it. The same download contains Apple Silicon and Intel binaries. See the [support matrix](docs/support-matrix.md) for tested platforms and limitations.
+
+Existing users can use **Omnibot → Check for Updates…**. Finish running tasks before updating, and back up `~/.omni-bot/` when it contains important work. Keep the existing data directory; the update preserves the app identity and update key. See [backup and recovery](docs/recovery.md) before downgrading.
+
+Omnibot is early-stage software. macOS is the supported platform; other platforms have not been validated.
+
+### Build from source
+
+For development, install:
 
 - macOS with Xcode Command Line Tools (`xcode-select --install`).
 - Node.js 22 or newer and pnpm 11.12.0 (the version pinned in `package.json`).
@@ -39,7 +47,7 @@ Click **Bots** at the bottom of the sidebar to open the Bot library and add or p
 
 Execution adapters are implemented for Claude Code, Codex, OpenCode, Cursor Agent, Grok Build, Pi, Muse (`muse exec`), Gemini CLI, Aider, and Ollama, plus custom commands. Antigravity and ACP adapters are experimental: they pass one prompt and show plain-text output. Streaming, model discovery, session resume, and usage reporting depend on each CLI's protocol. Unsupported metadata is shown as unavailable rather than guessed.
 
-- Prompts are passed on stdin or after `--`, so a message that starts with `-` is never read as a CLI option.
+- Built-in structured adapters pass prompts on stdin or after `--`. Experimental ACP and custom commands receive one combined context-and-prompt argument; their command must accept that interface. Custom commands are trusted local code.
 - When opened from Finder, Omnibot loads the `PATH` and variables exported by your login shell, so CLIs installed with Homebrew, npm, nvm, mise, and similar tools are found with their API keys.
 - Ollama uses only models already installed (`ollama list`); it never downloads one. Aider runs with `--no-auto-commits` so you review and commit changes yourself.
 - **Approve all tools** applies only to CLIs with an equivalent option; others run with their default permissions and the activity log says so.
@@ -95,8 +103,9 @@ pnpm build
 pnpm setup:sparkle
 pnpm test:rust
 pnpm check:rust
-pnpm exec playwright install chromium
+pnpm exec playwright install chromium webkit
 pnpm test
+PLAYWRIGHT_BROWSER=webkit pnpm test
 pnpm tauri:build
 ```
 
@@ -108,7 +117,9 @@ Tests use temporary repositories, fake CLI processes, and mocked API responses. 
 
 State lives in `~/.omni-bot/`; `OMNI_BOT_HOME` selects another data directory. Back up this folder before testing changes with important conversations. Keep one app instance per data directory.
 
-The local API listens on loopback, normally `127.0.0.1:4321`; the development UI uses `localhost:1420`. Requests need the token in `~/.omni-bot/api-token` (sent as `Authorization: Bearer <token>`); the app passes it to its own window automatically. It is intended for your own machine, not remote hosting. If saved state can't be read, Omnibot keeps the damaged file as `store.corrupt-<time>.json` and restores `store.json.bak`. See [the security policy](SECURITY.md) for the trust boundaries.
+The local API listens on loopback, normally `127.0.0.1:4321`; the development UI uses `localhost:1420`. Requests need the current startup's token in `~/.omni-bot/api-token` (sent as `Authorization: Bearer <token>`); the native app passes it to its own window automatically. For browser-only development, start the backend and Vite, then run `pnpm dev:connect` to open an authenticated browser session; rerun it after a full page reload. It is intended for your own machine, not remote hosting. See [the security policy](SECURITY.md) for the trust boundaries.
+
+State changes use an explicit schema version. Before migrating an older layout/schema, Omnibot preserves a separate `store.pre-migration-*.json` copy. Missing or damaged state can recover from a valid `store.json.bak`; damaged bytes are preserved separately. Newer unsupported schemas fail startup without being overwritten. Older binaries may lack this protection: use the [backup and recovery procedure](docs/recovery.md) before downgrading or testing important data.
 
 The application, Dock entry, executable, window, and bundle are named **Omnibot**. The original data directory, environment variable, and bundle identifier (`com.robzilla1738.botfinity`) are retained for compatibility. Legacy avatar paths and sidebar preferences migrate automatically. Your custom bot names are independent of the application name.
 
@@ -123,6 +134,8 @@ Dropdowns use native platform menus and keyboard controls. Token usage, reported
 Cursor workspace trust is separate from tool approval. **Bot library → Team Rules & Trust → Trust bot homes in Cursor** permits Cursor to trust only Omnibot-managed bot home folders; project folders still need their own approval. This preference defaults off for new profiles. Provider errors are presented without duplicate JSON envelopes, while raw diagnostics remain in terminal run logs.
 
 See the [implementation notes](docs/bot-lifecycle-implementation.md) and [embedded terminal guide](docs/embedded-terminal.md) for behavior, testing, and limitations.
+
+The [support and verification matrix](docs/support-matrix.md) distinguishes implemented adapters from live-provider and native-platform validation. A passing fixture suite does not certify every CLI version or provider account.
 
 ## Contributing and license
 

@@ -41,7 +41,7 @@ export function TerminalPanel({ open, chat, bots, workflowActive, onClose }: {
   const participants = bots.filter(bot => !bot.archived && chat.participantBotIds.includes(bot.id));
   const chatSessions = sessions.filter(session => session.chatId === chat.id);
   const visibleSessions = chatSessions.filter(session => session.mode === view);
-  const selected = visibleSessions.find(session => session.id === selectedId) ?? visibleSessions.at(-1);
+  const selected = visibleSessions.find(session => session.id === selectedId) ?? visibleSessions[visibleSessions.length - 1];
   const selectedBot = bots.find(bot => bot.id === (selected?.botId ?? botId)) ?? participants[0];
   const interactive = chatSessions.find(session => session.mode === "interactive" && isLive(session));
 
@@ -57,7 +57,7 @@ export function TerminalPanel({ open, chat, bots, workflowActive, onClose }: {
         if (disposed) return;
         setSessions(next); setLoadedChat(chat.id);
         const candidates = next.filter(session => session.mode === view);
-        if (follow) setSelectedId((candidates.filter(isLive).at(-1) ?? candidates.at(-1))?.id ?? null);
+        if (follow) setSelectedId((candidates.filter(isLive).pop() ?? candidates[candidates.length - 1])?.id ?? null);
       } catch (error) { if (!disposed) setError(String(error)); }
       finally { if (!disposed) timer = setTimeout(refresh, 750); }
     };

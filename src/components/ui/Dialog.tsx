@@ -5,7 +5,7 @@ const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([t
 
 export function focusableElements(root: HTMLElement): HTMLElement[] {
   // Elements opted out with tabindex="-1" (e.g. listbox options driven by aria-activedescendant) are not Tab stops.
-  return [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(el => el.tabIndex >= 0 && !el.closest("[inert]") && el.getClientRects().length > 0);
+  return [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(el => el.tabIndex >= 0 && !el.matches(":disabled") && !el.closest("[inert]") && el.getClientRects().length > 0);
 }
 
 /**
@@ -51,10 +51,12 @@ export function useDialog({ open, onClose, dismissible = true, initialFocus }: {
     event.stopPropagation();
     const items = focusableElements(panel);
     if (items.length === 0) { event.preventDefault(); panel.focus(); return; }
-    const first = items[0], last = items[items.length - 1];
-    const active = document.activeElement;
-    if (event.shiftKey && (active === first || active === panel || !panel.contains(active))) { event.preventDefault(); last.focus(); }
-    else if (!event.shiftKey && (active === last || !panel.contains(active))) { event.preventDefault(); first.focus(); }
+    // Safari's native Tab order may skip buttons; keep every dialog stop reachable.
+    const index = items.indexOf(document.activeElement as HTMLElement);
+    let next = index + (event.shiftKey ? -1 : 1);
+    if (next < 0) next = items.length - 1;
+    event.preventDefault();
+    items[next % items.length].focus();
   }, [dismissible]);
 
   return { panelRef, onKeyDown };

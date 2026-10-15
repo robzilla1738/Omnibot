@@ -10,6 +10,7 @@ function menuItems(root: HTMLElement | null): HTMLElement[] {
  */
 export function useMenu<T extends HTMLElement = HTMLDivElement>(open: boolean, onClose: () => void) {
   const menuRef = useRef<T>(null);
+  const triggerRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
   useLayoutEffect(() => { onCloseRef.current = onClose; });
 
@@ -24,7 +25,8 @@ export function useMenu<T extends HTMLElement = HTMLDivElement>(open: boolean, o
       cancelAnimationFrame(frame);
       const active = document.activeElement;
       const focusLost = !active || active === document.body || (menuRef.current?.contains(active) ?? false);
-      if (opener?.isConnected && focusLost) opener.focus({ preventScroll: true });
+      const trigger = triggerRef.current ?? opener;
+      if (trigger?.isConnected && focusLost) trigger.focus({ preventScroll: true });
     };
   }, [open]);
 
@@ -44,5 +46,5 @@ export function useMenu<T extends HTMLElement = HTMLDivElement>(open: boolean, o
     }
   }, []);
 
-  return { menuRef, onKeyDown };
+  return { menuRef, triggerRef, onKeyDown };
 }

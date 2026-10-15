@@ -63,7 +63,7 @@ pub async fn spawn_local_server() -> Result<LocalServer, String> {
     let (event_tx, _) = broadcast::channel::<OmniStreamEvent>(512);
     let runtime_state = OmniRuntimeState::load(bound_port, event_tx.clone())?;
     let api_token = new_api_token();
-    write_api_token(&runtime_state.data_dir, &api_token)?;
+    write_api_connection(&runtime_state.data_dir, &api_token, bound_port)?;
     let shared: SharedOmniState = Arc::new(RwLock::new(runtime_state));
 
     let app = local_router(shared.clone(), bound_port, api_token.clone());
@@ -92,27 +92,32 @@ fn new_api_token() -> String {
 }
 
 /// Local tools (such as the smoke test) read the token from here; the UI uses IPC.
-fn write_api_token(data_dir: &std::path::Path, token: &str) -> Result<(), String> {
+fn write_api_connection(data_dir: &std::path::Path, token: &str, port: u16) -> Result<(), String> {
     use std::io::Write;
-    let path = data_dir.join("api-token");
-    let result = (|| {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&path)?;
-        // An older file may have been created with wider permissions.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        }
-        file.write_all(token.as_bytes())
-    })();
-    result.map_err(|e| format!("Omnibot couldn't write {}: {e}", path.display()))
+    for (name, value) in [
+        ("api-token", token.to_owned()),
+        ("api-port", port.to_string()),
+    ] {
+        let path = data_dir.join(name);
+        let result = (|| {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+            file.write_all(value.as_bytes())
+        })();
+        result.map_err(|e| format!("Omnibot couldn't write {}: {e}", path.display()))?;
+    }
+    Ok(())
 }
 
 pub fn local_router(shared: SharedOmniState, bound_port: u16, api_token: String) -> Router {
@@ -242,15 +247,6 @@ fn presented_token(request: &Request) -> Option<&str> {
 fn authorized(request: &Request, token: &str) -> bool {
     // Preflights never carry credentials; the real request is checked afterwards.
     if request.method() == axum::http::Method::OPTIONS {
-        return true;
-    }
-    if cfg!(debug_assertions)
-        && request
-            .headers()
-            .get("origin")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|origin| DEV_ORIGINS.contains(&origin))
-    {
         return true;
     }
     presented_token(request)
@@ -1393,6 +1389,7 @@ pub async fn git_commit(
     message: String,
 ) -> Result<OmniSnapshot, String> {
     let root = git_root(&state, Some(&chat_id), task_id.as_deref())?;
+    let root = blocking(move || crate::git_ops::repository_root(&root)).await?;
     let operation_id = uuid::Uuid::new_v4().to_string();
     let _lease = crate::execution::acquire_for_git(state.clone(), &operation_id, &root).await?;
     tokio::task::spawn_blocking(move || git_stage_and_commit(&root, &message))
@@ -1412,6 +1409,7 @@ pub async fn git_discard(
     file_path: String,
 ) -> Result<OmniSnapshot, String> {
     let root = git_root(&state, Some(&chat_id), task_id.as_deref())?;
+    let root = blocking(move || crate::git_ops::repository_root(&root)).await?;
     let operation_id = uuid::Uuid::new_v4().to_string();
     let _lease = crate::execution::acquire_for_git(state.clone(), &operation_id, &root).await?;
     tokio::task::spawn_blocking(move || git_discard_file(&root, &file_path))
@@ -1628,9 +1626,42 @@ mod tests {
         assert!(query.starts_with("HTTP/1.1 200"), "{query}");
         let dev = raw_request(port, get("/api/test", "Origin: http://localhost:1420\r\n")).await;
         if cfg!(debug_assertions) {
-            assert!(dev.starts_with("HTTP/1.1 200"), "{dev}");
+            assert!(dev.starts_with("HTTP/1.1 401"), "{dev}");
         } else {
             assert!(dev.starts_with("HTTP/1.1 403"), "{dev}");
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn forged_development_origins_cannot_read_or_mutate_without_a_token() {
+        let (port, server) = test_server().await;
+        for origin in [
+            "http://localhost:1420",
+            "http://127.0.0.1:1420",
+            "http://localhost:1422",
+            "http://127.0.0.1:1422",
+        ] {
+            for method in ["GET", "POST"] {
+                let request = |auth: &str| {
+                    format!("{method} /api/test HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: {origin}\r\n{auth}Content-Length: 0\r\nConnection: close\r\n\r\n")
+                };
+                let response = raw_request(port, request("")).await;
+                assert!(
+                    response.starts_with(if cfg!(debug_assertions) {
+                        "HTTP/1.1 401"
+                    } else {
+                        "HTTP/1.1 403"
+                    }),
+                    "{response}"
+                );
+                if cfg!(debug_assertions) {
+                    let response =
+                        raw_request(port, request(&format!("Authorization: Bearer {TOKEN}\r\n")))
+                            .await;
+                    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+                }
+            }
         }
         server.abort();
     }

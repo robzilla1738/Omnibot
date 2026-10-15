@@ -128,6 +128,7 @@ export function AppSidebar(props: AppSidebarProps) {
     e.preventDefault();
     e.stopPropagation();
     if (setupMode) return;
+    if (e.currentTarget instanceof HTMLElement) contextMenuKeys.triggerRef.current = e.currentTarget;
     const x = Math.min(e.clientX, window.innerWidth - 220);
     const y = Math.min(e.clientY, window.innerHeight - 220);
     setContextMenu({ kind: "bot", bot, x, y });

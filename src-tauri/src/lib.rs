@@ -407,6 +407,7 @@ pub fn run() {
             updates::omni_update_status,
             updates::omni_check_for_updates,
             updates::omni_set_automatic_updates,
+            updates::omni_set_draft_persistence_blocked,
             omni_api_token,
             omni_snapshot,
             omni_complete_setup,

@@ -3,7 +3,7 @@ import type { OmniSnapshot, ChatMessage } from "../src/lib/types";
 
 function snapshot(): OmniSnapshot {
   return {
-    instanceId: "fixture", revision: 1,
+    profileId: "fixture-profile", instanceId: "fixture", revision: 1,
     serverPort: 4321, serverBaseUrl: "http://127.0.0.1:4321",
     preferences: {
       onboardingCompleted: true, pinnedBotIds: [], workspaceRoot: "/tmp/test-project", defaultMaxSwarmTurns: 4, approveAllTools: false, globalInstructions: "", sharedMemories: [],
@@ -24,7 +24,7 @@ test.afterEach(async ({ page }) => {
   expect(unexpectedRequests.get(page) ?? [], "requests without a fixture").toEqual([]);
 });
 
-type FixtureEventsControl = { setDown(down: boolean): void };
+type FixtureEventsControl = { setDown(down: boolean): void; emit(): void };
 
 /**
  * A fulfilled route can only return a finished SSE body, which makes the real EventSource drop and
@@ -66,7 +66,7 @@ async function installFixtureEventSource(page: Page) {
     // Leave an EventSource that a test installed itself in place.
     if (!/\[native code\]/.test(Function.prototype.toString.call(window.EventSource))) return;
     win.EventSource = FixtureEventSource;
-    win.__fixtureEvents = { setDown(next) { down = next; if (next) for (const source of [...live]) source.fail(); } };
+    win.__fixtureEvents = { emit() { for (const source of live) source.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ type: "state-updated", chatId: null }) })); }, setDown(next) { down = next; if (next) for (const source of [...live]) source.fail(); } };
   });
 }
 
@@ -612,9 +612,9 @@ test("sidebar stays clean while views, ordering, collapsing and renaming persist
   await sidebar.click({ button: "right", position: { x: 8, y: 240 } });
   await sidebar.getByRole("button", { name: "Reset view & restore hidden items" }).click();
   await sidebar.getByTitle("Close sidebar settings").click();
-  await page.screenshot({ path: "test-results/sidebar-clean.png" });
+  await page.screenshot({ path: test.info().outputPath("sidebar-clean.png") });
   await sidebar.click({ button: "right", position: { x: 8, y: 240 } });
-  await page.screenshot({ path: "test-results/sidebar-settings.png" });
+  await page.screenshot({ path: test.info().outputPath("sidebar-settings.png") });
 });
 
 test("home creates explicit project work without moving the personal chat", async ({ page }) => {
@@ -746,7 +746,7 @@ test("sidebar views stay outside the fade, rows fit, and sections drag without c
   await expect(sidebar.getByTitle("Options for Helper")).toBeFocused();
   await page.reload();
   await expect(sidebar.locator("[data-sidebar-section]").first()).toHaveAttribute("data-sidebar-section", "projects");
-  await page.screenshot({ path: "test-results/sidebar-restored.png" });
+  await page.screenshot({ path: test.info().outputPath("sidebar-restored.png") });
 });
 
 test("app updates explain availability in the browser without offering an unusable check", async ({ page }) => {
@@ -846,10 +846,10 @@ test("terminal panel follows output, expands, searches, and hides without stoppi
   await expect(panel.getByRole("tab", { name: /Test Bot/ })).toBeVisible();
   await expect(panel.locator(".xterm-accessibility-tree")).toContainText("READY: live process output");
   await panel.getByRole("textbox", { name: "Search terminal output" }).fill("READY");
-  await page.screenshot({ path: "test-results/terminal-split.png" });
+  await page.screenshot({ path: test.info().outputPath("terminal-split.png") });
   await panel.getByRole("button", { name: "Expand terminal", exact: true }).click();
   await expect(panel).toHaveClass(/terminal-expanded/);
-  await page.screenshot({ path: "test-results/terminal-output.png" });
+  await page.screenshot({ path: test.info().outputPath("terminal-output.png") });
   await panel.getByRole("button", { name: "Hide terminal" }).click();
   await expect(panel).toBeHidden();
   await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
@@ -1169,7 +1169,8 @@ test("the offline screen can retry connecting to the backend", async ({ page }) 
   await installFixtureEventSource(page);
   await page.route("**/api/snapshot", route => online ? route.fallback() : route.fulfill({ status: 503, body: "Starting" }));
   await page.goto("/");
-  await expect(page.getByText("Could not reach the Omnibot local backend.")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Omnibot Local Daemon Offline" })).toBeVisible();
+  await expect(page.getByText(/Start the backend, then run pnpm dev:connect/)).toBeVisible();
   online = true;
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeVisible();
@@ -1206,4 +1207,365 @@ test("workflow cost limit accepts 0 as no limit and rejects invalid input", asyn
   await page.getByRole("button", { name: "No limit", exact: true }).click();
   await expect.poll(() => state.preferences.maxTurnBudgetUsd).toBe(0);
   await expect(page.getByRole("button", { name: "No limit", exact: true })).toHaveAttribute("aria-pressed", "true");
+});
+
+test("chat drafts and their selected skill survive navigation and reload", async ({ page }) => {
+  const state = snapshot();
+  state.skills = [{ id: "review", name: "Fixture skill", slug: "fixture-skill", description: "Review locally", path: "/tmp/fixture/SKILL.md", source: "fixture" }];
+  state.chats.push({ ...state.chats[0], id: "other", title: "Other chat", isPrimary: false });
+  await mockBackend(page, state);
+  const composer = page.getByPlaceholder(/^Message /);
+  await composer.fill("/fixture-skill");
+  await page.getByRole("button", { name: /Fixture skill.*fixture-skill/ }).click();
+  await composer.fill("Draft for the first chat");
+  await page.getByRole("button", { name: "Open Other chat", exact: true }).click();
+  await expect(composer).toHaveValue("");
+  await composer.fill("Draft for the other chat");
+  await page.reload();
+  await expect(composer).toHaveValue("Draft for the first chat");
+  await expect(page.getByRole("main").getByText("/fixture-skill", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Open Other chat", exact: true }).click();
+  await expect(composer).toHaveValue("Draft for the other chat");
+});
+
+test("a delayed failed send preserves a newer draft and a successful send clears only submitted text", async ({ page }) => {
+  const state = snapshot();
+  const sends = await mockBackend(page, state);
+  let finishSend!: () => void;
+  const gate = new Promise<void>(resolve => { finishSend = resolve; });
+  let received = false;
+  const reject = async (route: import("@playwright/test").Route) => {
+    received = true;
+    await gate;
+    await route.fulfill({ status: 400, body: "Delayed rejection" });
+  };
+  await page.route("**/api/chat/send", reject);
+  const composer = page.getByPlaceholder(/^Message /);
+  await composer.fill("Original request");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect.poll(() => received).toBe(true);
+  await composer.fill("Newer draft");
+  finishSend();
+  await expect(page.getByRole("alert")).toHaveText("Delayed rejection");
+  await expect(composer).toHaveValue("Newer draft");
+  await page.reload();
+  await expect(composer).toHaveValue("Newer draft");
+  await page.unroute("**/api/chat/send", reject);
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect.poll(() => sends.length).toBe(1);
+  await expect(composer).toHaveValue("");
+  await page.reload();
+  await expect(composer).toHaveValue("");
+});
+
+test("draft storage failures warn the user while preserving drafts across navigation", async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key, value) {
+      if (key.startsWith("omnibot.chat-drafts.v1:")) throw new DOMException("Storage full", "QuotaExceededError");
+      return original.call(this, key, value);
+    };
+  });
+  const state = snapshot();
+  state.chats.push({ ...state.chats[0], id: "other", title: "Other chat", isPrimary: false });
+  await mockBackend(page, state);
+  await page.getByPlaceholder(/^Message /).fill("Keep this draft in memory");
+  await expect(page.getByRole("alert")).toContainText("Draft changes could not be saved");
+  await page.getByRole("button", { name: "Open Other chat", exact: true }).click();
+  await page.getByRole("button", { name: "Open Test Bot", exact: true }).click();
+  await expect(page.getByPlaceholder(/^Message /)).toHaveValue("Keep this draft in memory");
+});
+
+for (const effort of ["xhigh", "future-effort"]) {
+  test(`sending inherits saved ${effort} effort until explicitly overridden`, async ({ page }) => {
+    const state = snapshot();
+    state.bots[0].reasoningEffort = effort;
+    state.bots[0].cliDriver = "codex";
+    state.harnesses = [{ id: "codex", kind: "codex", name: "Codex", binaryName: "codex", installed: true, models: [], supportsEffort: true, description: "", installHint: "", authHint: "", supportsJsonStream: true, supportsSessionResume: true }];
+    await mockBackend(page, state);
+    const sends: Record<string, unknown>[] = [];
+    await page.route("**/api/chat/send", route => { sends.push(route.request().postDataJSON()); return route.fulfill({ json: { ok: true, messageId: "sent" } }); });
+    const composer = page.getByPlaceholder(/^Message /);
+    await composer.fill("Use the saved effort");
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    await expect.poll(() => sends.length).toBe(1);
+    expect(sends[0].overrideEffort).toBeUndefined();
+    await page.getByRole("button", { name: "Switch target Bot, CLI model, or parallel group mode" }).click();
+    await expect(page.getByRole("button", { name: `Bot default (${effort})`, exact: true })).toHaveAttribute("aria-pressed", "true");
+    await page.getByRole("button", { name: "low", exact: true }).click();
+    await page.getByRole("main").click({ position: { x: 400, y: 150 } });
+    await expect(page.getByRole("button", { name: "low", exact: true })).toBeHidden();
+    await composer.fill("Use low this time");
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    await expect.poll(() => sends.length).toBe(2);
+    expect(sends[1].overrideEffort).toBe("low");
+  });
+}
+
+for (const source of ["library", "search"]) {
+  test(`launching a skill from ${source} applies it to the next message`, async ({ page }) => {
+    const state = snapshot();
+    state.skills = [{ id: "review", name: "Fixture skill", slug: "fixture-skill", description: "Review locally", path: "/tmp/fixture/SKILL.md", source: "fixture" }];
+    const sends = await mockBackend(page, state);
+    await page.route("**/api/chat/create", async route => {
+      const input = route.request().postDataJSON();
+      const chat = { ...state.chats[0], id: "skill-chat", title: input.title, isPrimary: false };
+      state.chats.push(chat);
+      await route.fulfill({ json: { chat, snapshot: state } });
+    });
+    if (source === "library") {
+      await page.getByRole("button", { name: "Bot library", exact: true }).click();
+      await page.getByRole("button", { name: /^Agent Skills/ }).click();
+      await page.getByRole("button", { name: "Launch", exact: true }).click();
+    } else {
+      await page.keyboard.press("ControlOrMeta+k");
+      await page.getByRole("combobox", { name: "Search", exact: true }).fill("Fixture skill");
+      await page.getByRole("option", { name: /Fixture skill/ }).click();
+    }
+    await expect(page.getByRole("main").getByText("/fixture-skill", { exact: true })).toBeVisible();
+    await page.getByPlaceholder(/^Message /).fill("Review this");
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    await expect.poll(() => sends.length).toBe(1);
+    expect(sends[0]).toMatchObject({ chatId: "skill-chat", skillSlug: "fixture-skill", text: "Review this" });
+  });
+}
+
+test("diff responses stay with the selected file, chat, and worktree", async ({ page }) => {
+  const state = snapshot();
+  state.gitStatus = { ...state.gitStatus, isRepo: true, branch: "main", changedFiles: ["first.txt", "second.txt"].map(path => ({ path, status: "modified", staged: false })) };
+  state.chats[0].tasks = [{ id: "worktree", workflowId: "workflow", botId: "bot-a", instructions: "Review", mode: "sequential", status: "complete", workspacePath: "/tmp/worktree" }];
+  state.chats.push({ ...state.chats[0], id: "other", title: "Other chat", isPrimary: false, workspacePath: "/tmp/other" });
+  await mockBackend(page, state);
+  let finishFirst!: () => void;
+  const gate = new Promise<void>(resolve => { finishFirst = resolve; });
+  let firstRequested = false;
+  await page.route("**/api/git/diff?**", async route => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("path") === "first.txt") { firstRequested = true; await gate; return route.fulfill({ json: { diff: "STALE FIRST DIFF" } }); }
+    await route.fulfill({ json: { diff: "CURRENT SECOND DIFF" } });
+  });
+  await page.keyboard.press("ControlOrMeta+i");
+  await page.getByRole("button", { name: /^Project & Git/ }).click();
+  await page.getByRole("button", { name: "first.txt", exact: true }).click();
+  await expect.poll(() => firstRequested).toBe(true);
+  await page.getByRole("button", { name: "second.txt", exact: true }).click();
+  await expect(page.getByText("CURRENT SECOND DIFF", { exact: true })).toBeVisible();
+  const firstResponse = page.waitForResponse(response => response.url().includes("/api/git/diff?") && new URL(response.url()).searchParams.get("path") === "first.txt");
+  finishFirst();
+  await firstResponse;
+  await expect(page.getByText("STALE FIRST DIFF", { exact: true })).toHaveCount(0);
+  await page.getByRole("combobox", { name: "Git working folder" }).selectOption("worktree");
+  await expect(page.getByText("CURRENT SECOND DIFF", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "second.txt", exact: true }).click();
+  await expect(page.getByText("CURRENT SECOND DIFF", { exact: true })).toBeVisible();
+  await page.keyboard.press("ControlOrMeta+b");
+  await page.getByRole("button", { name: "Open Other chat", exact: true }).click();
+  await page.getByRole("button", { name: /^Project & Git/ }).click();
+  await expect(page.getByText("CURRENT SECOND DIFF", { exact: true })).toHaveCount(0);
+});
+
+test("a delayed avatar decode cannot change a different bot editor", async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = HTMLImageElement.prototype.decode;
+    HTMLImageElement.prototype.decode = async function () {
+      await original.call(this);
+      await new Promise<void>(resolve => { (window as unknown as { finishAvatar: () => void }).finishAvatar = resolve; });
+    };
+  });
+  const state = snapshot();
+  state.bots.push({ ...state.bots[0], id: "other-bot", name: "Other Bot", isPrimary: false });
+  await mockBackend(page, state);
+  await page.getByRole("button", { name: "Bot library", exact: true }).click();
+  await page.getByRole("button", { name: "Edit", exact: true }).first().click();
+  await page.getByRole("group", { name: "Profile picture", exact: true }).filter({ visible: true }).getByLabel("Upload profile picture", { exact: true }).setInputFiles("public/omnibot-gauntlet.png");
+  await expect.poll(() => page.evaluate(() => typeof (window as unknown as { finishAvatar?: () => void }).finishAvatar)).toBe("function");
+  await page.getByRole("button", { name: "Edit", exact: true }).nth(1).click();
+  await expect(page.getByPlaceholder("Bot Name (e.g. Architect, Reviewer, Sentinel)")).toHaveValue("Other Bot");
+  await page.evaluate(() => (window as unknown as { finishAvatar: () => void }).finishAvatar());
+  await page.getByRole("button", { name: "Save Bot", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Save Bot", exact: true })).toBeHidden();
+  expect(state.bots[1].avatarImage).toBeNull();
+});
+
+test("a previous bot save cannot close a newly opened editor", async ({ page }) => {
+  const state = snapshot();
+  state.bots.push({ ...state.bots[0], id: "other-bot", name: "Other Bot", isPrimary: false });
+  await mockBackend(page, state);
+  let finishSave!: () => void;
+  const gate = new Promise<void>(resolve => { finishSave = resolve; });
+  let requested = false;
+  await page.route("**/api/bot/upsert", async route => {
+    const bot = route.request().postDataJSON();
+    requested = true;
+    await gate;
+    Object.assign(state.bots[0], bot);
+    await route.fulfill({ json: state });
+  });
+  await page.getByRole("button", { name: "Bot library", exact: true }).click();
+  await page.getByRole("button", { name: "Edit", exact: true }).first().click();
+  await page.getByRole("button", { name: "Save Bot", exact: true }).click();
+  await expect.poll(() => requested).toBe(true);
+  await page.getByRole("button", { name: "Edit", exact: true }).nth(1).click();
+  const saved = page.waitForResponse("**/api/bot/upsert");
+  finishSave();
+  await saved;
+  await expect(page.getByPlaceholder("Bot Name (e.g. Architect, Reviewer, Sentinel)")).toHaveValue("Other Bot");
+  await expect(page.getByRole("button", { name: "Save Bot", exact: true })).toBeVisible();
+});
+
+test("an inspector avatar upload locks profile edits and keeps refreshed profile fields", async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = HTMLImageElement.prototype.decode;
+    HTMLImageElement.prototype.decode = async function () {
+      await original.call(this);
+      await new Promise<void>(resolve => { (window as unknown as { finishAvatar: () => void }).finishAvatar = resolve; });
+    };
+  });
+  const state = snapshot();
+  await mockBackend(page, state);
+  await page.keyboard.press("ControlOrMeta+i");
+  await page.getByRole("button", { name: "Edit Bot", exact: true }).click();
+  await page.getByRole("group", { name: "Profile picture", exact: true }).filter({ visible: true }).getByLabel("Upload profile picture", { exact: true }).setInputFiles("public/omnibot-gauntlet.png");
+  await expect.poll(() => page.evaluate(() => typeof (window as unknown as { finishAvatar?: () => void }).finishAvatar)).toBe("function");
+  await expect(page.getByRole("textbox", { name: "Bot name", exact: true })).toBeDisabled();
+  state.bots[0].name = "Updated name";
+  await page.evaluate(() => (window as unknown as { __fixtureEvents: FixtureEventsControl }).__fixtureEvents.emit());
+  await expect(page.getByText("Updated name · Character & CLI", { exact: true })).toBeVisible();
+  await page.evaluate(() => (window as unknown as { finishAvatar: () => void }).finishAvatar());
+  await expect.poll(() => state.bots[0].avatarImage).toMatch(/^data:image\/png;base64,/);
+  expect(state.bots[0].name).toBe("Updated name");
+});
+
+test("drafts stay isolated between backend profiles with identical chat IDs", async ({ page }) => {
+  const state = snapshot();
+  await mockBackend(page, state);
+  const composer = page.getByPlaceholder(/^Message /);
+  await composer.fill("First profile private draft");
+  state.profileId = "second-profile";
+  await page.reload();
+  await expect(composer).toHaveValue("");
+  await composer.fill("Second profile draft");
+  state.profileId = "fixture-profile";
+  await page.reload();
+  await expect(composer).toHaveValue("First profile private draft");
+});
+
+test("failed draft writes prevent unload until a later write succeeds", async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = Storage.prototype.setItem;
+    (window as unknown as { failDraftWrites: boolean }).failDraftWrites = true;
+    Storage.prototype.setItem = function (key, value) {
+      if (key.startsWith("omnibot.chat-drafts.v1:") && (window as unknown as { failDraftWrites: boolean }).failDraftWrites) throw new DOMException("Storage full", "QuotaExceededError");
+      return original.call(this, key, value);
+    };
+  });
+  await mockBackend(page, snapshot());
+  const composer = page.getByPlaceholder(/^Message /);
+  await composer.fill("Unsaved text");
+  await expect(page.getByRole("alert")).toContainText("Draft changes could not be saved");
+  const unloadPrevented = () => page.evaluate(() => {
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+  expect(await unloadPrevented()).toBe(true);
+  await page.evaluate(() => { (window as unknown as { failDraftWrites: boolean }).failDraftWrites = false; });
+  await composer.fill("Saved text");
+  await expect.poll(unloadPrevented).toBe(false);
+  await page.reload();
+  await expect(composer).toHaveValue("Saved text");
+});
+
+test("long history remains responsive during concurrent bot event bursts", async ({ page }) => {
+  const state = snapshot();
+  state.bots.push(...["b", "c"].map(id => ({ ...state.bots[0], id: `bot-${id}`, name: `Bot ${id}`, isPrimary: false })));
+  state.chats[0].isGroup = true;
+  state.chats[0].participantBotIds = state.bots.map(bot => bot.id);
+  state.chats[0].messages = Array.from({ length: 3000 }, (_, index) => ({ ...message(`History entry ${index + 1}: ${"A completed review result. ".repeat(20)}`), id: `history-${index}` }));
+  const replies: ChatMessage[] = state.bots.map(bot => ({ ...message(`Concurrent reply from ${bot.name}`), id: `live-${bot.id}`, authorBotId: bot.id, authorName: bot.name, status: "streaming" as const }));
+  state.chats[0].messages.push(...replies);
+  state.activeWorkflowChatIds = ["room"];
+  await mockBackend(page, state);
+  const composer = page.getByPlaceholder(/^Message /);
+  await expect(composer).toBeVisible();
+  let snapshotRequests = 0;
+  await page.route("**/api/snapshot", route => { snapshotRequests++; return route.fulfill({ json: state }); });
+  await page.evaluate(() => {
+    const win = window as unknown as { __fixtureEvents: FixtureEventsControl; stressFrames: number[]; stopStress: () => void };
+    win.stressFrames = [];
+    let previous = performance.now();
+    let frame = 0;
+    const sample = (now: number) => { win.stressFrames.push(now - previous); previous = now; frame = requestAnimationFrame(sample); };
+    frame = requestAnimationFrame(sample);
+    const burst = setInterval(() => { for (let i = 0; i < 50; i++) win.__fixtureEvents.emit(); }, 20);
+    win.stopStress = () => { clearInterval(burst); cancelAnimationFrame(frame); };
+  });
+  const typingStart = Date.now();
+  await composer.pressSequentially("Draft stays responsive while three bots stream", { delay: 15 });
+  const typingMs = Date.now() - typingStart;
+  await expect(composer).toHaveValue("Draft stays responsive while three bots stream");
+  for (const reply of replies) { reply.text += " — final result"; reply.status = "complete"; }
+  state.activeWorkflowChatIds = [];
+  state.revision++;
+  await page.evaluate(() => (window as unknown as { __fixtureEvents: FixtureEventsControl }).__fixtureEvents.emit());
+  await expect(page.getByText("Concurrent reply from Bot c — final result", { exact: true })).toBeVisible();
+  const frameGaps = await page.evaluate(() => { const win = window as unknown as { stopStress: () => void; stressFrames: number[] }; win.stopStress(); return win.stressFrames; });
+  const maxFrameGapMs = Math.max(...frameGaps);
+  const renderedHistoryMessages = await page.locator("p").filter({ hasText: /^History entry / }).count();
+  const measurements = { historyMessages: 3000, concurrentBots: 3, eventsPerSecond: 2500, typingMs, maxFrameGapMs, snapshotRequests, renderedHistoryMessages };
+  await test.info().attach("responsiveness.json", { body: JSON.stringify(measurements, null, 2), contentType: "application/json" });
+  console.log("Responsiveness fixture:", measurements);
+  expect(typingMs).toBeLessThan(5000);
+  expect(maxFrameGapMs).toBeLessThan(1000);
+  expect(snapshotRequests).toBeLessThan(15);
+  expect(renderedHistoryMessages).toBeLessThanOrEqual(200);
+});
+
+test("custom model entry does not carry into another bot editor", async ({ page }) => {
+  const state = snapshot();
+  state.bots.push({ ...state.bots[0], id: "other-bot", name: "Other Bot", isPrimary: false });
+  await mockBackend(page, state);
+  await page.getByRole("button", { name: "Bot library", exact: true }).click();
+  await page.getByRole("button", { name: "Edit", exact: true }).first().click();
+  await page.getByRole("combobox", { name: "Default model", exact: true }).selectOption("__custom__");
+  await page.getByRole("textbox", { name: "Default model custom ID", exact: true }).fill("first-bot-only");
+  await page.getByRole("button", { name: "Edit", exact: true }).nth(1).click();
+  await expect(page.getByPlaceholder("Bot Name (e.g. Architect, Reviewer, Sentinel)")).toHaveValue("Other Bot");
+  await expect(page.getByRole("textbox", { name: "Default model custom ID", exact: true })).toBeHidden();
+  await expect(page.getByRole("combobox", { name: "Default model", exact: true })).toHaveValue("");
+});
+
+test("unreadable saved drafts are retained and prevent unloading new unsaved work", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("omnibot.chat-drafts.v1:fixture-profile", "unreadable saved data"));
+  await mockBackend(page, snapshot());
+  await expect(page.getByRole("alert")).toContainText("Saved drafts could not be loaded");
+  await page.getByPlaceholder(/^Message /).fill("New work kept in memory");
+  expect(await page.evaluate(() => localStorage.getItem("omnibot.chat-drafts.v1:fixture-profile"))).toBe("unreadable saved data");
+  expect(await page.evaluate(() => {
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  })).toBe(true);
+});
+
+
+test("sidebar menus restore focus to their trigger when pointer clicks do not focus buttons", async ({ page }) => {
+  const state = snapshot();
+  state.bots.push({ ...state.bots[0], id: "helper", name: "Helper", isPrimary: false });
+  state.preferences.pinnedBotIds = ["helper"];
+  await mockBackend(page, state);
+  const sidebar = page.getByRole("complementary", { name: "Sidebar" });
+  const trigger = sidebar.getByTitle("Options for Helper");
+  await page.getByPlaceholder(/^Message /).focus();
+  // Safari leaves focus on the previous element when a pointer opens a button menu.
+  await trigger.evaluate(button => button.addEventListener("mousedown", event => event.preventDefault()));
+  await trigger.click();
+  await expect(sidebar.getByRole("menuitem", { name: "Rename", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(trigger).toBeFocused();
+  const row = sidebar.getByRole("button", { name: "Open Helper", exact: true });
+  await row.click({ button: "right" });
+  await expect(sidebar.getByRole("menuitem", { name: "Rename", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(row).toBeFocused();
 });

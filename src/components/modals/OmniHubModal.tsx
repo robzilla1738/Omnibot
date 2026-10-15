@@ -22,7 +22,7 @@ import {
   X,
 } from "lucide-react";
 import { AvatarPicker } from "../bots/AvatarPicker";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { duplicateBot } from "../../lib/bots";
 import { Dialog, useConfirm } from "../ui/Dialog";
 import { errorMessage } from "../ui/Notices";
@@ -145,6 +145,7 @@ export function OmniHubModal({
 
   // Bot Creator / Editor state
   const [showBotForm, setShowBotForm] = useState(false);
+  const botEditorSession = useRef(0);
   const [editingBotId, setEditingBotId] = useState<string>("");
   const [botName, setBotName] = useState("");
   const [botRole, setBotRole] = useState("");
@@ -176,6 +177,7 @@ export function OmniHubModal({
 
   // Projects state
   const [showNewProject, setShowNewProject] = useState(false);
+  const projectEditorSession = useRef(0);
   const [editingProjectId, setEditingProjectId] = useState<string>("");
   const [projName, setProjName] = useState("");
   const [projPath, setProjPath] = useState("");
@@ -221,6 +223,8 @@ export function OmniHubModal({
   const installedHarnesses = harnesses.filter((h) => h.installed);
 
   const openNewBotEditor = () => {
+    botEditorSession.current++;
+    setBotSaving(false); setAvatarBusy(false);
     setBotAvatarImage(null);
     setBotSaveError("");
     setEditingBotId("");
@@ -240,6 +244,8 @@ export function OmniHubModal({
   };
 
   const openExistingBotEditor = (b: BotProfile) => {
+    botEditorSession.current++;
+    setBotSaving(false); setAvatarBusy(false);
     setBotAvatarImage(b.avatarImage ?? null);
     setBotSaveError("");
     setEditingBotId(b.id);
@@ -259,7 +265,8 @@ export function OmniHubModal({
 
 
   const handleSaveBot = async () => {
-    if (!botName.trim()) return;
+    if (!botName.trim() || botSaving || avatarBusy) return;
+    const session = botEditorSession.current;
     const existing = bots.find((b) => b.id === editingBotId);
     setBotSaving(true); setBotSaveError("");
     try { await onUpsertBot({
@@ -289,12 +296,14 @@ export function OmniHubModal({
       customCommand: botCustomCommand.trim() || null,
       maxTurnBudgetUsd: existing?.maxTurnBudgetUsd ?? null,
     });
-    setShowBotForm(false);
-    } catch (e) { setBotSaveError(e instanceof Error ? e.message : String(e)); }
-    finally { setBotSaving(false); }
+    if (session === botEditorSession.current) setShowBotForm(false);
+    } catch (e) { if (session === botEditorSession.current) setBotSaveError(errorMessage(e)); }
+    finally { if (session === botEditorSession.current) setBotSaving(false); }
   };
 
   const openNewProjectForm = () => {
+    projectEditorSession.current++;
+    setProjSaving(false);
     setEditingProjectId("");
     setProjName("");
     setProjPath("");
@@ -309,6 +318,8 @@ export function OmniHubModal({
   };
 
   const openEditProjectForm = (p: WorkspaceEntry) => {
+    projectEditorSession.current++;
+    setProjSaving(false);
     setEditingProjectId(p.id);
     setProjName(p.name);
     setProjPath(p.path);
@@ -324,6 +335,7 @@ export function OmniHubModal({
 
   const handleSaveProject = async () => {
     if (!projName.trim() || !projPath.trim() || projSaving) return;
+    const session = projectEditorSession.current;
     setProjSaving(true); setProjSaveError("");
     try {
     await onUpsertProject({
@@ -338,9 +350,9 @@ export function OmniHubModal({
       memories: projects.find(p => p.id === editingProjectId)?.memories ?? [],
       approveAllTools: projAutoApprove,
     });
-    setShowNewProject(false);
-    } catch (error) { setProjSaveError(errorMessage(error)); }
-    finally { setProjSaving(false); }
+    if (session === projectEditorSession.current) setShowNewProject(false);
+    } catch (error) { if (session === projectEditorSession.current) setProjSaveError(errorMessage(error)); }
+    finally { if (session === projectEditorSession.current) setProjSaving(false); }
   };
 
   const handleDeleteProject = async (project: WorkspaceEntry) => {
@@ -529,7 +541,7 @@ export function OmniHubModal({
                       </div>
                       <button
                         type="button"
-                        onClick={() => setShowBotForm(false)}
+                        onClick={() => { botEditorSession.current++; setShowBotForm(false); }}
                         className="text-xs text-zinc-400 hover:text-white"
                       >
                         Cancel
@@ -585,7 +597,7 @@ export function OmniHubModal({
                     <details className="text-xs text-zinc-400"><summary className="cursor-pointer">Advanced command settings</summary><label className="block mt-2">Custom executable and arguments<input aria-label="Custom CLI command" value={botCustomCommand} onChange={e => setBotCustomCommand(e.target.value)} placeholder="Optional command override" className="block w-full mt-1 rounded bg-white/5 p-2" /></label><p className="mt-1">The selected adapter still controls command flags. Changing the adapter clears this override.</p></details>
                     {/* Model, Effort & Permission Row */}
                     <div className="grid grid-cols-3 gap-3">
-                      <BotModelSelect label="Default model" value={botModel || null} harness={installedHarnesses.find(h => h.kind === botDriver)} onChange={model => setBotModel(model ?? "")} />
+                      <BotModelSelect key={botEditorSession.current} label="Default model" value={botModel || null} harness={installedHarnesses.find(h => h.kind === botDriver)} onChange={model => setBotModel(model ?? "")} />
                       <div className="space-y-1">
                         <label className="block text-xs text-zinc-400">
                           Reasoning Effort
@@ -639,7 +651,7 @@ export function OmniHubModal({
                       </div>
                     </div>
 
-                    <AvatarPicker value={{ shape: botShape, color: botColor, avatarImage: botAvatarImage }} onBusyChange={setAvatarBusy} onChange={next => {
+                    <AvatarPicker key={botEditorSession.current} active={open && showBotForm && section === "bots"} value={{ shape: botShape, color: botColor, avatarImage: botAvatarImage }} onBusyChange={setAvatarBusy} onChange={next => {
                       setBotShape(next.shape as BotShape); setBotColor(next.color as BotColor); setBotAvatarImage(next.avatarImage ?? null);
                     }} />
                     {botSaveError && <p role="alert" className="text-sm text-red-300">{botSaveError}</p>}
@@ -773,7 +785,7 @@ export function OmniHubModal({
                       </span>
                       <button
                         type="button"
-                        onClick={() => setShowNewProject(false)}
+                        onClick={() => { projectEditorSession.current++; setShowNewProject(false); }}
                         className="text-xs text-zinc-400 hover:text-white"
                       >
                         Cancel

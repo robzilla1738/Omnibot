@@ -1,4 +1,5 @@
 import { openExternalUrl, previewOmniMessage } from "../../lib/omni-bridge";
+import type { ChatDraft } from "../../lib/drafts";
 import { renderMarkdown } from "../../lib/markdown";
 import { Collapse } from "../ui/Collapse";
 import { errorMessage, useNotices } from "../ui/Notices";
@@ -21,7 +22,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type SetStateAction } from "react";
 import type {
   ActiveBotRun,
   BotProfile,
@@ -38,7 +39,8 @@ import {
 
 export interface ChatWorkspaceProps {
   chat: ChatThread;
-  initialDraft?: string;
+  draft: ChatDraft;
+  onDraftChange: (update: (current: ChatDraft) => ChatDraft) => void;
   onChooseProject: (prompt?: string) => void;
   onManageTeam: () => void;
   onOpenMemory: () => void;
@@ -106,7 +108,8 @@ const COPY_FEEDBACK_MS = 1500;
 
 export function ChatWorkspace({
   chat,
-  initialDraft = "",
+  draft,
+  onDraftChange,
   onChooseProject, onManageTeam, onOpenMemory,
   bots,
   harnesses,
@@ -124,18 +127,20 @@ export function ChatWorkspace({
   onStopChat,
 }: ChatWorkspaceProps) {
   const { runAction } = useNotices();
-  const [input, setInput] = useState(initialDraft);
+  const input = draft.text;
+  const setInput = (value: SetStateAction<string>) => onDraftChange(current => ({ ...current, text: typeof value === "function" ? value(current.text) : value }));
   const [sendError, setSendError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const sendPending = useRef(false);
   const [composerMenuOpen, setComposerMenuOpen] = useState(false);
-  const [selectedSkill, setSelectedSkill] = useState<LocalSkillItem | null>(null);
-  const [overrideBotId, setOverrideBotId] = useState<string | undefined>(undefined);
-  const [overrideModel, setOverrideModel] = useState<string | undefined>(undefined);
-  const [reasoningEffort, setReasoningEffort] = useState<"low" | "medium" | "high">(
-    "medium"
-  );
-  const [parallelMode, setParallelMode] = useState(false);
+  const selectedSkill = skills.find(skill => skill.slug === draft.skillSlug) ?? null;
+  const setSelectedSkill = (skill: LocalSkillItem | null) => onDraftChange(current => ({ ...current, skillSlug: skill?.slug }));
+  const { overrideBotId, overrideModel, overrideEffort } = draft;
+  const setOverrideBotId = (id: string | undefined) => onDraftChange(current => ({ ...current, overrideBotId: id, overrideModel: undefined, overrideEffort: undefined }));
+  const setOverrideModel = (model: string | undefined) => onDraftChange(current => ({ ...current, overrideModel: model }));
+  const setReasoningEffort = (effort: string | undefined) => onDraftChange(current => ({ ...current, overrideEffort: effort }));
+  const parallelMode = draft.parallelMode ?? false;
+  const setParallelMode = (value: SetStateAction<boolean>) => onDraftChange(current => ({ ...current, parallelMode: typeof value === "function" ? value(current.parallelMode ?? false) : value }));
 
   const [slashIndex, setSlashIndex] = useState(0);
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -169,11 +174,7 @@ export function ChatWorkspace({
     return bots.find((b) => b.id === defaultSpeakerId && !b.archived) ?? chatParticipants[0];
   }, [overrideBotId, bots, chatParticipants, defaultSpeakerId]);
 
-  useEffect(() => {
-    setOverrideModel(undefined);
-    const effort = activeSpeakerBot?.reasoningEffort;
-    setReasoningEffort(effort === "low" ? "low" : effort === "high" ? "high" : "medium");
-  }, [activeSpeakerBot?.id, activeSpeakerBot?.cliDriver, activeSpeakerBot?.model, activeSpeakerBot?.reasoningEffort]);
+  const reasoningEffort = overrideEffort ?? activeSpeakerBot?.reasoningEffort;
 
   const [routePreview, setRoutePreview] = useState("");
   // Snapshots replace arrays on every refresh, so depend on value keys rather than identities.
@@ -289,48 +290,43 @@ export function ChatWorkspace({
     setMentionIndex(0);
   }, [mentionMatch?.query]);
 
-  const applySlashSelection = useCallback(
-    (
-      item:
-        | { kind: "command"; cmd: (typeof SWARM_SLASH_COMMANDS)[number] }
-        | { kind: "skill"; skill: LocalSkillItem }
-    ) => {
-      if (item.kind === "skill") {
-        setSelectedSkill(item.skill);
-        setInput((prev) =>
-          prev.replace(/(?:^|\s)\/[a-zA-Z0-9_-]*$/, "").trimStart()
-        );
-      } else {
-        if (item.cmd.slug === "race") {
-          setParallelMode(true);
-        }
-        setInput((prev) =>
-          prev.replace(/(?:^|\s)\/[a-zA-Z0-9_-]*$/, ` ${item.cmd.prefix}`).trimStart()
-        );
-      }
-      composerInputRef.current?.focus();
-    },
-    []
-  );
-
-  const applyMentionSelection = useCallback(
-    (entry: { kind: "all" } | { kind: "bot"; bot: BotProfile }) => {
-      if (entry.kind === "all") {
+  const applySlashSelection = (
+    item:
+      | { kind: "command"; cmd: (typeof SWARM_SLASH_COMMANDS)[number] }
+      | { kind: "skill"; skill: LocalSkillItem }
+  ) => {
+    if (item.kind === "skill") {
+      setSelectedSkill(item.skill);
+      setInput((prev) =>
+        prev.replace(/(?:^|\s)\/[a-zA-Z0-9_-]*$/, "").trimStart()
+      );
+    } else {
+      if (item.cmd.slug === "race") {
         setParallelMode(true);
-        setInput((prev) =>
-          prev.replace(/(?:^|\s)@[a-zA-Z0-9_-]*$/, " @all ").trimStart()
-        );
-      } else {
-        setInput((prev) =>
-          prev
-            .replace(/(?:^|\s)@[a-zA-Z0-9_-]*$/, ` @${entry.bot.slug} `)
-            .trimStart()
-        );
       }
-      composerInputRef.current?.focus();
-    },
-    []
-  );
+      setInput((prev) =>
+        prev.replace(/(?:^|\s)\/[a-zA-Z0-9_-]*$/, ` ${item.cmd.prefix}`).trimStart()
+      );
+    }
+    composerInputRef.current?.focus();
+  };
+
+  const applyMentionSelection = (entry: { kind: "all" } | { kind: "bot"; bot: BotProfile }) => {
+    if (entry.kind === "all") {
+      setParallelMode(true);
+      setInput((prev) =>
+        prev.replace(/(?:^|\s)@[a-zA-Z0-9_-]*$/, " @all ").trimStart()
+      );
+    } else {
+      setInput((prev) =>
+        prev
+          .replace(/(?:^|\s)@[a-zA-Z0-9_-]*$/, ` @${entry.bot.slug} `)
+          .trimStart()
+      );
+    }
+    composerInputRef.current?.focus();
+  };
+
 
   const handleSend = useCallback(
     async (overridePrompt?: string, targetBotId?: string) => {
@@ -345,13 +341,8 @@ export function ChatWorkspace({
       setSending(true);
       setSendError(null);
 
-      if (!overridePrompt) {
-        setInput("");
-      }
-      const skillSlug = selectedSkill?.slug;
+      const skillSlug = draft.skillSlug;
       const isParallel = parallelMode;
-      setSelectedSkill(null);
-      setParallelMode(false);
 
       try {
       await onSendMessage({
@@ -359,14 +350,17 @@ export function ChatWorkspace({
         skillSlug,
         overrideBotId: targetBotId ?? activeSpeakerBot?.id,
         overrideModel: targetBotId && targetBotId !== activeSpeakerBot?.id ? undefined : overrideModel,
-        overrideEffort: reasoningEffort,
+        overrideEffort: targetBotId && targetBotId !== activeSpeakerBot?.id ? undefined : overrideEffort,
         parallelMode: isParallel,
         summarize,
       });
+      onDraftChange(current => ({
+        ...current,
+        text: !overridePrompt && current.text === input ? "" : current.text,
+        skillSlug: current.skillSlug === skillSlug ? undefined : current.skillSlug,
+        parallelMode: current.parallelMode === draft.parallelMode ? false : current.parallelMode,
+      }));
       } catch (error) {
-        if (!overridePrompt) setInput(trimmed);
-        setSelectedSkill(selectedSkill);
-        setParallelMode(isParallel);
         setSendError(error instanceof Error ? error.message : "Could not send message.");
       } finally {
         sendPending.current = false;
@@ -377,13 +371,13 @@ export function ChatWorkspace({
       chat.workspacePath, onChooseProject,
       input,
       isStreaming,
-      selectedSkill,
+      draft, onDraftChange,
       parallelMode,
       summarize,
       onSendMessage,
       activeSpeakerBot?.id,
       overrideModel,
-      reasoningEffort,
+      overrideEffort,
     ]
   );
 
@@ -468,7 +462,7 @@ export function ChatWorkspace({
           <span className="bot-header-chevron" aria-hidden="true"><ChevronRight size={18} /></span>
         </button>
         <button onClick={() => onChooseProject()} title={chat.workspacePath ?? "Start a project work chat"} className="max-w-[260px] truncate rounded-md px-2 py-1 text-[11px] text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04]">
-          {chat.workspacePath ? chat.workspacePath.split("/").filter(Boolean).at(-1) : "Personal space"}
+          {chat.workspacePath ? chat.workspacePath.split("/").filter(Boolean).pop() : "Personal space"}
         </button>
       </div>
 
@@ -793,6 +787,7 @@ export function ChatWorkspace({
             <div className="px-2 pb-1 pt-2">
               <div className="text-[10.5px] font-medium text-zinc-400 mb-1.5">
                 Reasoning Effort
+                <button type="button" className="ml-2 underline" onClick={() => setReasoningEffort(undefined)} aria-pressed={overrideEffort === undefined}>Bot default{overrideEffort === undefined && reasoningEffort ? ` (${reasoningEffort})` : ""}</button>
               </div>
               <div className="grid grid-cols-3 gap-1.5">
                 {(["low", "medium", "high"] as const).map((lvl) => (

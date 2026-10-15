@@ -1,0 +1,20 @@
+[
+  {
+    "advisory": "RUSTSEC-2024-0370",
+    "package": "proc-macro-error",
+    "version": "1.0.4",
+    "kind": "unmaintained",
+    "excludedTargets": ["aarch64-apple-darwin", "x86_64-apple-darwin"],
+    "expires": "2027-01-15",
+    "reason": "Transitive GTK dependency retained in the cross-platform lockfile, absent from both supported macOS build graphs. Review upstream Tauri/GTK upgrades before adding Linux support. The audit verifies target exclusion on every run."
+  },
+  {
+    "advisory": "RUSTSEC-2024-0429",
+    "package": "glib",
+    "version": "0.18.5",
+    "kind": "unsound",
+    "excludedTargets": ["aarch64-apple-darwin", "x86_64-apple-darwin"],
+    "expires": "2027-01-15",
+    "reason": "Affected GTK code is absent from both supported macOS build graphs. Linux is unsupported; upgrade the GTK/Tauri dependency chain before supporting it. The audit verifies target exclusion on every run."
+  }
+]

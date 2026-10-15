@@ -5,6 +5,6 @@ const baseURL = `http://localhost:${port}`;
 
 export default defineConfig({
   testDir: "./tests",
-  use: { baseURL, browserName: "chromium", channel: process.env.PLAYWRIGHT_CHANNEL || undefined, viewport: { width: 1280, height: 840 } },
+  use: { baseURL, browserName: process.env.PLAYWRIGHT_BROWSER === "webkit" ? "webkit" : "chromium", channel: process.env.PLAYWRIGHT_CHANNEL || undefined, viewport: { width: 1280, height: 840 } },
   webServer: { command: `pnpm dev --port ${port} --strictPort`, url: baseURL, reuseExistingServer: !process.env.CI },
 });

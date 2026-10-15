@@ -5,6 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const LEGACY_HOME_PROMPT: &str = "Help the user think, plan, remember preferences, and coordinate their team. Start project work in a project-linked chat. Delegate only to available teammates using complete explicit handoff blocks.";
+pub(crate) const DEFAULT_SYSTEM_PROMPT: &str = "Help the user with any task supported by the available tools: thinking, research, writing, coding, files, and coordinating their team. Remember saved preferences. Projects provide optional workspace context. Follow the user’s explicit requests within configured permissions. Delegate only to available teammates using complete explicit handoff blocks.";
+
 fn private_dir(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -100,7 +103,9 @@ fn mark_bot_homes(store: &mut PersistedStore) {
 
 pub fn migrate(store: &mut PersistedStore) {
     for bot in &mut store.bots {
-        if bot.system_prompt == "Help the user think, plan, remember preferences, and coordinate their team. Start project work in a project-linked chat. Delegate only to available teammates using complete explicit handoff blocks." { bot.system_prompt = "Help the user with any task supported by the available tools: thinking, research, writing, coding, files, and coordinating their team. Remember saved preferences. Projects provide optional workspace context. Follow the user’s explicit requests within configured permissions. Delegate only to available teammates using complete explicit handoff blocks.".into(); }
+        if bot.system_prompt == LEGACY_HOME_PROMPT {
+            bot.system_prompt = DEFAULT_SYSTEM_PROMPT.into();
+        }
     }
     if store.home_layout_version >= 3 {
         return;
@@ -187,12 +192,6 @@ pub fn migrate(store: &mut PersistedStore) {
         {
             bot.role_title = "Your personal assistant".into();
         }
-        if bot
-            .system_prompt
-            .starts_with("You are the main coordinator in Omni Bot")
-        {
-            bot.system_prompt = "Help the user with any task supported by the available tools: thinking, research, writing, coding, files, and coordinating their team. Remember saved preferences. Projects provide optional workspace context. Follow the user’s explicit requests within configured permissions. Delegate only to available teammates using complete explicit handoff blocks.".into();
-        }
     }
     if store.preferences.global_instructions == "Work in the selected local workspace. Delegate only to available teammates using complete, explicit handoff blocks." { store.preferences.global_instructions = "Delegate only to available teammates using complete, explicit handoff blocks.".into(); }
     mark_bot_homes(store);
@@ -204,6 +203,35 @@ mod tests {
     use super::*;
     use crate::test_support::{input, Fixture};
     use serde_json::json;
+
+    #[test]
+    fn only_exact_seeded_prompts_are_migrated() {
+        let f = Fixture::new(&["A"]);
+        let baseline = f.state.read().unwrap().store.clone();
+        for layout in 0..=4 {
+            for prompt in [
+                LEGACY_HOME_PROMPT.to_string(),
+                format!("{LEGACY_HOME_PROMPT} Keep my custom instructions."),
+                "You are the main coordinator in Omni Bot. Keep my custom instructions.".into(),
+                "My CLI inside Botfinity. My Bot in Omni Bot on macOS.".into(),
+            ] {
+                let mut store = baseline.clone();
+                store.home_layout_version = layout;
+                store.bots[0].is_primary = true;
+                store.bots[0].system_prompt = prompt.clone();
+                migrate(&mut store);
+                let expected = if prompt == LEGACY_HOME_PROMPT {
+                    DEFAULT_SYSTEM_PROMPT
+                } else {
+                    &prompt
+                };
+                assert_eq!(store.bots[0].system_prompt, expected);
+                let migrated = serde_json::to_value(&store).unwrap();
+                migrate(&mut store);
+                assert_eq!(serde_json::to_value(&store).unwrap(), migrated);
+            }
+        }
+    }
 
     #[test]
     fn migration_preserves_work_history_and_is_idempotent() {
