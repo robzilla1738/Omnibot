@@ -716,7 +716,7 @@ pub async fn execute_bot_turn(state: SharedOmniState, req: DriverTurnRequest) ->
         if !stdout_open && !stderr_open && child.try_wait().ok().flatten().is_some() {
             break;
         }
-        if is_chat_cancelled(&state, &req.chat_id) {
+        if crate::orchestrator::is_cancelled(&state, &req.chat_id) {
             was_cancelled = true;
             terminate_process_tree(&mut child).await;
             break;
@@ -935,13 +935,6 @@ async fn terminate_process_tree(child: &mut tokio::process::Child) {
         }
     }
     let _ = child.kill().await;
-}
-
-fn is_chat_cancelled(state: &SharedOmniState, chat_id: &str) -> bool {
-    state
-        .read()
-        .map(|g| g.cancelled_chats.contains(chat_id))
-        .unwrap_or(false)
 }
 
 // Accept terminal usage envelopes only. Streaming snapshots can repeat, refer to

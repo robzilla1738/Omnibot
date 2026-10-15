@@ -513,7 +513,7 @@ export function InspectorDrawer({
                       </div>
                       <div className="text-xs text-[#8e8d8a]  truncate flex items-center gap-1.5">
                         <GitBranch className="w-3 h-3 text-emerald-400 shrink-0" />
-                        <span>{gitStatus.branch || "main"}</span>
+                        <span>{gitStatus.branch || "Unknown branch"}</span>
                         {gitStatus.changedFiles.length > 0 && (
                           <span className="text-amber-300">
                             · {gitStatus.changedFiles.length} modified
@@ -1159,7 +1159,7 @@ export function InspectorDrawer({
                             {(act.durationMs / 1000).toFixed(1)}s
                           </span>
                         </div>
-                        <p className="text-[12px] text-[#8e8d8a] truncate">
+                        <p className="text-[12px] text-[#8e8d8a] truncate" title={act.summary}>
                           {act.summary}
                         </p>
                       </div>

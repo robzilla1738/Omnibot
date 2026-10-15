@@ -436,7 +436,7 @@ pub fn create_chat_thread(
         if !participants.contains(id)
             || model
                 .as_ref()
-                .is_some_and(|m| m.len() > 256 || m.chars().any(char::is_control))
+                .is_some_and(|m| !crate::lifecycle::valid_model_id(m))
         {
             return Err("Choose a valid model for a chat participant.".into());
         }
@@ -800,7 +800,36 @@ pub fn delete_chat_thread(state: &SharedOmniState, id: &str) -> Result<OmniSnaps
     guard.persist_or_restore(previous)?;
     crate::terminal::remove_chat_sessions(&mut guard, id);
     guard.emit(OmniStreamEvent::StateUpdated { chat_id: None });
+    spawn_worktree_cleanup(state.clone(), guard.data_dir.clone(), id.to_string());
     Ok(guard.snapshot())
+}
+
+/// Removing worktrees can take minutes on large checkouts, so it runs after the
+/// deletion is saved. Anything kept (uncommitted or unmerged work) is reported.
+fn spawn_worktree_cleanup(state: SharedOmniState, data_dir: std::path::PathBuf, chat_id: String) {
+    std::thread::spawn(move || {
+        let cleanup = crate::git_ops::remove_chat_worktrees(&data_dir, &chat_id);
+        if cleanup.removed.is_empty() && cleanup.kept.is_empty() {
+            return;
+        }
+        let Ok(mut guard) = state.write() else {
+            return;
+        };
+        let mut detail = format!(
+            "Removed {} worktree item(s) for a deleted chat.",
+            cleanup.removed.len()
+        );
+        for kept in &cleanup.kept {
+            detail.push_str(&format!(" Kept {}: {}.", kept.item, kept.reason));
+        }
+        let status = if cleanup.kept.is_empty() {
+            "complete"
+        } else {
+            "warning"
+        };
+        guard.record_activity("Worktree cleanup", detail, status, 0);
+        guard.emit(OmniStreamEvent::StateUpdated { chat_id: None });
+    });
 }
 
 async fn http_delete_chat(
@@ -1365,7 +1394,7 @@ pub async fn git_commit(
 ) -> Result<OmniSnapshot, String> {
     let root = git_root(&state, Some(&chat_id), task_id.as_deref())?;
     let operation_id = uuid::Uuid::new_v4().to_string();
-    let _lease = crate::execution::acquire(state.clone(), &chat_id, &operation_id, &root).await?;
+    let _lease = crate::execution::acquire_for_git(state.clone(), &operation_id, &root).await?;
     tokio::task::spawn_blocking(move || git_stage_and_commit(&root, &message))
         .await
         .map_err(|e| e.to_string())??;
@@ -1384,7 +1413,7 @@ pub async fn git_discard(
 ) -> Result<OmniSnapshot, String> {
     let root = git_root(&state, Some(&chat_id), task_id.as_deref())?;
     let operation_id = uuid::Uuid::new_v4().to_string();
-    let _lease = crate::execution::acquire(state.clone(), &chat_id, &operation_id, &root).await?;
+    let _lease = crate::execution::acquire_for_git(state.clone(), &operation_id, &root).await?;
     tokio::task::spawn_blocking(move || git_discard_file(&root, &file_path))
         .await
         .map_err(|e| e.to_string())??;

@@ -64,11 +64,13 @@ For deliberate delegation to a room participant or assigned project teammate, a 
 <handoff to="Codex" mode="sequential">Review the changes in the named worktree and report regressions.</handoff>
 ```
 
-Git worktrees start from committed HEAD, do not include uncommitted changes automatically, and are not merged automatically. Review their changes before merging.
+Each reply can start at most 4 handoffs and each workflow at most 24 bot turns; skipped handoffs are explained in the chat.
+
+Git worktrees start from committed HEAD, do not include uncommitted changes automatically, and are not merged automatically. Review their changes before merging. Deleting a chat removes its clean worktrees and merged `omni/` branches; anything with uncommitted or unmerged work is kept and listed in the Inspector activity.
 
 ## Routines and usage
 
-Routines support manual, daily, weekday, and weekly schedules with a selected bot and model. Scheduled runs use local time while Omnibot is open; missed runs are not replayed. Older cron entries remain manual until configured through the schedule picker.
+Routines support manual, daily, weekday, and weekly schedules with a selected bot and model. Scheduled runs use local time while Omnibot is open. A run delayed by sleep or a busy chat still starts within 60 minutes (the routine shows waiting, then skipped if the window closes); runs missed while Omnibot was closed are not replayed. A routine created after today's time first runs at the next scheduled time. Older cron entries remain manual until configured through the schedule picker.
 
 Token counts and cost come from CLI reports. Missing metrics remain unavailable, and reported cost may differ from your provider invoice. Dollar guardrails depend on when a CLI reports cost; they are not provider-side spending caps. A budget of 0 means no limit. When a CLI reports cost only with its final answer (as Claude Code does), Omnibot keeps the answer and adds a notice instead of stopping the turn. Duration is measured locally.
 

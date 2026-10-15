@@ -979,7 +979,9 @@ mod tests {
         assert!(terminal.send(Input::Write(b"bad".to_vec())).is_err());
         f.wait().await;
         let captured = output(&terminal);
-        assert!(captured.contains("partialfinished"));
+        // stdout and stderr are separate pipes, so their relative order is not guaranteed.
+        let partial = captured.find("partial").unwrap();
+        assert!(captured.find("finished").is_some_and(|i| i > partial));
         assert!(captured.contains("diagnostic"));
     }
 
